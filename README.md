@@ -65,7 +65,15 @@ For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
 ## Download
 
-See the [download page](https://ghostty.org/download) on the Ghostty website.
+Mosttly Ghostty currently publishes macOS builds through GitHub Releases:
+
+- [Download the latest macOS DMG](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/Mosttly.dmg)
+- [Download the latest macOS zip](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/Mosttly-macOS-universal.zip)
+- [View all releases](https://github.com/scottmcpherson/mosttly-ghostty/releases)
+
+These builds are produced from `mosttly-v*` release tags. Until Developer ID
+signing and notarization are configured for this fork, macOS may require
+right-clicking the app and choosing Open the first time it launches.
 
 ## Documentation
 

@@ -1,0 +1,234 @@
+name: Mosttly macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, for example mosttly-v0.1.0"
+        required: true
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "mosttly-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mosttly-macos-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build macOS app
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    env:
+      ZIG_LOCAL_CACHE_DIR: /Users/runner/zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /Users/runner/zig/global-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            PRERELEASE="false"
+          else
+            TAG="${{ inputs.tag }}"
+            PRERELEASE="${{ inputs.prerelease }}"
+          fi
+
+          if [[ ! "$TAG" =~ ^mosttly-v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like mosttly-v0.1.0 or mosttly-v0.1.0-beta.1" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#mosttly-v}"
+          BUILD="$(git rev-list --count HEAD)"
+          COMMIT="$(git rev-parse --short HEAD)"
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "build=$BUILD"
+            echo "commit=$COMMIT"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build GhosttyKit and resources
+        run: |
+          nix develop -c zig build \
+            -Doptimize=ReleaseFast \
+            -Demit-macos-app=false \
+            -Dversion-string="${{ steps.meta.outputs.version }}"
+
+      - name: Build Mosttly.app
+        run: |
+          nix develop -c nu macos/build.nu \
+            --configuration Release \
+            --action build
+
+      - name: Update app metadata
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD: ${{ steps.meta.outputs.build }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          APP="macos/build/Release/Mosttly.app"
+          INFO="$APP/Contents/Info.plist"
+
+          test -d "$APP"
+          /usr/libexec/PlistBuddy -c "Set :GhosttyCommit $COMMIT" "$INFO"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$INFO"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$INFO"
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MOSTTLY_MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MOSTTLY_MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MOSTTLY_MACOS_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.MOSTTLY_MACOS_CI_KEYCHAIN_PWD }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_CERTIFICATE_NAME:-}" ]]; then
+            echo "Developer ID certificate secrets are not configured; using ad-hoc signing."
+            echo "MOSTTLY_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "MOSTTLY_NOTARIZE=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+
+          echo "MOSTTLY_SIGNING_IDENTITY=$MACOS_CERTIFICATE_NAME" >> "$GITHUB_ENV"
+          echo "MOSTTLY_NOTARIZE=1" >> "$GITHUB_ENV"
+
+      - name: Codesign app
+        run: |
+          set -euo pipefail
+          APP="macos/build/Release/Mosttly.app"
+          IDENTITY="${MOSTTLY_SIGNING_IDENTITY:--}"
+
+          if [[ "$IDENTITY" == "-" ]]; then
+            /usr/bin/codesign --force --deep --sign - "$APP"
+            exit 0
+          fi
+
+          for path in \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+            "$APP/Contents/Frameworks/Sparkle.framework" \
+            "$APP/Contents/PlugIns/DockTilePlugin.plugin"; do
+            if [[ -e "$path" ]]; then
+              /usr/bin/codesign --verbose --force --sign "$IDENTITY" --options runtime --timestamp "$path"
+            fi
+          done
+
+          /usr/bin/codesign \
+            --verbose \
+            --force \
+            --sign "$IDENTITY" \
+            --options runtime \
+            --timestamp \
+            --entitlements macos/Ghostty.entitlements \
+            "$APP"
+
+      - name: Package app
+        run: |
+          set -euo pipefail
+          APP="macos/build/Release/Mosttly.app"
+
+          ditto -c -k --keepParent "$APP" Mosttly-macOS-universal.zip
+
+          mkdir -p dmgroot
+          ditto "$APP" dmgroot/Mosttly.app
+          ln -s /Applications dmgroot/Applications
+          hdiutil create \
+            -volname "Mosttly" \
+            -srcfolder dmgroot \
+            -ov \
+            -format UDZO \
+            Mosttly.dmg
+
+          if [[ "${MOSTTLY_SIGNING_IDENTITY:--}" != "-" ]]; then
+            /usr/bin/codesign --force --sign "$MOSTTLY_SIGNING_IDENTITY" --timestamp Mosttly.dmg
+          fi
+
+      - name: Notarize DMG
+        if: env.MOSTTLY_NOTARIZE == '1'
+        env:
+          APPLE_NOTARIZATION_ISSUER: ${{ secrets.MOSTTLY_APPLE_NOTARIZATION_ISSUER }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.MOSTTLY_APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.MOSTTLY_APPLE_NOTARIZATION_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APPLE_NOTARIZATION_ISSUER:-}" || -z "${APPLE_NOTARIZATION_KEY_ID:-}" || -z "${APPLE_NOTARIZATION_KEY:-}" ]]; then
+            echo "Notarization secrets are not configured; skipping notarization."
+            exit 0
+          fi
+
+          echo "$APPLE_NOTARIZATION_KEY" > notarization_key.p8
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --key notarization_key.p8 \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER"
+          rm notarization_key.p8
+
+          xcrun notarytool submit Mosttly.dmg --keychain-profile "notarytool-profile" --wait
+          xcrun stapler staple Mosttly.dmg
+          xcrun stapler staple macos/build/Release/Mosttly.app
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" Mosttly.dmg Mosttly-macOS-universal.zip --clobber
+          else
+            args=()
+            if [[ "$PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "Mosttly Ghostty $VERSION" \
+              --notes "macOS build for Mosttly Ghostty $VERSION." \
+              "${args[@]}" \
+              Mosttly.dmg \
+              Mosttly-macOS-universal.zip
+          fi
