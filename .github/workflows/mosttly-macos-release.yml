@@ -219,16 +219,20 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" Mosttly.dmg Mosttly-macOS-universal.zip --clobber
           else
-            args=()
             if [[ "$PRERELEASE" == "true" ]]; then
-              args+=(--prerelease)
+              gh release create "$TAG" \
+                --target "$GITHUB_SHA" \
+                --title "Mosttly Ghostty $VERSION" \
+                --notes "macOS build for Mosttly Ghostty $VERSION." \
+                --prerelease \
+                Mosttly.dmg \
+                Mosttly-macOS-universal.zip
+            else
+              gh release create "$TAG" \
+                --target "$GITHUB_SHA" \
+                --title "Mosttly Ghostty $VERSION" \
+                --notes "macOS build for Mosttly Ghostty $VERSION." \
+                Mosttly.dmg \
+                Mosttly-macOS-universal.zip
             fi
-
-            gh release create "$TAG" \
-              --target "$GITHUB_SHA" \
-              --title "Mosttly Ghostty $VERSION" \
-              --notes "macOS build for Mosttly Ghostty $VERSION." \
-              "${args[@]}" \
-              Mosttly.dmg \
-              Mosttly-macOS-universal.zip
           fi
