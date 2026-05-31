@@ -26,6 +26,7 @@ const HookInput = struct {
     transcript_path: ?[]const u8 = null,
     hook_event_name: ?[]const u8 = null,
     tool_name: ?[]const u8 = null,
+    prompt: ?[]const u8 = null,
 
     fn deinit(self: HookInput, alloc: Allocator) void {
         if (self.session_id) |v| alloc.free(v);
@@ -34,6 +35,7 @@ const HookInput = struct {
         if (self.transcript_path) |v| alloc.free(v);
         if (self.hook_event_name) |v| alloc.free(v);
         if (self.tool_name) |v| alloc.free(v);
+        if (self.prompt) |v| alloc.free(v);
     }
 };
 
@@ -139,6 +141,11 @@ fn emitHookEvent(alloc: Allocator, agent: []const u8, event_name: []const u8) !v
     try writeOptionalStringField(&json, "cwd", input.cwd);
     try writeOptionalStringField(&json, "transcript_path", input.transcript_path);
     try writeOptionalStringField(&json, "hook_event_name", input.hook_event_name);
+    if (input.prompt) |prompt| {
+        const prompt_title = try titleFromPrompt(alloc, prompt);
+        defer if (prompt_title) |title| alloc.free(title);
+        try writeOptionalStringField(&json, "prompt_title", prompt_title);
+    }
 
     if (try envOwned(alloc, "GHOSTTY_AGENT_PID")) |pid_raw| {
         defer alloc.free(pid_raw);
@@ -153,7 +160,7 @@ fn emitHookEvent(alloc: Allocator, agent: []const u8, event_name: []const u8) !v
     try json.write(@as(f64, @floatFromInt(timestamp_ms)) / 1000.0);
     try json.endObject();
 
-    try appendLine(event_file, out.written());
+    try appendLine(alloc, event_file, out.written());
 }
 
 fn writeOptionalStringField(json: *std.json.Stringify, key: []const u8, value: ?[]const u8) !void {
@@ -179,6 +186,7 @@ fn parseHookInput(alloc: Allocator, bytes: []const u8) !HookInput {
         .transcript_path = try dupeField(alloc, object, &.{ "transcript_path", "transcriptPath" }),
         .hook_event_name = try dupeField(alloc, object, &.{ "hook_event_name", "hookEventName" }),
         .tool_name = try dupeField(alloc, object, &.{ "tool_name", "toolName", "name" }),
+        .prompt = try dupeField(alloc, object, &.{ "prompt", "user_prompt", "userPrompt" }),
     };
 }
 
@@ -275,7 +283,65 @@ fn agentDisplayName(agent: []const u8) []const u8 {
     return agent;
 }
 
-fn appendLine(path: []const u8, line: []const u8) !void {
+fn titleFromPrompt(alloc: Allocator, prompt: []const u8) !?[]const u8 {
+    const trimmed = std.mem.trim(u8, prompt, &std.ascii.whitespace);
+    if (trimmed.len == 0) return null;
+
+    var out = std.ArrayListUnmanaged(u8).empty;
+    errdefer out.deinit(alloc);
+
+    var word_count: usize = 0;
+    var in_word = false;
+    var pending_space = false;
+    for (trimmed) |c| {
+        const is_space = std.ascii.isWhitespace(c);
+        const is_control = c < 0x20 or c == 0x7f;
+        if (is_space or is_control) {
+            pending_space = out.items.len > 0;
+            in_word = false;
+            continue;
+        }
+
+        if (!in_word) {
+            if (word_count >= 8) break;
+            if (pending_space and out.items.len > 0) try out.append(alloc, ' ');
+            word_count += 1;
+            in_word = true;
+            pending_space = false;
+        }
+
+        if (out.items.len >= 56) break;
+        try out.append(alloc, c);
+    }
+
+    while (out.items.len > 0 and isTrailingTitleSeparator(out.items[out.items.len - 1])) {
+        _ = out.pop();
+    }
+
+    var first_alpha: ?usize = null;
+    for (out.items, 0..) |c, i| {
+        if (std.ascii.isAlphabetic(c)) {
+            first_alpha = i;
+            break;
+        }
+    }
+    const idx = first_alpha orelse {
+        out.deinit(alloc);
+        return null;
+    };
+    out.items[idx] = std.ascii.toUpper(out.items[idx]);
+
+    return try out.toOwnedSlice(alloc);
+}
+
+fn isTrailingTitleSeparator(c: u8) bool {
+    return switch (c) {
+        ' ', '.', ',', ':', ';', '!', '?', '-', '_', '"', '\'', '`', ')', ']', '}' => true,
+        else => false,
+    };
+}
+
+fn appendLine(alloc: Allocator, path: []const u8, line: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
     const fd = try std.posix.open(path, .{
         .ACCMODE = .WRONLY,
@@ -285,8 +351,12 @@ fn appendLine(path: []const u8, line: []const u8) !void {
     }, 0o600);
     var file = std.fs.File{ .handle = fd };
     defer file.close();
-    try file.writeAll(line);
-    try file.writeAll("\n");
+
+    const framed = try alloc.alloc(u8, line.len + 1);
+    defer alloc.free(framed);
+    @memcpy(framed[0..line.len], line);
+    framed[line.len] = '\n';
+    try file.writeAll(framed);
 }
 
 fn installCodexHooks(alloc: Allocator) !void {
@@ -850,6 +920,49 @@ test "agent hook state normalization" {
     try std.testing.expectEqual(NormalizedState.idle, normalizeState("SessionEnd", null).?);
     try std.testing.expectEqual(NormalizedState.errored, normalizeState("failure", null).?);
     try std.testing.expectEqual(NormalizedState.needs_input, normalizeState("pre-tool-use", "AskUserQuestion").?);
+}
+
+test "append line frames writes with a trailing newline" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("events");
+    const dir_path = try tmp.dir.realpathAlloc(alloc, "events");
+    defer alloc.free(dir_path);
+    const path = try std.fs.path.join(alloc, &.{ dir_path, "agent.jsonl" });
+    defer alloc.free(path);
+
+    try appendLine(alloc, path, "{\"event\":\"prompt-submit\"}");
+
+    const contents = try tmp.dir.readFileAlloc(alloc, "events/agent.jsonl", 1024);
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("{\"event\":\"prompt-submit\"}\n", contents);
+}
+
+test "prompt title derives from first prompt with capitalized first letter" {
+    const alloc = std.testing.allocator;
+    const title = (try titleFromPrompt(
+        alloc,
+        "  fix codex sidebar titles when thread names are missing\nthen verify",
+    )).?;
+    defer alloc.free(title);
+
+    try std.testing.expectEqualStrings("Fix codex sidebar titles when thread names are", title);
+}
+
+test "hook input parses prompt and emits prompt title" {
+    const alloc = std.testing.allocator;
+    const input = try parseHookInput(alloc,
+        \\{"prompt":"test comment","session_id":"s1"}
+    );
+    defer input.deinit(alloc);
+
+    try std.testing.expectEqualStrings("test comment", input.prompt.?);
+
+    const title = (try titleFromPrompt(alloc, input.prompt.?)).?;
+    defer alloc.free(title);
+    try std.testing.expectEqualStrings("Test comment", title);
 }
 
 test "codex hook install preserves non Ghostty hooks" {

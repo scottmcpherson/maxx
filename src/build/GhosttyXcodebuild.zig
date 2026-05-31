@@ -51,6 +51,26 @@ pub fn init(
     const env = try std.process.getEnvMap(b.allocator);
     const app_path = b.fmt("macos/build/{s}/Mosttly.app", .{xc_config});
 
+    const clean_app_icon_metadata = clean: {
+        const step = RunStep.create(b, "clean app icon metadata");
+        step.has_side_effects = true;
+        step.cwd = b.path("");
+        step.addArgs(&.{
+            "sh",
+            "-c",
+            b.fmt(
+                \\app="{s}"
+                \\if [ -d "$app" ]; then
+                \\  rm -f "$app"/Icon?
+                \\  xattr -d com.apple.FinderInfo "$app" 2>/dev/null || true
+                \\  xattr -d com.apple.ResourceFork "$app" 2>/dev/null || true
+                \\fi
+            , .{app_path}),
+        });
+        step.expectExitCode(0);
+        break :clean step;
+    };
+
     // Our step to build the Ghostty macOS app.
     const build = build: {
         // External environment variables can mess up xcodebuild, so
@@ -76,6 +96,7 @@ pub fn init(
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 
         // We need the xcframework
+        step.step.dependOn(&clean_app_icon_metadata.step);
         deps.xcframework.addStepDependencies(&step.step);
 
         // We also need all these resources because the xcode project
@@ -110,6 +131,7 @@ pub fn init(
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 
         // We need the xcframework
+        step.step.dependOn(&clean_app_icon_metadata.step);
         deps.xcframework.addStepDependencies(&step.step);
 
         // We also need all these resources because the xcode project

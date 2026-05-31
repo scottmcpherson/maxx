@@ -106,8 +106,29 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
     let statusValue: String?
     let sessionID: String?
     let turnID: String?
+    let promptTitle: String?
     let pid: Int?
     let timestamp: TimeInterval?
+
+    var normalizedAgent: String {
+        agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    var displayTitle: String {
+        if let statusTitle = statusTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !statusTitle.isEmpty {
+            return statusTitle
+        }
+
+        switch normalizedAgent {
+        case "claude":
+            return "Claude Code"
+        case "codex":
+            return "Codex"
+        default:
+            return agent.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -119,6 +140,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         case statusValue = "status_value"
         case sessionID = "session_id"
         case turnID = "turn_id"
+        case promptTitle = "prompt_title"
         case pid
         case timestamp
     }
@@ -129,6 +151,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         case statusValue
         case sessionId
         case turnId
+        case promptTitle
     }
 
     init(
@@ -141,6 +164,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         statusValue: String? = nil,
         sessionID: String? = nil,
         turnID: String? = nil,
+        promptTitle: String? = nil,
         pid: Int? = nil,
         timestamp: TimeInterval? = nil
     ) {
@@ -153,6 +177,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         self.statusValue = statusValue
         self.sessionID = sessionID
         self.turnID = turnID
+        self.promptTitle = promptTitle
         self.pid = pid
         self.timestamp = timestamp
     }
@@ -175,6 +200,8 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
             ?? alternate.decodeIfPresent(String.self, forKey: .sessionId)
         self.turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
             ?? alternate.decodeIfPresent(String.self, forKey: .turnId)
+        self.promptTitle = try container.decodeIfPresent(String.self, forKey: .promptTitle)
+            ?? alternate.decodeIfPresent(String.self, forKey: .promptTitle)
         self.pid = try container.decodeIfPresent(Int.self, forKey: .pid)
         self.timestamp = try container.decodeIfPresent(TimeInterval.self, forKey: .timestamp)
     }
@@ -183,6 +210,48 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(TerminalAgentActivityEvent.self, from: data)
+    }
+}
+
+struct CodexSessionIndexEntry: Decodable, Equatable {
+    let id: String
+    let threadName: String?
+    let updatedAt: String?
+
+    var displayTitle: String? {
+        guard let title = threadName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty
+        else { return nil }
+        return title
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case threadName = "thread_name"
+        case updatedAt = "updated_at"
+    }
+
+    static func parse(jsonLine line: String) -> CodexSessionIndexEntry? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(CodexSessionIndexEntry.self, from: data)
+    }
+
+    static func threadName(for sessionID: String, in contents: String) -> String? {
+        let normalizedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSessionID.isEmpty else { return nil }
+
+        var title: String?
+        for line in contents.components(separatedBy: .newlines) {
+            guard let entry = parse(jsonLine: line),
+                  entry.id == normalizedSessionID,
+                  let displayTitle = entry.displayTitle
+            else {
+                continue
+            }
+            title = displayTitle
+        }
+        return title
     }
 }
 
@@ -204,7 +273,7 @@ struct TerminalAgentActivityReducer {
             return nil
         }
 
-        let agent = event.agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let agent = event.normalizedAgent
         guard !agent.isEmpty else { return nil }
         guard let nextState = Self.state(from: event, agent: agent) else { return nil }
 

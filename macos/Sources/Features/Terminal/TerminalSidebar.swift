@@ -446,39 +446,11 @@ private struct TerminalSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(model.sessions) { session in
-                        TerminalSidebarRow(
-                            session: session,
-                            theme: model.theme,
-                            isEditing: model.editingSessionID == session.id,
-                            onSelect: {
-                                model.select(session)
-                            },
-                            onRename: {
-                                model.rename(session)
-                            },
-                            onClose: {
-                                model.close(session)
-                            },
-                            onCommitRename: { title in
-                                model.commitRename(session, title: title)
-                            },
-                            onCancelRename: {
-                                model.cancelRename()
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal, 7)
-                .padding(.top, 7)
-                .padding(.bottom, 8)
-            }
+            sessionList
 
-            if let updateViewModel {
-                TerminalSidebarUpdateFooter(model: updateViewModel)
-            }
+            TerminalSidebarFooter(
+                model: model,
+                updateViewModel: updateViewModel)
         }
         .frame(
             minWidth: TerminalSidebarController.minWidth,
@@ -492,21 +464,69 @@ private struct TerminalSidebarView: View {
         .environment(\.colorScheme, model.theme.colorScheme)
         .accessibilityIdentifier("TerminalSidebar")
     }
+
+    private var sessionList: some View {
+        ScrollView {
+            LazyVStack(spacing: 3) {
+                ForEach(model.sessions) { session in
+                    TerminalSidebarRow(
+                        session: session,
+                        theme: model.theme,
+                        isEditing: model.editingSessionID == session.id,
+                        onSelect: {
+                            model.select(session)
+                        },
+                        onRename: {
+                            model.rename(session)
+                        },
+                        onClose: {
+                            model.close(session)
+                        },
+                        onCommitRename: { title in
+                            model.commitRename(session, title: title)
+                        },
+                        onCancelRename: {
+                            model.cancelRename()
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.top, 7)
+            .padding(.bottom, 8)
+        }
+    }
 }
 
-private struct TerminalSidebarUpdateFooter: View {
-    @ObservedObject var model: UpdateViewModel
+private struct TerminalSidebarFooter: View {
+    @ObservedObject var model: TerminalSidebarModel
+    let updateViewModel: UpdateViewModel?
 
     var body: some View {
-        if !model.state.isIdle {
-            HStack {
-                Spacer()
-                TerminalSidebarUpdateButton(model: model)
+        HStack(spacing: 8) {
+            Button(action: {
+                SettingsWindowController.shared.show()
+            }, label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            })
+            .buttonStyle(.plain)
+            .foregroundColor(Color(nsColor: model.theme.buttonTint))
+            .help("Settings")
+            .accessibilityLabel("Settings")
+            .accessibilityIdentifier("TerminalSidebarSettingsButton")
+
+            Spacer(minLength: 0)
+
+            if let updateViewModel, !updateViewModel.state.isIdle {
+                TerminalSidebarUpdateButton(model: updateViewModel)
             }
-            .padding(.horizontal, 9)
-            .padding(.top, 7)
-            .padding(.bottom, 9)
         }
+        .padding(.horizontal, 9)
+        .padding(.top, 7)
+        .padding(.bottom, 9)
     }
 }
 

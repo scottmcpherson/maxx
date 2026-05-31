@@ -218,6 +218,21 @@ extension Ghostty {
         // A small delay that is introduced before a title change to avoid flickers
         private var titleChangeTimer: Timer?
 
+        // The latest title reported by terminal escape codes. Agent-provided
+        // titles can temporarily overlay this without destroying it.
+        private var latestTerminalTitle = ""
+
+        // Title shown while an agent that does not set its own terminal title is
+        // active. The agent name lets us clear only the overlay we own.
+        private var agentActivityTitle: String?
+        private var agentActivityTitleAgent: String?
+        private var agentActivityTitlePID: Int?
+        private var codexSessionID: String?
+        private var codexPromptTitle: String?
+        private var codexPromptTitleSessionID: String?
+        private var codexSessionIndexSource: DispatchSourceFileSystemObject?
+        private var codexSessionIndexWatchURL: URL?
+
         // A timer to fallback to ghost emoji if no title is set within the grace period
         private var titleFallbackTimer: Timer?
 
@@ -443,6 +458,7 @@ extension Ghostty {
             terminalActivityTimer?.invalidate()
             agentActivityTTLTimer?.invalidate()
             stopAgentActivityWatcher()
+            stopCodexSessionIndexWatcher()
         }
 
         override func endSearch() {
@@ -610,12 +626,14 @@ extension Ghostty {
                     // Empty means that user wants the title to be set automatically
                     // We also need to reload the config for the "title" property to be
                     // used again by this tab.
-                    let prevTitle = titleFromTerminal ?? "👻"
+                    if let titleFromTerminal {
+                        latestTerminalTitle = titleFromTerminal
+                    }
                     titleFromTerminal = nil
-                    setTitle(prevTitle)
+                    applyAutomaticTitle()
                 } else {
                     // Set the title and prevent it from being changed automatically
-                    titleFromTerminal = title
+                    titleFromTerminal = latestTerminalTitle
                     title = newTitle
                 }
             }
@@ -641,13 +659,172 @@ extension Ghostty {
                 withTimeInterval: 0.075,
                 repeats: false
             ) { [weak self] _ in
+                guard let self else { return }
+                self.latestTerminalTitle = title
+                if self.agentActivityTitleAgent != nil,
+                   !self.isAgentActivityProcessAlive() {
+                    self.setAgentActivityTitle(nil, agent: nil, pid: nil)
+                    self.stopCodexSessionTracking()
+                }
+
                 // Set the title if it wasn't manually set.
-                guard self?.titleFromTerminal == nil else {
-                    self?.titleFromTerminal = title
+                guard self.titleFromTerminal == nil else {
+                    self.titleFromTerminal = title
                     return
                 }
-                self?.title = title
+
+                self.applyAutomaticTitle()
             }
+        }
+
+        private func setAgentActivityTitle(_ title: String?, agent: String?, pid: Int?) {
+            let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let nextTitle = trimmedTitle?.isEmpty == false ? trimmedTitle : nil
+            let nextAgent = nextTitle == nil ? nil : agent
+            let nextPID = nextTitle == nil ? nil : pid
+
+            guard agentActivityTitle != nextTitle ||
+                    agentActivityTitleAgent != nextAgent ||
+                    agentActivityTitlePID != nextPID else {
+                return
+            }
+
+            agentActivityTitle = nextTitle
+            agentActivityTitleAgent = nextAgent
+            agentActivityTitlePID = nextPID
+            applyAutomaticTitle()
+        }
+
+        private func isAgentActivityProcessAlive() -> Bool {
+            guard let pid = agentActivityTitlePID else { return false }
+            let result = Darwin.kill(pid_t(pid), 0)
+            return result == 0 || errno == EPERM
+        }
+
+        private func applyAutomaticTitle() {
+            guard titleFromTerminal == nil else { return }
+
+            let nextTitle = agentActivityTitle ?? latestTerminalTitle
+            guard title != nextTitle else { return }
+            title = nextTitle
+        }
+
+        private static var codexSessionIndexURL: URL {
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex")
+                .appendingPathComponent("session_index.jsonl")
+        }
+
+        private func trackCodexSession(_ sessionID: String?) {
+            guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sessionID.isEmpty
+            else {
+                return
+            }
+
+            if codexSessionID != sessionID {
+                codexSessionID = sessionID
+                codexPromptTitle = nil
+                codexPromptTitleSessionID = sessionID
+                startCodexSessionIndexWatcher()
+            } else if codexSessionIndexSource == nil {
+                startCodexSessionIndexWatcher()
+            }
+        }
+
+        private func stopCodexSessionTracking() {
+            codexSessionID = nil
+            codexPromptTitle = nil
+            codexPromptTitleSessionID = nil
+            stopCodexSessionIndexWatcher()
+        }
+
+        private func codexSessionIndexTitle() -> String? {
+            guard let codexSessionID,
+                  let contents = try? String(contentsOf: Self.codexSessionIndexURL, encoding: .utf8)
+            else {
+                return nil
+            }
+
+            return CodexSessionIndexEntry.threadName(for: codexSessionID, in: contents)
+        }
+
+        private func refreshCodexSessionTitle() {
+            guard agentActivityTitleAgent == "codex",
+                  let title = codexSessionIndexTitle()
+            else {
+                return
+            }
+
+            setAgentActivityTitle(title, agent: "codex", pid: agentActivityTitlePID)
+        }
+
+        private func codexDisplayTitle(from event: TerminalAgentActivityEvent) -> String {
+            if let title = codexSessionIndexTitle() {
+                return title
+            }
+
+            let sessionID = event.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if codexPromptTitleSessionID != sessionID {
+                codexPromptTitle = nil
+                codexPromptTitleSessionID = sessionID
+            }
+
+            if codexPromptTitle == nil,
+               let title = event.promptTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !title.isEmpty {
+                codexPromptTitle = title
+            }
+
+            return codexPromptTitle ?? event.displayTitle
+        }
+
+        private func startCodexSessionIndexWatcher() {
+            let fileURL = Self.codexSessionIndexURL
+            let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
+            let watchURL = fileExists ? fileURL : fileURL.deletingLastPathComponent()
+
+            guard FileManager.default.fileExists(atPath: watchURL.path) else { return }
+
+            if codexSessionIndexWatchURL == watchURL, codexSessionIndexSource != nil {
+                refreshCodexSessionTitle()
+                return
+            }
+
+            stopCodexSessionIndexWatcher()
+
+            let fd = open(watchURL.path, O_EVTONLY)
+            guard fd >= 0 else {
+                Ghostty.logger.warning("failed to watch Codex session index: \(String(cString: strerror(errno)))")
+                return
+            }
+
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .extend, .delete, .rename],
+                queue: .main
+            )
+            source.setEventHandler { [weak self, fileURL] in
+                guard let self else { return }
+                if self.codexSessionIndexWatchURL != fileURL,
+                   FileManager.default.fileExists(atPath: fileURL.path) {
+                    self.startCodexSessionIndexWatcher()
+                }
+                self.refreshCodexSessionTitle()
+            }
+            source.setCancelHandler { [fd] in
+                Darwin.close(fd)
+            }
+            codexSessionIndexSource = source
+            codexSessionIndexWatchURL = watchURL
+            source.resume()
+            refreshCodexSessionTitle()
+        }
+
+        private func stopCodexSessionIndexWatcher() {
+            codexSessionIndexSource?.cancel()
+            codexSessionIndexSource = nil
+            codexSessionIndexWatchURL = nil
         }
 
         func markTerminalActivity() {
@@ -798,7 +975,34 @@ extension Ghostty {
                 return
             }
 
+            updateAgentActivityTitle(from: event, state: nextState)
             setAgentActivityState(nextState)
+        }
+
+        private func updateAgentActivityTitle(
+            from event: TerminalAgentActivityEvent,
+            state: TerminalAgentActivityState
+        ) {
+            let eventAgent = event.normalizedAgent
+
+            switch state {
+            case .running(let agent), .needsInput(let agent), .error(let agent):
+                if agent == "codex" {
+                    trackCodexSession(event.sessionID)
+                    setAgentActivityTitle(codexDisplayTitle(from: event), agent: agent, pid: event.pid)
+                } else if agentActivityTitleAgent != nil {
+                    setAgentActivityTitle(nil, agent: nil, pid: nil)
+                    stopCodexSessionTracking()
+                }
+
+            case .idle:
+                if agentActivityTitleAgent == eventAgent {
+                    setAgentActivityTitle(nil, agent: nil, pid: nil)
+                }
+                if eventAgent == "codex" {
+                    stopCodexSessionTracking()
+                }
+            }
         }
 
         func acknowledgeSidebarIndicator() {

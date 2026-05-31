@@ -105,11 +105,13 @@ actor AppIconUpdater {
             NSApplication.shared.applicationIconImage = image
         }
 
-        NSWorkspace.shared.setIcon(
-            image,
-            forFile: Bundle.main.bundlePath,
-        )
-        NSWorkspace.shared.noteFileSystemChanged(Bundle.main.bundlePath)
+        if Ghostty.launchSource != .zig_run {
+            NSWorkspace.shared.setIcon(
+                image,
+                forFile: Bundle.main.bundlePath,
+            )
+            NSWorkspace.shared.noteFileSystemChanged(Bundle.main.bundlePath)
+        }
     }
 
     private static var defaultIcon: AppIcon? {

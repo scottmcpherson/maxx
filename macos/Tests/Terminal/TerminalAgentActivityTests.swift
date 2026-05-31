@@ -4,7 +4,7 @@ import Testing
 struct TerminalAgentActivityTests {
     @Test func parsesJSONEvent() throws {
         let event = try #require(TerminalAgentActivityEvent.parse(jsonLine: """
-        {"version":1,"surface_id":"surface-1","agent":"claude","event":"prompt-submit","state":"running","session_id":"s1"}
+        {"version":1,"surface_id":"surface-1","agent":"claude","event":"prompt-submit","state":"running","session_id":"s1","prompt_title":"Fix codex titles"}
         """))
 
         #expect(event.surfaceID == "surface-1")
@@ -12,10 +12,45 @@ struct TerminalAgentActivityTests {
         #expect(event.event == "prompt-submit")
         #expect(event.state == "running")
         #expect(event.sessionID == "s1")
+        #expect(event.promptTitle == "Fix codex titles")
+    }
+
+    @Test func eventProvidesDisplayTitle() throws {
+        let titled = TerminalAgentActivityEvent(
+            surfaceID: "surface-1",
+            agent: "codex",
+            event: "prompt-submit",
+            state: "running",
+            statusTitle: " Codex "
+        )
+        #expect(titled.normalizedAgent == "codex")
+        #expect(titled.displayTitle == "Codex")
+
+        let fallback = TerminalAgentActivityEvent(
+            surfaceID: "surface-1",
+            agent: "claude",
+            event: "prompt-submit",
+            state: "running"
+        )
+        #expect(fallback.displayTitle == "Claude Code")
     }
 
     @Test func malformedJSONIsIgnored() {
         #expect(TerminalAgentActivityEvent.parse(jsonLine: "{") == nil)
+    }
+
+    @Test func codexSessionIndexProvidesLatestThreadName() {
+        let contents = """
+        {"id":"other","thread_name":"Other"}
+        {"id":"s1","thread_name":" First title "}
+        {"id":"s1","thread_name":"a-new-title","updated_at":"2026-05-31T07:49:04.508506Z"}
+        {"id":"s1","thread_name":"   "}
+        not-json
+        """
+
+        #expect(CodexSessionIndexEntry.threadName(for: "s1", in: contents) == "a-new-title")
+        #expect(CodexSessionIndexEntry.threadName(for: "missing", in: contents) == nil)
+        #expect(CodexSessionIndexEntry.threadName(for: " ", in: contents) == nil)
     }
 
     @Test func reducerMapsLifecycleStates() throws {
