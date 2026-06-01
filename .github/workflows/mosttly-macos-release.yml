@@ -1,4 +1,5 @@
 name: Mosttly macOS Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release {0}', inputs.tag) || format('Release {0}', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -8,6 +9,10 @@ on:
         required: true
       prerelease:
         description: "Mark the GitHub release as a prerelease"
+        default: false
+        type: boolean
+      replace_existing:
+        description: "Replace assets on an existing GitHub release"
         default: false
         type: boolean
   push:
@@ -47,9 +52,11 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             TAG="${GITHUB_REF_NAME}"
             PRERELEASE="false"
+            REPLACE_EXISTING="false"
           else
             TAG="${{ inputs.tag }}"
             PRERELEASE="${{ inputs.prerelease }}"
+            REPLACE_EXISTING="${{ inputs.replace_existing }}"
           fi
 
           if [[ ! "$TAG" =~ ^mosttly-v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
@@ -67,6 +74,7 @@ jobs:
             echo "build=$BUILD"
             echo "commit=$COMMIT"
             echo "prerelease=$PRERELEASE"
+            echo "replace_existing=$REPLACE_EXISTING"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install Nix
@@ -276,10 +284,16 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
           PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          REPLACE_EXISTING: ${{ steps.meta.outputs.replace_existing }}
         run: |
           set -euo pipefail
 
           if gh release view "$TAG" >/dev/null 2>&1; then
+            if [[ "$REPLACE_EXISTING" != "true" ]]; then
+              echo "Release $TAG already exists. Re-run with replace_existing=true to replace release assets." >&2
+              exit 1
+            fi
+
             gh release upload "$TAG" Mosttly.dmg Mosttly-macOS-universal.zip appcast.xml --clobber
           else
             if [[ "$PRERELEASE" == "true" ]]; then
