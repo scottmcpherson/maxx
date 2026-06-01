@@ -8,6 +8,7 @@ concurrency:
 jobs:
   required:
     name: "Required Checks: Nix"
+    if: always() && github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-sm
     needs:
       - check-zig-cache-hash
