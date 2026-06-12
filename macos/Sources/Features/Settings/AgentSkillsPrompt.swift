@@ -2,26 +2,28 @@ import AppKit
 import SwiftUI
 
 /// App-wide controller for the one-time, opt-in prompt that offers to install the
-/// Codex agent hooks. It shows at most one non-modal banner across all windows,
+/// "mosttly-tabs" tab-control skill for the agents the user actually has (Claude
+/// Code and/or Codex). It shows at most one non-modal banner across all windows,
 /// attached to the front terminal window.
 ///
 /// The prompt is evaluated on every launch / activation (not just first launch), so
-/// users who adopt Codex after installing the app still get offered the integration.
-/// It appears only when `~/.codex` (or `$CODEX_HOME`) exists, the hooks are not
-/// already installed, and the user hasn't answered the prompt before. The persisted
-/// "answered" flag — not a first-launch gate — is what makes it once-only.
-final class CodexHooksPromptController {
-    static let shared = CodexHooksPromptController()
+/// users who adopt an agent after installing the app still get offered the skill.
+/// It appears only when at least one detected agent is missing the skill and the
+/// user hasn't answered the prompt before. It also defers to the Codex hooks
+/// prompt so the two banners never stack; once that prompt is answered, this one
+/// shows on a later activation.
+final class AgentSkillsPromptController {
+    static let shared = AgentSkillsPromptController()
 
     /// UserDefaults key for the persisted "answered" flag. Once set, we never prompt
     /// again — whether the user installed, declined permanently, or hit an error.
-    static let answeredDefaultsKey = "codexHooksPromptAnswered"
+    static let answeredDefaultsKey = "agentSkillsPromptAnswered"
 
     /// Delay before showing the banner so we don't race a window's first paint or
     /// pop in mid-keystroke right after launch.
     private static let presentationDelay: TimeInterval = 0.4
 
-    private let model = CodexHooksPromptModel(theme: .fallback)
+    private let model = AgentSkillsPromptModel(theme: .fallback)
     private weak var hostWindow: TerminalWindow?
     private var bannerView: NSView?
     private var pollTimer: Timer?
@@ -32,13 +34,20 @@ final class CodexHooksPromptController {
         set { UserDefaults.standard.set(newValue, forKey: Self.answeredDefaultsKey) }
     }
 
-    /// Whether the prompt's conditions are currently met. Other one-time banners
-    /// (e.g. the agent skills prompt) check this to defer, so two banners never
-    /// stack in the same window.
-    static var wouldPrompt: Bool {
-        !UserDefaults.standard.bool(forKey: answeredDefaultsKey)
-            && CodexHooksManager.codexHomeExists()
-            && !CodexHooksManager.hooksInstalled()
+    /// Which agents are present on disk and still missing the skill.
+    private struct Candidates {
+        var claude: Bool
+        var codex: Bool
+
+        var any: Bool { claude || codex }
+
+        static func detect() -> Candidates {
+            Candidates(
+                claude: CodexHooksManager.claudeConfigDirExists()
+                    && !CodexHooksManager.claudeSkillInstalled(),
+                codex: CodexHooksManager.codexHomeExists()
+                    && !CodexHooksManager.codexSkillInstalled())
+        }
     }
 
     private init() {
@@ -65,11 +74,12 @@ final class CodexHooksPromptController {
 
     /// Evaluate whether to offer the prompt. Safe to call on every launch / activation;
     /// it's a no-op when a banner is already showing or scheduled, when the user has
-    /// answered, or when the disk/hook conditions aren't met.
+    /// answered, when the Codex hooks prompt takes precedence, or when no detected
+    /// agent is missing the skill.
     func evaluate() {
         guard bannerView == nil, !pendingPresentation, !answered else { return }
-        guard CodexHooksManager.codexHomeExists() else { return }
-        guard !CodexHooksManager.hooksInstalled() else { return }
+        guard !CodexHooksPromptController.wouldPrompt else { return }
+        guard Candidates.detect().any else { return }
         guard frontTerminalWindow() != nil else { return }
 
         pendingPresentation = true
@@ -86,19 +96,21 @@ final class CodexHooksPromptController {
     /// if the user installed via Settings (or otherwise) while it was scheduled.
     private func presentIfStillEligible() {
         guard bannerView == nil, !answered else { return }
-        guard CodexHooksManager.codexHomeExists() else { return }
-        guard !CodexHooksManager.hooksInstalled() else { return }
+        guard !CodexHooksPromptController.wouldPrompt else { return }
+        let candidates = Candidates.detect()
+        guard candidates.any else { return }
         guard let window = frontTerminalWindow() else { return }
-        present(in: window)
+        present(in: window, candidates: candidates)
     }
 
-    private func present(in window: TerminalWindow) {
+    private func present(in window: TerminalWindow, candidates: Candidates) {
         guard let contentView = window.contentView else { return }
 
         model.phase = .prompt
         model.theme = window.sidebarTheme
+        model.title = Self.title(for: candidates)
 
-        let host = CodexHooksPromptHostingView(rootView: CodexHooksPromptBanner(model: model))
+        let host = AgentSkillsPromptHostingView(rootView: AgentSkillsPromptBanner(model: model))
         host.translatesAutoresizingMaskIntoConstraints = false
         host.alphaValue = 0
         contentView.addSubview(host)
@@ -128,13 +140,24 @@ final class CodexHooksPromptController {
         startOutOfBandInstallPolling()
     }
 
-    /// While the banner is visible and still in the prompt state, watch for hooks being
-    /// installed out-of-band (e.g. via Settings in another window) and auto-dismiss.
+    private static func title(for candidates: Candidates) -> String {
+        switch (candidates.claude, candidates.codex) {
+        case (true, true):
+            return "Install Mosttly skills for Claude Code and Codex?"
+        case (true, false):
+            return "Install the Mosttly skill for Claude Code?"
+        default:
+            return "Install the Mosttly skill for Codex?"
+        }
+    }
+
+    /// While the banner is visible and still in the prompt state, watch for the skills
+    /// being installed out-of-band (e.g. via Settings in another window) and auto-dismiss.
     private func startOutOfBandInstallPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self, self.model.phase == .prompt else { return }
-            if CodexHooksManager.hooksInstalled() {
+            if !Candidates.detect().any {
                 self.dismiss(animated: true)
             }
         }
@@ -166,22 +189,37 @@ final class CodexHooksPromptController {
     private func install() {
         guard model.phase == .prompt else { return }
 
+        let candidates = Candidates.detect()
+        guard candidates.any else {
+            dismiss(animated: true)
+            return
+        }
+
         model.phase = .installing
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = CodexHooksManager.runHook(action: "install")
+            var failure: String?
+            if candidates.claude {
+                let result = CodexHooksManager.runHelper(arguments: ["install", "claude"])
+                if !result.success { failure = result.message ?? "Install failed." }
+            }
+            if candidates.codex, failure == nil {
+                let result = CodexHooksManager.runHelper(arguments: ["install", "codex-skill"])
+                if !result.success { failure = result.message ?? "Install failed." }
+            }
+
             DispatchQueue.main.async {
                 guard let self else { return }
                 // Either way, mark answered so we never nag again — on failure the user
                 // can retry from Settings.
                 self.answered = true
 
-                if result.success {
+                if let failure {
+                    self.model.phase = .failure(failure)
+                } else {
                     self.model.phase = .success
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                         self.dismiss(animated: true)
                     }
-                } else {
-                    self.model.phase = .failure(result.message ?? "Install failed.")
                 }
             }
         }
@@ -198,7 +236,7 @@ final class CodexHooksPromptController {
 
 /// Hosting view for the banner that claims the standard arrow cursor over its bounds,
 /// so hovering the banner doesn't show the terminal's I-beam cursor.
-private final class CodexHooksPromptHostingView<Content: View>: NSHostingView<Content> {
+private final class AgentSkillsPromptHostingView<Content: View>: NSHostingView<Content> {
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .arrow)
@@ -206,8 +244,8 @@ private final class CodexHooksPromptHostingView<Content: View>: NSHostingView<Co
 }
 
 /// Drives the banner's visual state. The controller owns this and mutates `phase` /
-/// `theme`; the SwiftUI view just renders it.
-final class CodexHooksPromptModel: ObservableObject {
+/// `theme` / `title`; the SwiftUI view just renders it.
+final class AgentSkillsPromptModel: ObservableObject {
     enum Phase: Equatable {
         case prompt
         case installing
@@ -217,6 +255,7 @@ final class CodexHooksPromptModel: ObservableObject {
 
     @Published var phase: Phase = .prompt
     @Published var theme: TerminalSidebarTheme
+    @Published var title: String = ""
 
     var onInstall: () -> Void = {}
     var onNotNow: () -> Void = {}
@@ -228,10 +267,10 @@ final class CodexHooksPromptModel: ObservableObject {
     }
 }
 
-/// Non-modal, themed banner offering to install the Codex hooks. Matches the Settings
-/// section styling and the active terminal colors via `TerminalSidebarTheme`.
-private struct CodexHooksPromptBanner: View {
-    @ObservedObject var model: CodexHooksPromptModel
+/// Non-modal, themed banner offering to install the tab-control skill. Matches the
+/// Settings section styling and the active terminal colors via `TerminalSidebarTheme`.
+private struct AgentSkillsPromptBanner: View {
+    @ObservedObject var model: AgentSkillsPromptModel
 
     private var theme: TerminalSidebarTheme { model.theme }
 
@@ -243,12 +282,13 @@ private struct CodexHooksPromptBanner: View {
                 .frame(width: 20)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Enable Codex integration?")
+                Text(model.title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color(nsColor: theme.foreground))
-                Text("Show Codex agent status, titles, and activity in the sidebar. "
-                    + "This adds a config block to ~/.codex/config.toml and hooks.json — "
-                    + "you can remove it anytime in Settings.")
+                Text("Gives agents the ability to create and manage tabs in Mosttly — "
+                    + "for example, ask one to start another session in a new tab. "
+                    + "Installs the mosttly-tabs skill in your home folder; you can "
+                    + "remove it anytime in Settings.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(nsColor: theme.mutedForeground))
                     .fixedSize(horizontal: false, vertical: true)
@@ -273,7 +313,7 @@ private struct CodexHooksPromptBanner: View {
                 .stroke(Color(nsColor: theme.separator), lineWidth: 1))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
         .environment(\.colorScheme, theme.colorScheme)
-        .accessibilityIdentifier("MosttlyCodexHooksPromptBanner")
+        .accessibilityIdentifier("MosttlyAgentSkillsPromptBanner")
     }
 
     @ViewBuilder
@@ -286,9 +326,9 @@ private struct CodexHooksPromptBanner: View {
                     .foregroundStyle(Color(nsColor: theme.mutedForeground))
                 Button("Not Now", action: model.onNotNow)
                     .buttonStyle(.bordered)
-                Button("Install Hooks", action: model.onInstall)
+                Button("Install", action: model.onInstall)
                     .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("MosttlyCodexHooksPromptInstallButton")
+                    .accessibilityIdentifier("MosttlyAgentSkillsPromptInstallButton")
             }
 
         case .installing:
@@ -303,7 +343,7 @@ private struct CodexHooksPromptBanner: View {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                Text("Codex hooks installed")
+                Text("Skills installed")
                     .foregroundStyle(Color(nsColor: theme.foreground))
             }
 

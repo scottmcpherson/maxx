@@ -64,13 +64,19 @@ enum CodexHooksManager {
     /// Run the hook helper for `install` / `uninstall`. This blocks while the helper
     /// runs, so call it off the main thread.
     static func runHook(action: String) -> (success: Bool, message: String?) {
+        runHelper(arguments: [action, "codex"])
+    }
+
+    /// Run the bundled hook helper with arbitrary arguments. This blocks while
+    /// the helper runs, so call it off the main thread.
+    static func runHelper(arguments: [String]) -> (success: Bool, message: String?) {
         guard let helperURL else {
             return (false, "Hook helper missing.")
         }
 
         let process = Process()
         process.executableURL = helperURL
-        process.arguments = [action, "codex"]
+        process.arguments = arguments
 
         var environment = ProcessInfo.processInfo.environment
         if environment["HOME"]?.isEmpty ?? true {
@@ -105,6 +111,68 @@ enum CodexHooksManager {
         guard let helperURL else { return false }
         let claudeURL = helperURL.deletingLastPathComponent().appendingPathComponent("claude")
         return FileManager.default.isExecutableFile(atPath: claudeURL.path)
+    }
+
+    /// The Claude Code config directory, respecting `$CLAUDE_CONFIG_DIR`, else
+    /// `~/.claude`. Mirrors `claudeSkillsRoot` in `src/agent_hook/skills.zig`.
+    static func claudeConfigURL() -> URL {
+        if let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
+           !configDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(
+                fileURLWithPath: (configDir as NSString).expandingTildeInPath,
+                isDirectory: true)
+        }
+
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".claude", isDirectory: true)
+    }
+
+    /// Whether the Claude Code config directory exists on disk. This is the gate
+    /// for offering the Claude skill: it's the most reliable on-disk signal that
+    /// the user actually uses Claude Code.
+    static func claudeConfigDirExists() -> Bool {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: claudeConfigURL().path,
+            isDirectory: &isDirectory)
+        return exists && isDirectory.boolValue
+    }
+
+    /// Path of the tab-control skill installed for Claude Code.
+    static func claudeSkillURL() -> URL {
+        claudeConfigURL()
+            .appendingPathComponent("skills", isDirectory: true)
+            .appendingPathComponent("mosttly-tabs", isDirectory: true)
+            .appendingPathComponent("SKILL.md", isDirectory: false)
+    }
+
+    /// Path of the tab-control skill installed for Codex. Codex discovers
+    /// user skills in `~/.agents/skills`, the cross-agent standard location.
+    static func codexSkillURL() -> URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".agents", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+            .appendingPathComponent("mosttly-tabs", isDirectory: true)
+            .appendingPathComponent("SKILL.md", isDirectory: false)
+    }
+
+    /// Whether the tab-control skill is installed for Claude Code.
+    static func claudeSkillInstalled() -> Bool {
+        skillInstalled(at: claudeSkillURL())
+    }
+
+    /// Whether the tab-control skill is installed for Codex.
+    static func codexSkillInstalled() -> Bool {
+        skillInstalled(at: codexSkillURL())
+    }
+
+    /// Only files written by the helper count; a hand-written skill of the
+    /// same name is not ours.
+    private static func skillInstalled(at url: URL) -> Bool {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+            return false
+        }
+        return content.contains("managed by ghostty-agent-hook")
     }
 
     /// The bundled `ghostty-agent-hook` helper, if present and executable.

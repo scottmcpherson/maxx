@@ -361,6 +361,10 @@ class AppDelegate: NSObject,
         // Evaluated on every activation (not just first launch) so the prompt also
         // reaches users who adopt Codex after installing the app.
         CodexHooksPromptController.shared.evaluate()
+
+        // Offer to install the tab-control skills once for users with Claude Code
+        // or Codex. Defers to the hooks prompt above so banners never stack.
+        AgentSkillsPromptController.shared.evaluate()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
