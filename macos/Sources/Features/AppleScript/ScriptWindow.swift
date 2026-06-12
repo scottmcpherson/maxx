@@ -98,12 +98,15 @@ final class ScriptWindow: NSObject {
     }
 
     /// Enables unique-ID lookup for `terminals` references on a window.
+    ///
+    /// Lookup is case-insensitive because the same UUID is exposed to
+    /// terminal processes as a lowercased GHOSTTY_AGENT_SURFACE_ID.
     @objc(valueInTerminalsWithUniqueID:)
     func valueInTerminals(uniqueID: String) -> ScriptTerminal? {
         guard NSApp.isAppleScriptEnabled else { return nil }
         return controllers
             .flatMap { $0.surfaceTree.root?.leaves() ?? [] }
-            .first(where: { $0.id.uuidString == uniqueID })
+            .first(where: { $0.id.uuidString.caseInsensitiveCompare(uniqueID) == .orderedSame })
             .map(ScriptTerminal.init)
     }
 

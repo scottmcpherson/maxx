@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const new_tab = @import("new_tab.zig");
+const skills = @import("skills.zig");
+const tabs = @import("tabs.zig");
+
 const Allocator = std.mem.Allocator;
 const JsonArray = std.json.Array;
 const JsonObject = std.json.ObjectMap;
@@ -71,9 +75,42 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "new-tab")) {
+        try new_tab.run(alloc, args[2..]);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "list-tabs")) {
+        try tabs.runListTabs(alloc, args[2..]);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "close-tab")) {
+        try tabs.runCloseTab(alloc, args[2..]);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "rename-tab")) {
+        try tabs.runRenameTab(alloc, args[2..]);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "send")) {
+        try tabs.runSend(alloc, args[2..]);
+        return;
+    }
+
     if (args.len >= 3 and std.mem.eql(u8, args[1], "install")) {
         if (std.mem.eql(u8, args[2], "codex")) {
             try installCodexHooks(alloc);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "codex-skill")) {
+            try skills.installCodex(alloc);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "claude")) {
+            try skills.installClaude(alloc);
             return;
         }
         return error.UnsupportedAgent;
@@ -82,6 +119,14 @@ pub fn main() !void {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "uninstall")) {
         if (std.mem.eql(u8, args[2], "codex")) {
             try uninstallCodexHooks(alloc);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "codex-skill")) {
+            try skills.uninstallCodex(alloc);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "claude")) {
+            try skills.uninstallClaude(alloc);
             return;
         }
         return error.UnsupportedAgent;
@@ -908,6 +953,13 @@ fn envOwned(alloc: Allocator, key: []const u8) !?[]const u8 {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };
+}
+
+test {
+    _ = new_tab;
+    _ = skills;
+    _ = tabs;
+    _ = @import("osa.zig");
 }
 
 test "agent hook state normalization" {

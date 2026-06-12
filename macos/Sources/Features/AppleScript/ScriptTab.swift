@@ -10,11 +10,18 @@ final class ScriptTab: NSObject {
     /// Stable identifier used by AppleScript `tab id "..."` references.
     private let stableID: String
 
-    /// Weak back-reference to the scripting window that owns this tab wrapper.
+    /// Back-reference to the scripting window that owns this tab wrapper.
     ///
     /// We only need this for dynamic properties (`index`, `selected`) and for
     /// building an object specifier path.
-    private weak var window: ScriptWindow?
+    ///
+    /// Strong on purpose: command handlers (e.g. `new tab`) return tabs whose
+    /// owning `ScriptWindow` may be a function-local wrapper. Cocoa packages
+    /// the reply by asking for `objectSpecifier` after the handler returns, so
+    /// the tab has to keep its window alive or the reply fails with -1708.
+    /// `ScriptWindow` never retains tabs and only weakly references its
+    /// controller, so this cannot create a cycle.
+    private let window: ScriptWindow
 
     /// Live terminal controller for this tab.
     ///
@@ -38,13 +45,24 @@ final class ScriptTab: NSObject {
         return stableID
     }
 
-    /// Exposed as the AppleScript `title` property.
+    /// Exposed as the AppleScript `name` property (read/write).
     ///
-    /// Returns the title of the tab's window.
+    /// Returns the title of the tab's window. Setting it stores a manual
+    /// title override on the controller — the same mechanism as renaming a
+    /// session in the sidebar — so the name wins over titles reported by the
+    /// terminal. Setting an empty string clears the override.
     @objc(title)
     var title: String {
-        guard NSApp.isAppleScriptEnabled else { return "" }
-        return controller?.window?.title ?? ""
+        get {
+            guard NSApp.isAppleScriptEnabled else { return "" }
+            return controller?.window?.title ?? ""
+        }
+        set {
+            guard NSApp.isAppleScriptEnabled else { return }
+            guard let controller else { return }
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            controller.titleOverride = trimmed.isEmpty ? nil : trimmed
+        }
     }
 
     /// Exposed as the AppleScript `index` property.
@@ -54,7 +72,7 @@ final class ScriptTab: NSObject {
     var index: Int {
         guard NSApp.isAppleScriptEnabled else { return 0 }
         guard let controller else { return 0 }
-        return window?.tabIndex(for: controller) ?? 0
+        return window.tabIndex(for: controller) ?? 0
     }
 
     /// Exposed as the AppleScript `selected` property.
@@ -64,7 +82,7 @@ final class ScriptTab: NSObject {
     var selected: Bool {
         guard NSApp.isAppleScriptEnabled else { return false }
         guard let controller else { return false }
-        return window?.tabIsSelected(controller) ?? false
+        return window.tabIsSelected(controller)
     }
 
     /// Exposed as the AppleScript `focused terminal` property.
@@ -105,12 +123,15 @@ final class ScriptTab: NSObject {
     }
 
     /// Enables unique-ID lookup for `terminals` references on a tab.
+    ///
+    /// Lookup is case-insensitive because the same UUID is exposed to
+    /// terminal processes as a lowercased GHOSTTY_AGENT_SURFACE_ID.
     @objc(valueInTerminalsWithUniqueID:)
     func valueInTerminals(uniqueID: String) -> ScriptTerminal? {
         guard NSApp.isAppleScriptEnabled else { return nil }
         guard let controller else { return nil }
         return (controller.surfaceTree.root?.leaves() ?? [])
-            .first(where: { $0.id.uuidString == uniqueID })
+            .first(where: { $0.id.uuidString.caseInsensitiveCompare(uniqueID) == .orderedSame })
             .map(ScriptTerminal.init)
     }
 
@@ -158,7 +179,6 @@ final class ScriptTab: NSObject {
     /// Provides Cocoa scripting with a canonical "path" back to this object.
     override var objectSpecifier: NSScriptObjectSpecifier? {
         guard NSApp.isAppleScriptEnabled else { return nil }
-        guard let window else { return nil }
         guard let windowClassDescription = window.classDescription as? NSScriptClassDescription else {
             return nil
         }

@@ -58,6 +58,25 @@ struct SettingsView: View {
                     .accessibilityIdentifier("MosttlySettingsClaudeHelpButton")
             }
         }
+
+        skillRow(
+            status: model.claudeSkillStatus,
+            install: model.installClaudeSkill,
+            uninstall: model.uninstallClaudeSkill,
+            helpText: "Lets Claude Code open new Mosttly tabs and run commands in them",
+            accessibilityPrefix: "MosttlySettingsClaudeSkill")
+
+        Picker("Agent tab permission mode", selection: $model.claudeTabPermissionMode) {
+            Text("Default").tag("default")
+            Text("Plan").tag("plan")
+            Text("Accept Edits").tag("acceptEdits")
+            Text("Auto").tag("auto")
+            Text("Don't Ask").tag("dontAsk")
+            Text("Bypass Permissions").tag("bypassPermissions")
+        }
+        .help("Permission mode for Claude Code sessions that agents start in new tabs. "
+            + "Applied unless the spawning agent passes explicit permission flags.")
+        .accessibilityIdentifier("MosttlySettingsClaudeTabPermissionModePicker")
     }
 
     // MARK: - Codex
@@ -104,9 +123,71 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+
+        skillRow(
+            status: model.codexSkillStatus,
+            install: model.installCodexSkill,
+            uninstall: model.uninstallCodexSkill,
+            helpText: "Lets Codex open new Mosttly tabs and run commands in them",
+            accessibilityPrefix: "MosttlySettingsCodexSkill")
+
+        Picker("Agent tab sandbox mode", selection: $model.codexTabSandboxMode) {
+            Text("Default").tag("default")
+            Text("Read Only").tag("read-only")
+            Text("Workspace Write").tag("workspace-write")
+            Text("Full Auto").tag("full-auto")
+            Text("Danger Full Access").tag("danger-full-access")
+            Text("Bypass Approvals and Sandbox").tag("bypass")
+        }
+        .help("Sandbox mode for Codex sessions that agents start in new tabs. "
+            + "Applied unless the spawning agent passes explicit sandbox flags.")
+        .accessibilityIdentifier("MosttlySettingsCodexTabSandboxModePicker")
     }
 
     // MARK: - Helpers
+
+    /// Install/remove row for the "mosttly-tabs" tab-control skill, shared by
+    /// the Claude Code and Codex sections.
+    @ViewBuilder
+    private func skillRow(
+        status: AgentInstallStatus,
+        install: @escaping () -> Void,
+        uninstall: @escaping () -> Void,
+        helpText: String,
+        accessibilityPrefix: String
+    ) -> some View {
+        switch status {
+        case .installed:
+            LabeledContent("Tab control skill") {
+                Button("Remove Skill", action: uninstall)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("\(accessibilityPrefix)RemoveButton")
+            }
+
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Working…")
+                    .foregroundStyle(.secondary)
+            }
+
+        case .notInstalled, .failed:
+            LabeledContent("Tab control skill") {
+                Button("Install Skill", action: install)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("\(accessibilityPrefix)InstallButton")
+            }
+            .help(helpText)
+
+            if case .failed(let message) = status {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
 
     private func statusRow(title: String, systemImage: String, tint: Color) -> some View {
         Label {
@@ -119,13 +200,52 @@ struct SettingsView: View {
 }
 
 final class SettingsViewModel: ObservableObject {
+    /// UserDefaults keys for the default permission mode of agent-spawned
+    /// tabs. Sync with `src/agent_hook/new_tab.zig`, which reads them when
+    /// spawning claude/codex without explicit permission flags.
+    static let claudeTabPermissionModeKey = "agentTabClaudePermissionMode"
+    static let codexTabSandboxModeKey = "agentTabCodexSandboxMode"
+
     @Published private(set) var claudeConfigured = false
-    @Published private(set) var codexStatus: CodexHooksStatus = .notInstalled
+    @Published private(set) var claudeSkillStatus: AgentInstallStatus = .notInstalled
+    @Published private(set) var codexStatus: AgentInstallStatus = .notInstalled
+    @Published private(set) var codexSkillStatus: AgentInstallStatus = .notInstalled
+
+    @Published var claudeTabPermissionMode: String {
+        didSet { Self.persistMode(claudeTabPermissionMode, forKey: Self.claudeTabPermissionModeKey) }
+    }
+
+    @Published var codexTabSandboxMode: String {
+        didSet { Self.persistMode(codexTabSandboxMode, forKey: Self.codexTabSandboxModeKey) }
+    }
+
+    init() {
+        self.claudeTabPermissionMode =
+            UserDefaults.standard.string(forKey: Self.claudeTabPermissionModeKey) ?? "default"
+        self.codexTabSandboxMode =
+            UserDefaults.standard.string(forKey: Self.codexTabSandboxModeKey) ?? "default"
+    }
+
+    /// "default" means "no opinion", which we persist as an absent key so the
+    /// helper can skip the lookup cleanly.
+    private static func persistMode(_ mode: String, forKey key: String) {
+        if mode == "default" {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else {
+            UserDefaults.standard.set(mode, forKey: key)
+        }
+    }
 
     func refresh() {
         claudeConfigured = CodexHooksManager.claudeConfigured()
+        if claudeSkillStatus != .installing {
+            claudeSkillStatus = CodexHooksManager.claudeSkillInstalled() ? .installed : .notInstalled
+        }
         if codexStatus != .installing {
             codexStatus = CodexHooksManager.hooksInstalled() ? .installed : .notInstalled
+        }
+        if codexSkillStatus != .installing {
+            codexSkillStatus = CodexHooksManager.codexSkillInstalled() ? .installed : .notInstalled
         }
     }
 
@@ -150,6 +270,26 @@ final class SettingsViewModel: ObservableObject {
         CodexHooksManager.revealHooks()
     }
 
+    func installClaudeSkill() {
+        runSkillHelper(action: "install", agent: "claude", status: \.claudeSkillStatus,
+                       installed: CodexHooksManager.claudeSkillInstalled)
+    }
+
+    func uninstallClaudeSkill() {
+        runSkillHelper(action: "uninstall", agent: "claude", status: \.claudeSkillStatus,
+                       installed: CodexHooksManager.claudeSkillInstalled)
+    }
+
+    func installCodexSkill() {
+        runSkillHelper(action: "install", agent: "codex-skill", status: \.codexSkillStatus,
+                       installed: CodexHooksManager.codexSkillInstalled)
+    }
+
+    func uninstallCodexSkill() {
+        runSkillHelper(action: "uninstall", agent: "codex-skill", status: \.codexSkillStatus,
+                       installed: CodexHooksManager.codexSkillInstalled)
+    }
+
     private func runCodexHook(action: String, failureFallback: String) {
         guard codexStatus != .installing else { return }
 
@@ -166,9 +306,32 @@ final class SettingsViewModel: ObservableObject {
             }
         }
     }
+
+    private func runSkillHelper(
+        action: String,
+        agent: String,
+        status: ReferenceWritableKeyPath<SettingsViewModel, AgentInstallStatus>,
+        installed: @escaping () -> Bool
+    ) {
+        guard self[keyPath: status] != .installing else { return }
+
+        self[keyPath: status] = .installing
+        let failureFallback = action == "install" ? "Install failed." : "Uninstall failed."
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = CodexHooksManager.runHelper(arguments: [action, agent])
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if result.success {
+                    self[keyPath: status] = installed() ? .installed : .notInstalled
+                } else {
+                    self[keyPath: status] = .failed(result.message ?? failureFallback)
+                }
+            }
+        }
+    }
 }
 
-enum CodexHooksStatus: Equatable {
+enum AgentInstallStatus: Equatable {
     case installed
     case notInstalled
     case installing
