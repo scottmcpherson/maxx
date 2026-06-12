@@ -1,11 +1,11 @@
 import AppKit
 import Foundation
 
-/// Single source of truth for detecting, revealing, and installing the Ghostty Codex
+/// Single source of truth for detecting, revealing, and installing the MadMaxx Codex
 /// agent hooks. Both the Settings window and the one-time install prompt go through
 /// here so detection and installation never drift apart.
 ///
-/// The hooks are written by the bundled `ghostty-agent-hook` helper, which adds a
+/// The hooks are written by the bundled `madmaxx-agent-hook` helper, which adds a
 /// marked block to `~/.codex/config.toml` and `~/.codex/hooks.json` (or `$CODEX_HOME`).
 enum CodexHooksManager {
     /// The Codex home directory, respecting `$CODEX_HOME`, else `~/.codex`.
@@ -44,9 +44,9 @@ enum CodexHooksManager {
             return false
         }
 
-        return hooks.contains("ghostty-agent-hook") &&
+        return hooks.contains("madmaxx-agent-hook") &&
             hooks.contains(" codex ") &&
-            config.contains("ghostty-agent-codex-hooks-feature begin") &&
+            config.contains("madmaxx-agent-codex-hooks-feature begin") &&
             config.contains("hooks = true")
     }
 
@@ -142,7 +142,7 @@ enum CodexHooksManager {
     static func claudeSkillURL() -> URL {
         claudeConfigURL()
             .appendingPathComponent("skills", isDirectory: true)
-            .appendingPathComponent("mosttly-tabs", isDirectory: true)
+            .appendingPathComponent("madmaxx-tabs", isDirectory: true)
             .appendingPathComponent("SKILL.md", isDirectory: false)
     }
 
@@ -152,7 +152,7 @@ enum CodexHooksManager {
         URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent(".agents", isDirectory: true)
             .appendingPathComponent("skills", isDirectory: true)
-            .appendingPathComponent("mosttly-tabs", isDirectory: true)
+            .appendingPathComponent("madmaxx-tabs", isDirectory: true)
             .appendingPathComponent("SKILL.md", isDirectory: false)
     }
 
@@ -172,16 +172,16 @@ enum CodexHooksManager {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
             return false
         }
-        return content.contains("managed by ghostty-agent-hook")
+        return content.contains("managed by madmaxx-agent-hook")
     }
 
-    /// The bundled `ghostty-agent-hook` helper, if present and executable.
+    /// The bundled `madmaxx-agent-hook` helper, if present and executable.
     static var helperURL: URL? {
         guard let resourcesURL = Bundle.main.resourceURL else { return nil }
         let helperURL = resourcesURL
             .appendingPathComponent("ghostty", isDirectory: true)
             .appendingPathComponent("bin", isDirectory: true)
-            .appendingPathComponent("ghostty-agent-hook", isDirectory: false)
+            .appendingPathComponent("madmaxx-agent-hook", isDirectory: false)
 
         return FileManager.default.isExecutableFile(atPath: helperURL.path) ? helperURL : nil
     }

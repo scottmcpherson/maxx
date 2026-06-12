@@ -1,8 +1,8 @@
 """
-Generate a stable-only Sparkle appcast for Mosttly GitHub Releases.
+Generate a stable-only Sparkle appcast for MadMaxx GitHub Releases.
 
 Expected files in the current directory:
-    - sign_update.txt: output from Sparkle's sign_update tool for Mosttly.dmg
+    - sign_update.txt: output from Sparkle's sign_update tool for MadMaxx.dmg
 
 Expected environment variables:
     - MOSTTLY_VERSION: CFBundleShortVersionString, for example 0.1.0
@@ -58,17 +58,17 @@ commit = os.environ["MOSTTLY_COMMIT"]
 commit_long = os.environ["MOSTTLY_COMMIT_LONG"]
 
 release_url = f"{REPO}/releases/tag/{tag}"
-download_url = f"{REPO}/releases/download/{tag}/Mosttly.dmg"
+download_url = f"{REPO}/releases/download/{tag}/MadMaxx.dmg"
 
 rss = ET.Element("rss", {"version": "2.0"})
 channel = ET.SubElement(rss, "channel")
-sub(channel, "title", "Mosttly Ghostty Updates")
+sub(channel, "title", "MadMaxx Updates")
 sub(channel, "link", f"{REPO}/releases")
-sub(channel, "description", "Stable macOS releases for Mosttly Ghostty.")
+sub(channel, "description", "Stable macOS releases for MadMaxx.")
 sub(channel, "language", "en")
 
 item = ET.SubElement(channel, "item")
-sub(item, "title", f"Mosttly Ghostty {version}")
+sub(item, "title", f"MadMaxx {version}")
 sub(item, "pubDate", now.strftime(pubdate_format))
 sub(item, sparkle("version"), build)
 sub(item, sparkle("shortVersionString"), version)
@@ -77,7 +77,7 @@ sub(item, sparkle("fullReleaseNotesLink"), release_url)
 sub(
     item,
     "description",
-    f"Mosttly Ghostty {version}, built from commit {commit} ({commit_long}).",
+    f"MadMaxx {version}, built from commit {commit} ({commit_long}).",
 )
 
 enclosure = ET.SubElement(item, "enclosure")

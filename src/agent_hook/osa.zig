@@ -9,11 +9,11 @@ const Allocator = std.mem.Allocator;
 /// Bundle id used when the inherited __CFBundleIdentifier is unavailable.
 pub const default_bundle_id = "com.scottmcpherson.mosttly-ghostty";
 
-/// Requires the surface id env var that marks "inside a Mosttly terminal".
+/// Requires the surface id env var that marks "inside a MadMaxx terminal".
 pub fn requireSurfaceId(alloc: Allocator) ![]const u8 {
     return try envOwned(alloc, "GHOSTTY_AGENT_SURFACE_ID") orelse {
         fail(
-            "this command must be run inside a Mosttly terminal " ++
+            "this command must be run inside a MadMaxx terminal " ++
                 "(GHOSTTY_AGENT_SURFACE_ID is not set)",
             .{},
         );

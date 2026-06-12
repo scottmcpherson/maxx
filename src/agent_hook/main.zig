@@ -483,7 +483,7 @@ fn uninstallCodexHooks(alloc: Allocator) !void {
         try writeFile(config_path, rendered_config);
     }
 
-    try printInstallStatus("Codex Ghostty hooks removed from ", hooks_path);
+    try printInstallStatus("Codex MadMaxx hooks removed from ", hooks_path);
 }
 
 fn codexConfigDir(alloc: Allocator) ![]const u8 {
@@ -553,8 +553,11 @@ fn isOwnedHookValue(value: JsonValue) bool {
 }
 
 fn isOwnedHookCommand(command: []const u8) bool {
-    return std.mem.indexOf(u8, command, "ghostty-agent-hook") != null and
-        std.mem.indexOf(u8, command, " codex ") != null;
+    // Also match the old ghostty-agent-hook binary name so hooks installed
+    // by earlier releases are replaced instead of duplicated.
+    const ours = std.mem.indexOf(u8, command, "madmaxx-agent-hook") != null or
+        std.mem.indexOf(u8, command, "ghostty-agent-hook") != null;
+    return ours and std.mem.indexOf(u8, command, " codex ") != null;
 }
 
 fn appendCodexHookGroup(alloc: Allocator, hooks: *JsonObject, event: HookEvent) !void {
@@ -579,9 +582,9 @@ fn appendCodexHookGroup(alloc: Allocator, hooks: *JsonObject, event: HookEvent) 
 fn codexHookCommand(alloc: Allocator, event_name: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(
         alloc,
-        "ghostty_hook=\"${{GHOSTTY_AGENT_HOOK_HELPER:-$(command -v ghostty-agent-hook 2>/dev/null || true)}}\"; " ++
-            "if [ -n \"${{GHOSTTY_AGENT_SURFACE_ID:-}}\" ] && [ -n \"$ghostty_hook\" ]; then " ++
-            "GHOSTTY_AGENT_PID=\"${{PPID:-}}\" \"$ghostty_hook\" codex {s}; else printf \"%s\\n\" \"{{}}\"; fi",
+        "madmaxx_hook=\"${{GHOSTTY_AGENT_HOOK_HELPER:-$(command -v madmaxx-agent-hook 2>/dev/null || true)}}\"; " ++
+            "if [ -n \"${{GHOSTTY_AGENT_SURFACE_ID:-}}\" ] && [ -n \"$madmaxx_hook\" ]; then " ++
+            "GHOSTTY_AGENT_PID=\"${{PPID:-}}\" \"$madmaxx_hook\" codex {s}; else printf \"%s\\n\" \"{{}}\"; fi",
         .{event_name},
     );
 }
@@ -692,11 +695,20 @@ fn intValue(value: ?JsonValue) ?i64 {
     };
 }
 
-const feature_begin = "# ghostty-agent-codex-hooks-feature begin";
-const feature_end = "# ghostty-agent-codex-hooks-feature end";
-const feature_previous_prefix = "# ghostty-agent-codex-hooks-feature previous line: ";
-const trust_begin = "# ghostty-agent-codex-hook-trust begin";
-const trust_end = "# ghostty-agent-codex-hook-trust end";
+const feature_begin = "# madmaxx-agent-codex-hooks-feature begin";
+const feature_end = "# madmaxx-agent-codex-hooks-feature end";
+const feature_previous_prefix = "# madmaxx-agent-codex-hooks-feature previous line: ";
+const trust_begin = "# madmaxx-agent-codex-hook-trust begin";
+const trust_end = "# madmaxx-agent-codex-hook-trust end";
+
+// Markers written by releases that shipped under the old ghostty-agent-hook
+// name. Install and uninstall keep removing these blocks so upgraded apps
+// migrate existing configs instead of stacking a second copy.
+const legacy_feature_begin = "# ghostty-agent-codex-hooks-feature begin";
+const legacy_feature_end = "# ghostty-agent-codex-hooks-feature end";
+const legacy_feature_previous_prefix = "# ghostty-agent-codex-hooks-feature previous line: ";
+const legacy_trust_begin = "# ghostty-agent-codex-hook-trust begin";
+const legacy_trust_end = "# ghostty-agent-codex-hook-trust end";
 
 fn codexConfigTomlInstalling(
     alloc: Allocator,
@@ -711,6 +723,8 @@ fn codexConfigTomlInstalling(
 
     removeMarkedBlock(work_alloc, &lines, feature_begin, feature_end, feature_previous_prefix);
     removeMarkedBlock(work_alloc, &lines, trust_begin, trust_end, null);
+    removeMarkedBlock(work_alloc, &lines, legacy_feature_begin, legacy_feature_end, legacy_feature_previous_prefix);
+    removeMarkedBlock(work_alloc, &lines, legacy_trust_begin, legacy_trust_end, null);
 
     if (!hooksFeatureEnabled(lines.items)) {
         if (findDottedFeaturesHooksIndex(lines.items)) |index| {
@@ -757,6 +771,8 @@ fn codexConfigTomlUninstalling(alloc: Allocator, content: []const u8) ![]const u
     var lines = try tomlLines(work_alloc, content);
     removeMarkedBlock(work_alloc, &lines, feature_begin, feature_end, feature_previous_prefix);
     removeMarkedBlock(work_alloc, &lines, trust_begin, trust_end, null);
+    removeMarkedBlock(work_alloc, &lines, legacy_feature_begin, legacy_feature_end, legacy_feature_previous_prefix);
+    removeMarkedBlock(work_alloc, &lines, legacy_trust_begin, legacy_trust_end, null);
     removeEmptyFeaturesTable(work_alloc, &lines);
     const result = try tomlContent(work_alloc, lines.items);
     return try alloc.dupe(u8, result);
@@ -1017,7 +1033,7 @@ test "hook input parses prompt and emits prompt title" {
     try std.testing.expectEqualStrings("Test comment", title);
 }
 
-test "codex hook install preserves non Ghostty hooks" {
+test "codex hook install preserves non MadMaxx hooks" {
     const alloc = std.testing.allocator;
     const existing =
         \\{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo user","timeout":10}]}]}}
@@ -1034,7 +1050,7 @@ test "codex hook install preserves non Ghostty hooks" {
     const rendered = try renderJson(alloc, root, .{ .whitespace = .minified });
     defer alloc.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "echo user") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "ghostty-agent-hook") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "madmaxx-agent-hook") != null);
 }
 
 test "codex config install and uninstall markers" {
@@ -1052,6 +1068,40 @@ test "codex config install and uninstall markers" {
 
     const uninstalled = try codexConfigTomlUninstalling(alloc, installed);
     defer alloc.free(uninstalled);
-    try std.testing.expect(std.mem.indexOf(u8, uninstalled, "ghostty-agent-codex") == null);
+    try std.testing.expect(std.mem.indexOf(u8, uninstalled, "madmaxx-agent-codex") == null);
     try std.testing.expect(std.mem.indexOf(u8, uninstalled, "model = \"x\"") != null);
+}
+
+test "codex config install migrates legacy ghostty marker blocks" {
+    const alloc = std.testing.allocator;
+    const legacy =
+        "[features]\n" ++
+        "# ghostty-agent-codex-hooks-feature begin\n" ++
+        "hooks = true\n" ++
+        "# ghostty-agent-codex-hooks-feature end\n" ++
+        "\n" ++
+        "# ghostty-agent-codex-hook-trust begin\n" ++
+        "[hooks.state.\"old\"]\n" ++
+        "trusted_hash = \"sha256:old\"\n" ++
+        "# ghostty-agent-codex-hook-trust end\n";
+
+    const installed = try codexConfigTomlInstalling(alloc, legacy, &.{});
+    defer alloc.free(installed);
+    try std.testing.expect(std.mem.indexOf(u8, installed, "ghostty-agent-codex") == null);
+    try std.testing.expect(std.mem.indexOf(u8, installed, "sha256:old") == null);
+    try std.testing.expect(std.mem.indexOf(u8, installed, "hooks = true") != null);
+
+    const uninstalled = try codexConfigTomlUninstalling(alloc, legacy);
+    defer alloc.free(uninstalled);
+    try std.testing.expect(std.mem.indexOf(u8, uninstalled, "ghostty-agent-codex") == null);
+}
+
+test "legacy ghostty-agent-hook commands count as owned" {
+    try std.testing.expect(isOwnedHookCommand(
+        "x=\"$(command -v ghostty-agent-hook)\"; \"$x\" codex session-start",
+    ));
+    try std.testing.expect(isOwnedHookCommand(
+        "x=\"$(command -v madmaxx-agent-hook)\"; \"$x\" codex session-start",
+    ));
+    try std.testing.expect(!isOwnedHookCommand("echo user"));
 }

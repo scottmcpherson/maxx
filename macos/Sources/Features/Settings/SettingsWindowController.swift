@@ -19,7 +19,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "Settings"
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 420, height: 360)
-        window.identifier = NSUserInterfaceItemIdentifier("MosttlySettingsWindow")
+        window.identifier = NSUserInterfaceItemIdentifier("MadMaxxSettingsWindow")
         window.center()
 
         super.init(window: window)

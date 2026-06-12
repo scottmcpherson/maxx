@@ -5,6 +5,6 @@ MimeType=inode/directory
 Actions=RunGhosttyDir
 
 [Desktop Action RunGhosttyDir]
-Name=Open Ghostty Here
+Name=Open MadMaxx Here
 Icon=com.mitchellh.ghostty
 Exec=ghostty +new-window --working-directory=%F

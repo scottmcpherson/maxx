@@ -273,7 +273,7 @@ private struct CodexHooksPromptBanner: View {
                 .stroke(Color(nsColor: theme.separator), lineWidth: 1))
         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
         .environment(\.colorScheme, theme.colorScheme)
-        .accessibilityIdentifier("MosttlyCodexHooksPromptBanner")
+        .accessibilityIdentifier("MadMaxxCodexHooksPromptBanner")
     }
 
     @ViewBuilder
@@ -288,7 +288,7 @@ private struct CodexHooksPromptBanner: View {
                     .buttonStyle(.bordered)
                 Button("Install Hooks", action: model.onInstall)
                     .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("MosttlyCodexHooksPromptInstallButton")
+                    .accessibilityIdentifier("MadMaxxCodexHooksPromptInstallButton")
             }
 
         case .installing:

@@ -31,7 +31,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     // Claude/Codex lifecycle state without watching terminal output.
     {
         const agent_hook_exe = b.addExecutable(.{
-            .name = "ghostty-agent-hook",
+            .name = "madmaxx-agent-hook",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/agent_hook/main.zig"),
                 .target = cfg.target,
@@ -44,7 +44,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 
         const helper_install = b.addInstallFile(
             agent_hook_exe.getEmittedBin(),
-            "share/ghostty/bin/ghostty-agent-hook",
+            "share/ghostty/bin/madmaxx-agent-hook",
         );
         try steps.append(b.allocator, &helper_install.step);
 
@@ -293,7 +293,7 @@ fn addLinuxAppResources(
     // Background:
     // https://developer.gnome.org/documentation/guidelines/maintainer/integrating.html
 
-    const name = b.fmt("Ghostty{s}", .{
+    const name = b.fmt("MadMaxx{s}", .{
         switch (cfg.optimize) {
             .Debug, .ReleaseSafe => " (Debug)",
             .ReleaseFast, .ReleaseSmall => "",

@@ -1,4 +1,4 @@
-//! `ghostty-agent-hook new-tab`: ask the running app to open a new tab (or
+//! `madmaxx-agent-hook new-tab`: ask the running app to open a new tab (or
 //! window) and run a command in it. This drives the app's AppleScript
 //! `new tab` command, so it only works on macOS and only inside terminals
 //! created by the app (which inject GHOSTTY_AGENT_SURFACE_ID).
@@ -11,9 +11,9 @@ const osa = @import("osa.zig");
 const Allocator = std.mem.Allocator;
 
 const usage =
-    \\Usage: ghostty-agent-hook new-tab [options] [--] [command [args...]]
+    \\Usage: madmaxx-agent-hook new-tab [options] [--] [command [args...]]
     \\
-    \\Open a new tab in the Mosttly window that contains this terminal and run
+    \\Open a new tab in the MadMaxx window that contains this terminal and run
     \\the given command in it. With no command, just opens a shell tab.
     \\
     \\Options:

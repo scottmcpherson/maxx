@@ -50,7 +50,7 @@ def get_paths_to_open(files):
 def get_items_for_files(name, files):
     paths = get_paths_to_open(files)
     if paths:
-        item = Nautilus.MenuItem(name=name, label=_('Open in Ghostty'),
+        item = Nautilus.MenuItem(name=name, label=_('Open in MadMaxx'),
             icon='com.mitchellh.ghostty')
         item.connect('activate', open_in_ghostty_activated, paths)
         return [item]

@@ -1052,7 +1052,7 @@ extension Ghostty {
         private static func agentEventFileURL(surfaceID: String) -> URL {
             let uid = getuid()
             let root = FileManager.default.temporaryDirectory
-                .appendingPathComponent("ghostty-agent-hooks-\(uid)", isDirectory: true)
+                .appendingPathComponent("madmaxx-agent-hooks-\(uid)", isDirectory: true)
             return root.appendingPathComponent("\(surfaceID).jsonl", isDirectory: false)
         }
 
@@ -1061,7 +1061,7 @@ extension Ghostty {
             let helperURL = resourcesURL
                 .appendingPathComponent("ghostty", isDirectory: true)
                 .appendingPathComponent("bin", isDirectory: true)
-                .appendingPathComponent("ghostty-agent-hook", isDirectory: false)
+                .appendingPathComponent("madmaxx-agent-hook", isDirectory: false)
 
             return FileManager.default.isExecutableFile(atPath: helperURL.path) ? helperURL : nil
         }

@@ -97,7 +97,7 @@ jobs:
             -Demit-macos-app=false \
             -Dversion-string="${{ steps.meta.outputs.version }}"
 
-      - name: Build Mosttly.app
+      - name: Build MadMaxx.app
         run: |
           nix develop --accept-flake-config -c nu macos/build.nu \
             --configuration Release \
@@ -110,7 +110,7 @@ jobs:
           COMMIT: ${{ steps.meta.outputs.commit }}
         run: |
           set -euo pipefail
-          APP="macos/build/Release/Mosttly.app"
+          APP="macos/build/Release/MadMaxx.app"
           INFO="$APP/Contents/Info.plist"
 
           test -d "$APP"
@@ -149,7 +149,7 @@ jobs:
       - name: Codesign app
         run: |
           set -euo pipefail
-          APP="macos/build/Release/Mosttly.app"
+          APP="macos/build/Release/MadMaxx.app"
           IDENTITY="${MOSTTLY_SIGNING_IDENTITY:--}"
 
           if [[ "$IDENTITY" == "-" ]]; then
@@ -187,22 +187,22 @@ jobs:
       - name: Package app
         run: |
           set -euo pipefail
-          APP="macos/build/Release/Mosttly.app"
+          APP="macos/build/Release/MadMaxx.app"
 
-          ditto -c -k --keepParent "$APP" Mosttly-macOS-universal.zip
+          ditto -c -k --keepParent "$APP" MadMaxx-macOS-universal.zip
 
           mkdir -p dmgroot
-          ditto "$APP" dmgroot/Mosttly.app
+          ditto "$APP" dmgroot/MadMaxx.app
           ln -s /Applications dmgroot/Applications
           hdiutil create \
-            -volname "Mosttly" \
+            -volname "MadMaxx" \
             -srcfolder dmgroot \
             -ov \
             -format UDZO \
-            Mosttly.dmg
+            MadMaxx.dmg
 
           if [[ "${MOSTTLY_SIGNING_IDENTITY:--}" != "-" ]]; then
-            /usr/bin/codesign --force --sign "$MOSTTLY_SIGNING_IDENTITY" --timestamp Mosttly.dmg
+            /usr/bin/codesign --force --sign "$MOSTTLY_SIGNING_IDENTITY" --timestamp MadMaxx.dmg
           fi
 
       - name: Notarize DMG
@@ -227,7 +227,7 @@ jobs:
           rm notarization_key.p8
 
           submit_log="$(mktemp)"
-          xcrun notarytool submit Mosttly.dmg --keychain-profile "notarytool-profile" --wait 2>&1 | tee "$submit_log"
+          xcrun notarytool submit MadMaxx.dmg --keychain-profile "notarytool-profile" --wait 2>&1 | tee "$submit_log"
 
           submission_id="$(awk '/^[[:space:]]*id:/ { print $2; exit }' "$submit_log")"
           status="$(awk '/^[[:space:]]*status:/ { print $2; exit }' "$submit_log")"
@@ -243,9 +243,9 @@ jobs:
             exit 1
           fi
 
-          xcrun stapler staple Mosttly.dmg
-          xcrun stapler staple macos/build/Release/Mosttly.app
-          ditto -c -k --keepParent macos/build/Release/Mosttly.app Mosttly-macOS-universal.zip
+          xcrun stapler staple MadMaxx.dmg
+          xcrun stapler staple macos/build/Release/MadMaxx.app
+          ditto -c -k --keepParent macos/build/Release/MadMaxx.app MadMaxx-macOS-universal.zip
 
       - name: Setup Sparkle tooling
         env:
@@ -274,7 +274,7 @@ jobs:
           fi
 
           printf '%s' "$MOSTTLY_SPARKLE_PRIVATE_KEY" > signing.key
-          sign_update -f signing.key Mosttly.dmg > sign_update.txt
+          sign_update -f signing.key MadMaxx.dmg > sign_update.txt
           MOSTTLY_COMMIT_LONG="$(git rev-parse HEAD)" python3 ./dist/macos/update_appcast_mosttly.py
           rm signing.key sign_update.txt
 
@@ -294,26 +294,26 @@ jobs:
               exit 1
             fi
 
-            gh release upload "$TAG" Mosttly.dmg Mosttly-macOS-universal.zip appcast.xml --clobber
+            gh release upload "$TAG" MadMaxx.dmg MadMaxx-macOS-universal.zip appcast.xml --clobber
           else
             if [[ "$PRERELEASE" == "true" ]]; then
               gh release create "$TAG" \
                 --target "$GITHUB_SHA" \
-                --title "Mosttly Ghostty $VERSION" \
-                --notes "macOS build for Mosttly Ghostty $VERSION." \
+                --title "MadMaxx $VERSION" \
+                --notes "macOS build for MadMaxx $VERSION." \
                 --generate-notes \
                 --prerelease \
-                Mosttly.dmg \
-                Mosttly-macOS-universal.zip \
+                MadMaxx.dmg \
+                MadMaxx-macOS-universal.zip \
                 appcast.xml
             else
               gh release create "$TAG" \
                 --target "$GITHUB_SHA" \
-                --title "Mosttly Ghostty $VERSION" \
-                --notes "macOS build for Mosttly Ghostty $VERSION." \
+                --title "MadMaxx $VERSION" \
+                --notes "macOS build for MadMaxx $VERSION." \
                 --generate-notes \
-                Mosttly.dmg \
-                Mosttly-macOS-universal.zip \
+                MadMaxx.dmg \
+                MadMaxx-macOS-universal.zip \
                 appcast.xml
             fi
           fi

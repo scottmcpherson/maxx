@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Ghostty Claude Code wrapper. It injects lifecycle hooks only inside
-# Ghostty-created terminals, then execs the real Claude binary.
+# MadMaxx Claude Code wrapper. It injects lifecycle hooks only inside
+# MadMaxx-created terminals, then execs the real Claude binary.
 
 find_real_claude() {
     local self_dir
@@ -23,6 +23,7 @@ find_real_claude() {
 claude_candidate_is_known_wrapper() {
     local candidate="$1"
     LC_ALL=C grep -q \
+        -e 'MadMaxx Claude Code wrapper' \
         -e 'Ghostty Claude Code wrapper' \
         -e 'cmux claude wrapper' \
         "$candidate" 2>/dev/null
@@ -137,7 +138,7 @@ if [[ -z "${GHOSTTY_AGENT_SURFACE_ID:-}" || "${GHOSTTY_AGENT_HOOKS_DISABLED:-0}"
     exec_real_claude "$@"
 fi
 
-if [[ -z "${GHOSTTY_AGENT_HOOK_HELPER:-}" && -z "$(command -v ghostty-agent-hook 2>/dev/null || true)" ]]; then
+if [[ -z "${GHOSTTY_AGENT_HOOK_HELPER:-}" && -z "$(command -v madmaxx-agent-hook 2>/dev/null || true)" ]]; then
     exec_real_claude "$@"
 fi
 
@@ -158,7 +159,7 @@ done
 unset CLAUDECODE
 export GHOSTTY_AGENT_PID=$$
 
-HOOK_COMMAND_PREFIX='ghostty_hook=\"${GHOSTTY_AGENT_HOOK_HELPER:-$(command -v ghostty-agent-hook 2>/dev/null || true)}\"; if [ -n \"${GHOSTTY_AGENT_SURFACE_ID:-}\" ] && [ -n \"$ghostty_hook\" ]; then \"$ghostty_hook\" claude '
+HOOK_COMMAND_PREFIX='madmaxx_hook=\"${GHOSTTY_AGENT_HOOK_HELPER:-$(command -v madmaxx-agent-hook 2>/dev/null || true)}\"; if [ -n \"${GHOSTTY_AGENT_SURFACE_ID:-}\" ] && [ -n \"$madmaxx_hook\" ]; then \"$madmaxx_hook\" claude '
 HOOK_COMMAND_SUFFIX='; else printf \"%s\\n\" \"{}\"; fi'
 
 HOOKS_JSON='{"preferredNotifChannel":"notifications_disabled","hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'session-start'"$HOOK_COMMAND_SUFFIX"'","timeout":10}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'prompt-submit'"$HOOK_COMMAND_SUFFIX"'","timeout":10}]}],"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'pre-tool-use'"$HOOK_COMMAND_SUFFIX"'","timeout":5,"async":true}]}],"Notification":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'notification'"$HOOK_COMMAND_SUFFIX"'","timeout":10}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'stop'"$HOOK_COMMAND_SUFFIX"'","timeout":10}]}],"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"'"$HOOK_COMMAND_PREFIX"'session-end'"$HOOK_COMMAND_SUFFIX"'","timeout":1}]}]}}'

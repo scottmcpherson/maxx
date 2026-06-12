@@ -1,8 +1,8 @@
 <!-- LOGO -->
 <h1 align="center">
-  <img src="images/icons/icon_1024.png" alt="Mosttly Ghostty logo" width="128">
+  <img src="images/icons/icon_1024.png" alt="MadMaxx logo" width="128">
   <br>
-  Mosttly Ghostty
+  MadMaxx
 </h1>
 
 <p align="center">
@@ -20,7 +20,7 @@
   ·
   <a href="#platform-and-agent-status">Status</a>
   ·
-  <a href="https://github.com/ghostty-org/ghostty">Upstream Ghostty</a>
+  <a href="https://github.com/ghostty-org/ghostty">Ghostty</a>
   ·
   <a href="NOTICE">Notice</a>
 </p>
@@ -28,13 +28,13 @@
 <p align="center">
   <img
     src="images/mosttly-agent-sessions.png"
-    alt="Mosttly Ghostty preview showing sidebar sessions running multiple coding agents"
+    alt="MadMaxx preview showing sidebar sessions running multiple coding agents"
     width="920"
   >
 </p>
 
 <p align="center">
-  <a href="https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/Mosttly.dmg">
+  <a href="https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/MadMaxx.dmg">
     <img alt="Download macOS DMG" src="https://img.shields.io/badge/Download-macOS%20DMG-111111?style=for-the-badge&logo=apple&logoColor=white">
   </a>
   <a href="https://github.com/scottmcpherson/mosttly-ghostty/releases">
@@ -44,7 +44,7 @@
 
 ## Fork Notice
 
-Mosttly Ghostty is an unofficial fork of
+MadMaxx is an unofficial fork of
 [Ghostty](https://github.com/ghostty-org/ghostty). It is not affiliated with,
 endorsed by, or maintained by the Ghostty project.
 
@@ -56,7 +56,7 @@ behavior have changed.
 
 ## What's Different
 
-Mosttly Ghostty keeps Ghostty's fast native terminal core and adds a workflow
+MadMaxx keeps Ghostty's fast native terminal core and adds a workflow
 layer for people running multiple coding agents in parallel.
 
 - Sidebar-first tab and session organization.
@@ -66,7 +66,7 @@ layer for people running multiple coding agents in parallel.
 
 ## Project Scope
 
-Mosttly Ghostty's north star is to stay a lightweight, high-performance Ghostty
+MadMaxx's north star is to stay a lightweight, high-performance Ghostty
 terminal for running multiple coding agents in parallel.
 
 In practice, this fork should remain close to "Ghostty with a sidebar and agent
@@ -100,10 +100,10 @@ When in doubt, prefer terminal-native, lightweight, and upstream-friendly.
 
 ## Download
 
-Mosttly Ghostty currently publishes macOS builds through GitHub Releases:
+MadMaxx currently publishes macOS builds through GitHub Releases:
 
-- [Download the latest macOS DMG](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/Mosttly.dmg)
-- [Download the latest macOS zip](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/Mosttly-macOS-universal.zip)
+- [Download the latest macOS DMG](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/MadMaxx.dmg)
+- [Download the latest macOS zip](https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/MadMaxx-macOS-universal.zip)
 - [View all releases](https://github.com/scottmcpherson/mosttly-ghostty/releases)
 
 These builds are produced from `mosttly-v*` release tags and are signed + notarized.
@@ -138,7 +138,7 @@ upstream.
 
 ## Building from Source
 
-Mosttly Ghostty follows the upstream Ghostty build system:
+MadMaxx follows the upstream Ghostty build system:
 
 ```shell
 zig build
@@ -168,7 +168,7 @@ See [HACKING.md](HACKING.md) for upstream development details and
 
 ## Contributing
 
-For changes specific to Mosttly Ghostty, open issues or pull requests against
+For changes specific to MadMaxx, open issues or pull requests against
 this fork. For behavior that also affects upstream Ghostty, check the upstream
 [Contributing to Ghostty](CONTRIBUTING.md) guidance and consider whether the
 change belongs upstream first.
@@ -176,7 +176,7 @@ change belongs upstream first.
 ## Upstream Ghostty
 
 Ghostty is a fast, feature-rich, native terminal emulator and embeddable
-`libghostty` library. Mosttly Ghostty builds on that foundation and keeps
+`libghostty` library. MadMaxx builds on that foundation and keeps
 upstream licensing and attribution intact.
 
 For broader Ghostty project status, roadmap, terminal compliance details,

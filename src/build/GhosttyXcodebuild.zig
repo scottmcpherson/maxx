@@ -49,7 +49,7 @@ pub fn init(
     };
 
     const env = try std.process.getEnvMap(b.allocator);
-    const app_path = b.fmt("macos/build/{s}/Mosttly.app", .{xc_config});
+    const app_path = b.fmt("macos/build/{s}/MadMaxx.app", .{xc_config});
 
     const clean_app_icon_metadata = clean: {
         const step = RunStep.create(b, "clean app icon metadata");

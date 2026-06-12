@@ -266,7 +266,7 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             else => return err,
         };
         if (vsn.tag) |tag| {
-            // Tip releases and Mosttly app release tags are not upstream
+            // Tip releases and MadMaxx app release tags are not upstream
             // Ghostty releases, so they behave like any other pre-release.
             if (!std.mem.eql(u8, tag, "tip") and
                 !std.mem.startsWith(u8, tag, "mosttly-v"))

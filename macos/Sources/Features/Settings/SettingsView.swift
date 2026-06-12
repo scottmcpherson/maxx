@@ -15,11 +15,11 @@ struct SettingsView: View {
                     codexContent
                 }
 
-                Section("Ghostty") {
+                Section("MadMaxx") {
                     LabeledContent("Configuration") {
                         Button("Open Config…", action: model.openGhosttyConfig)
                             .buttonStyle(.bordered)
-                            .accessibilityIdentifier("MosttlySettingsGhosttyConfigButton")
+                            .accessibilityIdentifier("MadMaxxSettingsGhosttyConfigButton")
                     }
                 }
             }
@@ -35,13 +35,13 @@ struct SettingsView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Re-check installed agents")
-                .accessibilityIdentifier("MosttlySettingsRefreshButton")
+                .accessibilityIdentifier("MadMaxxSettingsRefreshButton")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
         .frame(minWidth: 420, minHeight: 360)
-        .accessibilityIdentifier("MosttlySettingsView")
+        .accessibilityIdentifier("MadMaxxSettingsView")
     }
 
     // MARK: - Claude Code
@@ -55,7 +55,7 @@ struct SettingsView: View {
             LabeledContent("Claude Code CLI") {
                 Button("How to Enable…", action: model.openClaudeDocs)
                     .buttonStyle(.bordered)
-                    .accessibilityIdentifier("MosttlySettingsClaudeHelpButton")
+                    .accessibilityIdentifier("MadMaxxSettingsClaudeHelpButton")
             }
         }
 
@@ -63,8 +63,8 @@ struct SettingsView: View {
             status: model.claudeSkillStatus,
             install: model.installClaudeSkill,
             uninstall: model.uninstallClaudeSkill,
-            helpText: "Lets Claude Code open new Mosttly tabs and run commands in them",
-            accessibilityPrefix: "MosttlySettingsClaudeSkill")
+            helpText: "Lets Claude Code open new MadMaxx tabs and run commands in them",
+            accessibilityPrefix: "MadMaxxSettingsClaudeSkill")
 
         Picker("Agent tab permission mode", selection: $model.claudeTabPermissionMode) {
             Text("Default").tag("default")
@@ -76,7 +76,7 @@ struct SettingsView: View {
         }
         .help("Permission mode for Claude Code sessions that agents start in new tabs. "
             + "Applied unless the spawning agent passes explicit permission flags.")
-        .accessibilityIdentifier("MosttlySettingsClaudeTabPermissionModePicker")
+        .accessibilityIdentifier("MadMaxxSettingsClaudeTabPermissionModePicker")
     }
 
     // MARK: - Codex
@@ -93,12 +93,12 @@ struct SettingsView: View {
             LabeledContent("Hook files") {
                 Button("Reveal in Finder", action: model.revealCodexHooks)
                     .buttonStyle(.bordered)
-                    .accessibilityIdentifier("MosttlySettingsRevealCodexHooksButton")
+                    .accessibilityIdentifier("MadMaxxSettingsRevealCodexHooksButton")
             }
-            LabeledContent("Ghostty integration") {
+            LabeledContent("MadMaxx integration") {
                 Button("Uninstall Hooks", action: model.uninstallCodexHooks)
                     .buttonStyle(.bordered)
-                    .accessibilityIdentifier("MosttlySettingsUninstallCodexHooksButton")
+                    .accessibilityIdentifier("MadMaxxSettingsUninstallCodexHooksButton")
             }
 
         case .installing:
@@ -110,10 +110,10 @@ struct SettingsView: View {
             }
 
         case .notInstalled, .failed:
-            LabeledContent("Ghostty integration") {
+            LabeledContent("MadMaxx integration") {
                 Button("Install Hooks", action: model.installCodexHooks)
                     .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("MosttlySettingsInstallCodexHooksButton")
+                    .accessibilityIdentifier("MadMaxxSettingsInstallCodexHooksButton")
             }
 
             if case .failed(let message) = model.codexStatus {
@@ -128,8 +128,8 @@ struct SettingsView: View {
             status: model.codexSkillStatus,
             install: model.installCodexSkill,
             uninstall: model.uninstallCodexSkill,
-            helpText: "Lets Codex open new Mosttly tabs and run commands in them",
-            accessibilityPrefix: "MosttlySettingsCodexSkill")
+            helpText: "Lets Codex open new MadMaxx tabs and run commands in them",
+            accessibilityPrefix: "MadMaxxSettingsCodexSkill")
 
         Picker("Agent tab sandbox mode", selection: $model.codexTabSandboxMode) {
             Text("Default").tag("default")
@@ -141,12 +141,12 @@ struct SettingsView: View {
         }
         .help("Sandbox mode for Codex sessions that agents start in new tabs. "
             + "Applied unless the spawning agent passes explicit sandbox flags.")
-        .accessibilityIdentifier("MosttlySettingsCodexTabSandboxModePicker")
+        .accessibilityIdentifier("MadMaxxSettingsCodexTabSandboxModePicker")
     }
 
     // MARK: - Helpers
 
-    /// Install/remove row for the "mosttly-tabs" tab-control skill, shared by
+    /// Install/remove row for the "madmaxx-tabs" tab-control skill, shared by
     /// the Claude Code and Codex sections.
     @ViewBuilder
     private func skillRow(

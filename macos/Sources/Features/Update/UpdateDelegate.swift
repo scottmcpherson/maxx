@@ -3,7 +3,7 @@ import Cocoa
 
 extension UpdateDriver: SPUUpdaterDelegate {
     func feedURLString(for updater: SPUUpdater) -> String? {
-        // Mosttly currently publishes stable macOS updates through GitHub
+        // MadMaxx currently publishes stable macOS updates through GitHub
         // Releases. GitHub's "latest" endpoint intentionally ignores
         // prereleases, which keeps this feed stable-only.
         return "https://github.com/scottmcpherson/mosttly-ghostty/releases/latest/download/appcast.xml"
