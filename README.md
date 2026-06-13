@@ -14,6 +14,8 @@
   ·
   <a href="#whats-different">What's Different</a>
   ·
+  <a href="#agent-tab-control">Agent Tab Control</a>
+  ·
   <a href="#project-scope">Scope</a>
   ·
   <a href="#platform-and-agent-status">Status</a>
@@ -57,10 +59,33 @@ behavior have changed.
 Maxx keeps Ghostty's fast native terminal core and adds a workflow
 layer for people running multiple coding agents in parallel.
 
+- Agent tab control: Claude Code and Codex can open, name, prompt, monitor,
+  and manage Maxx tabs through the optional `maxx-tabs` skill.
 - Sidebar-first tab and session organization.
 - Sidebar agent status indicators for supported CLIs.
 - A macOS-first distribution path for the fork.
 - Fork-specific release artifacts published from `maxx-v*` tags.
+
+## Agent Tab Control
+
+Maxx is not just a terminal for running agents; it is a terminal that agents
+can understand. The bundled `maxx-agent-hook` helper and optional `maxx-tabs`
+skill let supported agents work with the running Maxx window instead of
+spawning hidden background processes.
+
+With the skill installed from Maxx Settings, Claude Code and Codex can:
+
+- Open a new Maxx tab or window for another agent session, optionally with an
+  initial prompt.
+- Start task-specific commands in the same project directory.
+- List tabs with the foreground process and last reported agent state
+  (`running`, `needsInput`, `error`, or `idle`).
+- Rename, prompt, and close tabs when you ask an agent to coordinate visible
+  work.
+
+Settings also include install/remove controls for the Claude Code and Codex
+skills, plus default permission or sandbox modes for agent-spawned sessions.
+Explicit agent CLI flags still take precedence.
 
 ## Project Scope
 
@@ -88,7 +113,8 @@ Out of scope:
 
 - Built-in browser panels, dashboards, task boards, or other heavyweight app
   surfaces.
-- Agent orchestration or management UI beyond exposing terminal session status.
+- Heavyweight agent orchestration or management UI beyond terminal-native tab
+  control and session status.
 - Features that significantly increase idle resource usage or make upstream
   Ghostty updates difficult.
 - General-purpose workflow features better handled by agent CLIs or external
@@ -112,6 +138,7 @@ These builds are produced from `maxx-v*` release tags and are signed + notarized
 | --- | --- |
 | macOS sidebar tabs/sessions | Supported |
 | macOS sidebar agent statuses | Supported |
+| macOS agent tab control skill | Supported for Claude Code and Codex |
 | Linux/GTK sidebar agent statuses | Not exposed in the UI yet |
 | Claude Code status integration | Supported automatically |
 | Codex status integration | Supported automatically |
