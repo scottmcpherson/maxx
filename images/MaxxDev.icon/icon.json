@@ -3,6 +3,9 @@
   "groups": [
     {
       "blend-mode": "normal",
+      "background": {
+        "solid": "display-p3:0.005,0.010,0.012,1"
+      },
       "layers": [
         {
           "blend-mode": "normal",
