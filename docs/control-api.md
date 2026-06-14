@@ -52,6 +52,80 @@ exited (a kernel-reported fact) — never from terminal contents.
   followed by a newline (or half-close the write side), and read one response
   object terminated by a newline.
 
+## Capability policy
+
+On top of the token gate, every request is evaluated against a typed
+**capability policy** before any side effect runs. A request resolves to a
+caller **source** and a requested **capability**; the policy returns **allow**,
+**deny**, or **confirm**.
+
+- **Capabilities** are typed values with stable names: `tabs:list`, `tabs:spawn`,
+  `tabs:restart`, `tabs:focus`, `tabs:close`, `input:send`, `keys:press`,
+  `state:set`, `metadata:set`, plus `output:read`, `groups:list`,
+  `groups:create`, and `automation:trigger`. The last four are part of the model
+  but have no method behind them yet, so they are reported **unavailable** and
+  always denied (`output:read` is additionally privacy-sensitive and requires an
+  explicit opt-in even once a readback subsystem exists).
+- **Sources** have a `kind` (`local`, `external`, `webhook`, `token`) and an
+  allowlist (`allow`) plus a confirm-list (`confirm`). A request names its source
+  with `--as <source>` (wire field `caller`); when omitted it is attributed to
+  the trusted first-party local source — the capability token already proves a
+  same-user local caller.
+- **Safe defaults**: unknown sources are denied; external/webhook/token sources
+  cannot mutate terminal state unless a capability is explicitly allowlisted;
+  output/captured-line reads require explicit opt-in; an unlisted *mutation* by a
+  local source defaults to **confirm**.
+
+Decisions are **no-inference**: they depend only on the explicit caller,
+capability, and target — never on terminal output, captured lines, process
+names, branch names, paths, or idle time.
+
+### Built-in sources
+
+| Source               | Kind     | May…                                                        |
+| -------------------- | -------- | ----------------------------------------------------------- |
+| `local-cli` (default)| local    | every implemented capability, no confirmation.              |
+| `local-prompt`       | local    | read freely; **confirm** every mutation.                    |
+| `trusted-automation` | webhook  | `tabs:spawn` and `state:set` only.                          |
+| `readonly-external`  | external | `tabs:list` only; no mutation, no output read.              |
+
+These built-ins are all subsets of `local-cli`, so claiming one via `--as` only
+*reduces* a caller's privileges. Credential-bound external/webhook sources that
+are *more* privileged than the default — and the secure key storage and rotation
+they require — are explicit follow-up work.
+
+### Confirmation
+
+When the policy returns **confirm**, the response is `ok:false` with code
+`confirmation_required` and a human-readable prompt that names the source, the
+requested action, the target, and the consequence. Re-send the request with
+`--confirm` (wire field `confirm: true`) to approve it. A source configured with
+`once_per_source` is prompted only on its first use of a capability for the
+lifetime of the app/control session.
+
+### Diagnostics
+
+`policy check` evaluates a `(source, capability, target)` and reports the
+decision **without performing any action** — useful for debugging an
+integration's permissions:
+
+```bash
+maxx +control policy check --as readonly-external --capability tabs:close
+maxx +control policy check --as readonly-external --capability output:read
+maxx +control policy check --capability tabs:spawn   # the default local source
+```
+
+Every allow/deny/confirm decision (including `policy check`) is written to the
+unified log under the `ControlPolicy` category with the source, capability,
+target, and reason — never the request params.
+
+> Metadata-write enforcement is intentionally deferred until the metadata API
+> rework (MAX-4): a metadata-only `sessions.update` and `sessions.set-metadata`
+> are currently ungated by the capability policy. A `sessions.update` that sets
+> `status` **is** gated by `state:set` (status is the same state field
+> `declare-state` writes and `wait --state` matches), so that path is not a way
+> around `state:set`.
+
 ## CLI
 
 The `ghostty`/`maxx` binary ships a `+control` action that handles the token and
@@ -128,6 +202,7 @@ branch on them:
 | `3`  | Missing target — no session with that id (`not_found`).         |
 | `4`  | `wait` target ended (session became terminal) before matching.  |
 | `5`  | Unsupported operation for this session (e.g. nothing to restart).|
+| `6`  | Confirmation required — re-send with `--confirm` to approve.     |
 
 `wait` blocks until its condition holds, then prints a single response whose
 `result.outcome` is `matched`, `timeout`, or `ended`. `watch` streams one JSON
@@ -161,6 +236,7 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`     | Agent sets one caller-owned metadata key.                   |
 | `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display. |
 | `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`  | Agent sets the human-readable summary shown with the state. |
+| `policy.check`           | `GET /control/v1/policy/check`           | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
 
 ### Audit entries
 
@@ -226,7 +302,8 @@ Errors are predictable and documented:
 | Code                 | Meaning                                                    |
 | -------------------- | ---------------------------------------------------------- |
 | `invalid_request`    | Malformed input, bad limits, or a disallowed update field. |
-| `unauthorized`       | Missing or wrong capability token.                         |
+| `unauthorized`       | Missing/wrong token, or the policy denied this capability for the source. |
+| `confirmation_required` | The policy requires confirmation; re-send with `confirm: true`. |
 | `not_found`          | No API-created session with that id.                       |
 | `already_ended`      | The session was canceled or its surface no longer exists.  |
 | `unsupported_action` | Unknown action name.                                       |

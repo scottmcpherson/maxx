@@ -52,6 +52,8 @@ const Verb = enum {
     // MAX-3 agent-declared workflow state verbs.
     @"set-state",
     @"set-summary",
+    // MAX-11 capability policy diagnostic (`policy check`).
+    @"policy-check",
 };
 
 /// A parsed `maxx +control sessions ...` invocation.
@@ -77,6 +79,10 @@ const Command = struct {
     reason: ?[]const u8 = null,
     signal: ?[]const u8 = null,
     summary: ?[]const u8 = null,
+    // MAX-11 capability policy fields.
+    caller: ?[]const u8 = null,
+    capability: ?[]const u8 = null,
+    confirm: bool = false,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
@@ -99,6 +105,7 @@ const Command = struct {
             .@"set-metadata" => "sessions.set-metadata",
             .@"set-state" => "sessions.set-state",
             .@"set-summary" => "sessions.set-summary",
+            .@"policy-check" => "policy.check",
         };
     }
 
@@ -184,10 +191,24 @@ const ParseError = error{
 ///     `failed`. An unknown value is rejected.
 ///   * `sessions set-summary <session_id> --summary <text> [--source <name>]`
 ///
+/// Capability policy (MAX-11). Every request resolves to a caller *source* and a
+/// requested *capability*; the running app's policy decides allow / deny /
+/// confirm before any side effect. Global flags:
+///
+///   * `--as <source>`: claim a policy source (e.g. `readonly-external`).
+///     Omitted, the request is the trusted first-party local source.
+///   * `--confirm` (alias `--yes`): approve a confirmation-required action; the
+///     first attempt without it exits 6 and prints the confirmation prompt.
+///
+///   * `policy check --capability <cap> [--as <source>] [<session_id>]`: a
+///     read-only diagnostic that reports whether a (source, capability, target)
+///     would be allowed, denied, or require confirmation — performing no action.
+///
 /// The create response includes a stable `session_id` to use for all later
 /// operations. The raw JSON response is printed to stdout. Exit codes are
 /// stable: 0 success/matched, 1 generic error, 2 `wait` timeout, 3 missing
-/// target, 4 `wait` target ended before matching, 5 unsupported operation.
+/// target, 4 `wait` target ended before matching, 5 unsupported operation,
+/// 6 confirmation required.
 ///
 /// Note: a flag value that begins with `+` (e.g. a command literally starting
 /// with a plus) must use the `--flag=value` form (`--command=+foo`); the
@@ -326,7 +347,8 @@ fn parseDurationMs(s: []const u8) ?u64 {
 
 /// Map a response to a stable, documented exit code:
 ///   0 success/matched · 1 generic error · 2 wait timeout ·
-///   3 missing target (not_found) · 4 wait target ended · 5 unsupported op.
+///   3 missing target (not_found) · 4 wait target ended · 5 unsupported op ·
+///   6 confirmation required (re-send with --confirm to approve).
 fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, response, .{}) catch return 1;
     defer parsed.deinit();
@@ -356,6 +378,7 @@ fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
                 if (code == .string) {
                     if (std.mem.eql(u8, code.string, "not_found")) return 3;
                     if (std.mem.eql(u8, code.string, "unsupported")) return 5;
+                    if (std.mem.eql(u8, code.string, "confirmation_required")) return 6;
                     // `unsupported_action` is an unknown/misspelled action name —
                     // a caller usage error, which is a generic (exit 1) failure.
                 }
@@ -391,10 +414,20 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         group = iter.next() orelse return error.MissingGroup;
     }
 
-    if (!std.mem.eql(u8, group, "sessions")) return error.UnknownGroup;
-
-    const verb_str = iter.next() orelse return error.MissingVerb;
-    const verb = parseVerb(verb_str) orelse return error.UnknownVerb;
+    // Two command groups share this socket/CLI: `sessions <verb>` (the bulk of
+    // the surface) and `policy check` (the MAX-11 capability diagnostic).
+    const verb: Verb = blk: {
+        if (std.mem.eql(u8, group, "sessions")) {
+            const verb_str = iter.next() orelse return error.MissingVerb;
+            break :blk parseVerb(verb_str) orelse return error.UnknownVerb;
+        } else if (std.mem.eql(u8, group, "policy")) {
+            const sub = iter.next() orelse return error.MissingVerb;
+            if (!std.mem.eql(u8, sub, "check")) return error.UnknownVerb;
+            break :blk .@"policy-check";
+        } else {
+            return error.UnknownGroup;
+        }
+    };
 
     var cmd: Command = .{ .verb = verb };
     while (iter.next()) |raw_arg| {
@@ -437,6 +470,12 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.signal = v;
         } else if (try flagValue(alloc, arg, iter, "--summary")) |v| {
             cmd.summary = v;
+        } else if (try flagValue(alloc, arg, iter, "--as")) |v| {
+            cmd.caller = v;
+        } else if (try flagValue(alloc, arg, iter, "--capability")) |v| {
+            cmd.capability = v;
+        } else if (std.mem.eql(u8, arg, "--confirm") or std.mem.eql(u8, arg, "--yes")) {
+            cmd.confirm = true;
         } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
             cmd.timeout_ms = parseDurationMs(v) orelse return error.InvalidDuration;
         } else if (try flagValue(alloc, arg, iter, "--since")) |v| {
@@ -579,6 +618,18 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     if (cmd.summary) |v| {
         try json.objectField("summary");
         try json.write(v);
+    }
+    if (cmd.caller) |v| {
+        try json.objectField("caller");
+        try json.write(v);
+    }
+    if (cmd.capability) |v| {
+        try json.objectField("capability");
+        try json.write(v);
+    }
+    if (cmd.confirm) {
+        try json.objectField("confirm");
+        try json.write(true);
     }
     if (cmd.timeout_ms) |v| {
         try json.objectField("timeout_ms");
@@ -1019,4 +1070,104 @@ test "exitCode maps wait outcomes and error codes" {
         @as(u8, 1),
         exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unsupported_action\"}}", .action),
     );
+    // A confirmation-required response maps to its own exit code (6).
+    try testing.expectEqual(
+        @as(u8, 6),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}", .create),
+    );
+}
+
+test "parseCommand action with --as caller and --confirm" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions action ID-1 --action input --input hi --as local-prompt --confirm",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .action);
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("input", cmd.action.?);
+    try testing.expectEqualStrings("local-prompt", cmd.caller.?);
+    try testing.expect(cmd.confirm);
+}
+
+test "buildRequest carries caller and confirm" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .action,
+        .id = "id-1",
+        .action = "close",
+        .caller = "readonly-external",
+        .confirm = true,
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try testing.expectEqualStrings("readonly-external", params.get("caller").?.string);
+    try testing.expectEqual(true, params.get("confirm").?.bool);
+}
+
+test "parseCommand policy check with capability and source" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "policy check --as readonly-external --capability tabs:close --id ID-7",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"policy-check");
+    try testing.expectEqualStrings("policy.check", cmd.method());
+    try testing.expectEqualStrings("readonly-external", cmd.caller.?);
+    try testing.expectEqualStrings("tabs:close", cmd.capability.?);
+    try testing.expectEqualStrings("ID-7", cmd.id.?);
+}
+
+test "buildRequest policy check includes capability" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"policy-check",
+        .caller = "trusted-automation",
+        .capability = "output:read",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("policy.check", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("trusted-automation", params.get("caller").?.string);
+    try testing.expectEqualStrings("output:read", params.get("capability").?.string);
+}
+
+test "parseCommand policy with unknown verb errors" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "policy frobnicate");
+    defer iter.deinit();
+    try testing.expectError(error.UnknownVerb, parseCommand(alloc, &iter));
 }
