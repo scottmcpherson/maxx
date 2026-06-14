@@ -38,6 +38,14 @@ metadata. The only Maxx-owned lifecycle signal is derived from explicit session
 state — whether the surface still exists and whether its child process has
 exited (a kernel-reported fact) — never from terminal contents.
 
+Put another way, Maxx shows only **mechanical facts** (things it owns or
+observes as a terminal runtime) and **agent-declared facts** (workflow meaning
+declared through an explicit API call, hook event, or metadata field). It never
+derives **workflow truth** — _complete_, _blocked_, _tests passed_, _PR created_
+— from incidental signals. This is the no-inference rule; the canonical
+statement, the allowed/prohibited sources, and the tests that lock it down live
+in [`no-inference.md`](no-inference.md).
+
 ## Transport & trust boundary
 
 - **Unix domain socket**, created by the running Maxx app at
@@ -120,14 +128,14 @@ Both record an audit entry and are surfaced in `get` / `list` / `watch`.
 The raw JSON response is printed to stdout. Exit codes are stable so scripts can
 branch on them:
 
-| Exit | Meaning                                                          |
-| ---- | --------------------------------------------------------------- |
-| `0`  | Success, or `wait` observed its condition (`matched`).          |
-| `1`  | Generic error (transport, usage, validation).                   |
-| `2`  | `wait` timed out before the condition held.                     |
-| `3`  | Missing target — no session with that id (`not_found`).         |
-| `4`  | `wait` target ended (session became terminal) before matching.  |
-| `5`  | Unsupported operation for this session (e.g. nothing to restart).|
+| Exit | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | Success, or `wait` observed its condition (`matched`).            |
+| `1`  | Generic error (transport, usage, validation).                     |
+| `2`  | `wait` timed out before the condition held.                       |
+| `3`  | Missing target — no session with that id (`not_found`).           |
+| `4`  | `wait` target ended (session became terminal) before matching.    |
+| `5`  | Unsupported operation for this session (e.g. nothing to restart). |
 
 `wait` blocks until its condition holds, then prints a single response whose
 `result.outcome` is `matched`, `timeout`, or `ended`. `watch` streams one JSON
@@ -144,23 +152,23 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                   | REST equivalent                          | Purpose                                                     |
-| ------------------------ | ---------------------------------------- | ----------------------------------------------------------- |
-| `sessions.create`        | `POST /control/v1/sessions`              | Create a tab/session from explicit inputs.                  |
-| `sessions.get`           | `GET /control/v1/sessions/{id}`          | Explicit lifecycle state + declared metadata.               |
-| `sessions.list`          | `GET /control/v1/sessions`               | List API-created sessions.                                  |
-| `sessions.update`        | `PATCH /control/v1/sessions/{id}`        | Update caller-owned `status`/`metadata` only.               |
-| `sessions.action`        | `POST /control/v1/sessions/{id}/actions` | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.|
-| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`     | Block on a state/event/lifecycle until matched or timeout.  |
-| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`   | Stream lifecycle/event changes (newline-delimited).         |
-| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive` | Close the surface, retain the record.                       |
-| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart` | Replay the recorded/supplied command in a fresh surface.    |
-| `sessions.events`        | `GET /control/v1/sessions/{id}/log`      | Read the audit log (declared states/events + lifecycle).    |
-| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`    | Agent declares a lifecycle state (audited).                 |
-| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`    | Agent emits a named event with optional JSON payload.       |
-| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`     | Agent sets one caller-owned metadata key.                   |
-| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display. |
-| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`  | Agent sets the human-readable summary shown with the state. |
+| Method                   | REST equivalent                                | Purpose                                                      |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------ |
+| `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                   |
+| `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                |
+| `sessions.list`          | `GET /control/v1/sessions`                     | List API-created sessions.                                   |
+| `sessions.update`        | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only.                |
+| `sessions.action`        | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`. |
+| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.   |
+| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).          |
+| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                        |
+| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.     |
+| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).     |
+| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                  |
+| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.        |
+| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                    |
+| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.       |
+| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.  |
 
 ### Audit entries
 
@@ -223,15 +231,15 @@ Errors are predictable and documented:
 }
 ```
 
-| Code                 | Meaning                                                    |
-| -------------------- | ---------------------------------------------------------- |
-| `invalid_request`    | Malformed input, bad limits, or a disallowed update field. |
-| `unauthorized`       | Missing or wrong capability token.                         |
-| `not_found`          | No API-created session with that id.                       |
-| `already_ended`      | The session was canceled or its surface no longer exists.  |
-| `unsupported_action` | Unknown action name.                                       |
+| Code                 | Meaning                                                                |
+| -------------------- | ---------------------------------------------------------------------- |
+| `invalid_request`    | Malformed input, bad limits, or a disallowed update field.             |
+| `unauthorized`       | Missing or wrong capability token.                                     |
+| `not_found`          | No API-created session with that id.                                   |
+| `already_ended`      | The session was canceled or its surface no longer exists.              |
+| `unsupported_action` | Unknown action name.                                                   |
 | `unsupported`        | Operation not supported for this session (e.g. no command to restart). |
-| `internal`           | Unexpected server-side failure.                            |
+| `internal`           | Unexpected server-side failure.                                        |
 
 ## Identifiers & ownership
 
