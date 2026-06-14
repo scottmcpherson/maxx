@@ -851,6 +851,20 @@ struct ControlSessionRegistryTests {
             request(.sessionsAction, .init(id: id, action: "interrupt")), host: host)
         #expect(response.error?.code == "unsupported")
     }
+
+    @Test func interruptWithSignalOnExitedProcessIsUnsupported() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+        // Same guard must cover the named-signal path: an exited process must
+        // never be signaled (its pgid may have been reused).
+        host.surfaces[surface]?.alive = false
+
+        let response = registry.handle(
+            request(.sessionsAction, .init(id: id, action: "interrupt", signal: "SIGTERM")),
+            host: host)
+        #expect(response.error?.code == "unsupported")
+    }
 }
 
 @MainActor
