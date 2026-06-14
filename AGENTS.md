@@ -34,6 +34,20 @@ A file for [guiding coding agents](https://agents.md/).
 - macOS app: `macos/`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
 
+## Architecture Guardrails
+
+- **No inference.** Maxx is the visible terminal-native runtime/control plane,
+  not the workflow brain. It may display **mechanical facts** (process
+  lifecycle, session/PTY ids, exit codes, timestamps, tab/worktree
+  associations, the terminal bell/progress) and **agent-declared facts**
+  (workflow meaning declared through the control API, a hook event, or
+  metadata). It must never derive **workflow truth** — _complete_, _blocked_,
+  _tests passed_, _PR created_, _ready for review_ — by scraping terminal
+  output, parsing agent prose, or guessing from process/branch/path/worktree
+  names, PR URLs, or idle time. If an agent has no explicit declaration path for
+  a status, document the gap rather than infer it. See
+  [`docs/no-inference.md`](docs/no-inference.md).
+
 ## Git Workflow
 
 - Follow `WORKFLOW.md` for branch, feature, and release workflow.
