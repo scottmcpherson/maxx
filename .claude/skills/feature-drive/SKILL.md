@@ -1,6 +1,6 @@
 ---
 name: feature-drive
-description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work on a branch, implement, build and exercise the running app with computer use + screenshots, run /code-review, attach evidence, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
+description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work on a branch, implement, build and exercise the running app with Peekaboo screenshots, run /code-review, attach evidence, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
 ---
 
 # Drive a Linear issue to done
@@ -31,7 +31,15 @@ Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGEN
 
 1. **Tests & formatting** for what you touched — don't run the full suite blindly:
    - `zig build test -Dtest-filter=<name>` for affected Zig tests, plus `zig fmt .` (and `swiftlint lint --strict --fix` / `prettier -w .` if you touched Swift / other files).
-2. **Build and drive the app.** Create a dev build and launch it with `zig build run`, then use **computer use** to exercise the change in the running app — click/type through the relevant flow and take **screenshots** along the way. Every acceptance criterion must be observably met in the screenshots; a criterion with no supporting screenshot gets called out in the report, never assumed.
+2. **Build and drive the app.** Build with `zig build`, then launch the dev build on its **own** control socket so it never fights an installed Maxx over the shared per-user socket:
+   ```
+   open -n --env MAXX_CONTROL_DIR=/tmp/maxx-control-dev zig-out/Maxx.app
+   ```
+   Pass that same `MAXX_CONTROL_DIR` to every `ghostty +control …` call (the control API is the headless way to drive and observe a change end to end). Take **screenshots with Peekaboo** — the `peekaboo` CLI runs from Bash with no per-call approval and captures a window by pid/bundle id even when it isn't frontmost (so no Spaces juggling, and no computer-use MCP). Target the dev build by pid or `--app com.scottmcpherson.maxx.debug` (plain `Maxx` collides with an installed build):
+   ```
+   peekaboo image --pid <dev pid> --mode window --path shot.png
+   ```
+   Use `peekaboo click` / `peekaboo type` for any UI a human would drive. Then `Read` the PNG. Every acceptance criterion must be observably met in the screenshots; a criterion with no supporting screenshot gets called out in the report, never assumed.
 3. Run **/code-review** (default `high`). Address findings; re-test if the fixes were non-trivial.
 
 ## 4. Close the loop
