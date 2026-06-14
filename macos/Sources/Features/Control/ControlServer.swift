@@ -362,12 +362,16 @@ final class ControlServer {
         }
     }
 
-    /// Non-blocking check for an orderly peer shutdown (the client closed the
-    /// connection). A peeked read of 0 bytes means EOF.
+    /// Non-blocking check for a *full* peer hangup (the client closed the whole
+    /// connection). Uses `POLLHUP` rather than a peeked 0-byte read: the wire
+    /// protocol explicitly lets a caller half-close just its write side after
+    /// sending the request, which surfaces as a readable EOF (not `POLLHUP`), so
+    /// a peeked read would wrongly drop those clients mid-wait/watch. `POLLHUP`
+    /// fires only when both directions are torn down.
     private func peerClosed(_ fd: Int32) -> Bool {
-        var byte: UInt8 = 0
-        let n = recv(fd, &byte, 1, Int32(MSG_PEEK) | Int32(MSG_DONTWAIT))
-        return n == 0
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, 0) > 0 else { return false }
+        return (pfd.revents & Int16(POLLHUP)) != 0
     }
 
     private func authorize(_ provided: String?) -> Bool {

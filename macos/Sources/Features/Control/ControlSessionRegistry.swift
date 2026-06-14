@@ -492,10 +492,16 @@ final class ControlSessionRegistry {
                 let stateEvent = session.events.last { $0.kind == .state && $0.name == target }
                 return .matched(snapshot, stateEvent.map { eventView($0, sessionID: session.id) })
             }
-            return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
+            // A state can only be (re)declared by a live process. Once the
+            // process exits (or the surface is gone) the wait can never match,
+            // so end it rather than block until timeout.
+            return current == .running ? .pending(snapshot) : .ended(snapshot)
 
         case let .lifecycle(target):
             if current == target { return .matched(snapshot, nil) }
+            // A lifecycle wait ends only at a *terminal* lifecycle other than the
+            // target; `exited` is a legitimate value to wait for, or to pass
+            // through toward `closed`, so it is not itself an end here.
             return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
 
         case let .event(name):
@@ -504,7 +510,8 @@ final class ControlSessionRegistry {
             }) {
                 return .matched(snapshot, eventView(match, sessionID: session.id))
             }
-            return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
+            // Likewise, no further events can arrive once the process is gone.
+            return current == .running ? .pending(snapshot) : .ended(snapshot)
         }
     }
 
@@ -561,7 +568,10 @@ final class ControlSessionRegistry {
             next.lastLifecycle = current.rawValue
         }
 
-        return WatchUpdate(messages: messages, plan: next, ended: current.isTerminal)
+        // A watch ends once the foreground process is no longer running —
+        // including a plain `exited` — so a supervisor watching a command that
+        // finishes without declaring anything is not left streaming forever.
+        return WatchUpdate(messages: messages, plan: next, ended: current != .running)
     }
 
     // MARK: - Helpers

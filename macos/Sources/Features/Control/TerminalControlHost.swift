@@ -120,8 +120,11 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         guard let signal else {
             // ETX (Ctrl-C). Sent as text so we don't depend on key-event
             // encoding, and so the tty delivers it to the whole foreground
-            // process group — the most correct way to interrupt.
-            view.surfaceModel?.sendText("\u{03}")
+            // process group — the most correct way to interrupt. Report failure
+            // when there is no live process/surface to receive it, so the caller
+            // never sees a successful interrupt that delivered nothing.
+            guard !view.processExited, let model = view.surfaceModel else { return false }
+            model.sendText("\u{03}")
             return true
         }
         // A specific signal is delivered through the explicit process-control

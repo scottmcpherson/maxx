@@ -64,7 +64,9 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     func interrupt(signal: Int32?) -> Bool {
         surface.interruptCount += 1
         surface.interruptSignals.append(signal)
-        // A named signal needs a foreground pid; Ctrl-C (nil) always "delivers".
+        // Mirror production: nothing to interrupt once the process has exited;
+        // a named signal additionally needs a foreground pid.
+        guard surface.alive else { return false }
         return signal == nil || surface.pid != nil
     }
     func close() {
@@ -791,6 +793,63 @@ struct ControlSessionRegistryTests {
         update = registry.pollWatch(update.plan, host: host)
         #expect(update.ended)
         #expect(update.messages.contains { $0.type == "lifecycle" && $0.lifecycle == "archived" })
+    }
+
+    // MARK: - wait/watch end on process exit (no declared state/event)
+
+    @Test func waitForStateEndsWhenProcessExits() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let plan = try registry.beginWait(.init(id: id, state: "tests:passed"))
+        guard case .pending = registry.pollWait(plan, host: host)! else {
+            Issue.record("expected pending while the process runs")
+            return
+        }
+        // The command exits without ever declaring the state.
+        host.surfaces[surface]?.alive = false
+        guard case .ended = registry.pollWait(plan, host: host)! else {
+            Issue.record("expected ended once the process exits, not an indefinite wait")
+            return
+        }
+    }
+
+    @Test func waitForEventEndsWhenProcessExits() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let plan = try registry.beginWait(.init(id: id, event: "done"))
+        host.surfaces[surface]?.alive = false
+        guard case .ended = registry.pollWait(plan, host: host)! else {
+            Issue.record("expected ended once the process exits")
+            return
+        }
+    }
+
+    @Test func watchEndsWhenProcessExits() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let (plan, _) = try registry.beginWatch(.init(id: id), host: host)
+        host.surfaces[surface]?.alive = false
+        let update = registry.pollWatch(plan, host: host)
+        #expect(update.ended)
+        #expect(update.messages.contains { $0.type == "lifecycle" && $0.lifecycle == "exited" })
+    }
+
+    @Test func interruptOnExitedProcessIsUnsupported() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+        // Surface still exists, but its process has exited — nothing to Ctrl-C.
+        host.surfaces[surface]?.alive = false
+
+        let response = registry.handle(
+            request(.sessionsAction, .init(id: id, action: "interrupt")), host: host)
+        #expect(response.error?.code == "unsupported")
     }
 }
 
