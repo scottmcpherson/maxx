@@ -148,4 +148,38 @@ enum ControlJSONValue: Codable, Equatable {
             throw ControlError(.invalidRequest, "payload is not valid JSON")
         }
     }
+
+    /// Compact JSON serialization of this value, used both to bound metadata size
+    /// and to render/compare values without interpreting them. Scalars are
+    /// wrapped in an array before encoding because `JSONEncoder` rejects a
+    /// top-level fragment; the surrounding brackets are stripped back off.
+    ///
+    /// Keys are sorted so an object value renders deterministically: otherwise
+    /// `Dictionary` iteration order would make the displayed text — and the
+    /// `displayString` used for `list` filtering — vary from run to run.
+    var serializedJSON: String {
+        let wrapped = ControlJSONValue.array([self])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(wrapped),
+              let string = String(data: data, encoding: .utf8),
+              string.count >= 2 else {
+            return ""
+        }
+        return String(string.dropFirst().dropLast())
+    }
+
+    /// Serialized (compact JSON) byte count, used to enforce metadata size limits.
+    var serializedByteCount: Int { serializedJSON.utf8.count }
+
+    /// A human-facing rendering for display and basic filtering. A bare string
+    /// shows as itself (no surrounding quotes); every other value shows as its
+    /// compact JSON. This is a presentation/comparison affordance only — Maxx
+    /// still stores the value verbatim and never reinterprets it.
+    var displayString: String {
+        switch self {
+        case let .string(value): return value
+        default: return serializedJSON
+        }
+    }
 }

@@ -162,4 +162,10 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         // verbatim and never derives anything from terminal output.
         view.applyDeclaredAgentState(declared)
     }
+
+    func applyMetadata(_ metadata: [String: ControlJSONValue]) {
+        // An explicit agent declaration only — the surface stores and displays the
+        // map verbatim and never derives anything from terminal output.
+        view.applyAgentMetadata(metadata)
+    }
 }

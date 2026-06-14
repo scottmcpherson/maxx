@@ -52,6 +52,16 @@ const Verb = enum {
     // MAX-3 agent-declared workflow state verbs.
     @"set-state",
     @"set-summary",
+    // MAX-4 agent-reported metadata verbs.
+    @"remove-metadata",
+    @"clear-metadata",
+};
+
+/// A single `list --filter` constraint: a metadata key that must be present and,
+/// when `value` is non-null, must equal it (compared as a string).
+const MetadataFilter = struct {
+    key: []const u8,
+    value: ?[]const u8,
 };
 
 /// A parsed `maxx +control sessions ...` invocation.
@@ -74,12 +84,18 @@ const Command = struct {
     payload_json: ?[]const u8 = null,
     key: ?[]const u8 = null,
     value: ?[]const u8 = null,
+    // MAX-4 fields.
+    value_json: ?[]const u8 = null,
     reason: ?[]const u8 = null,
     signal: ?[]const u8 = null,
     summary: ?[]const u8 = null,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
+    // Keys to drop for `remove-metadata` (repeatable `--key`).
+    keys: std.ArrayList([]const u8) = .empty,
+    // `--filter key[=value]` constraints for `list`. value is null for key-only.
+    filters: std.ArrayList(MetadataFilter) = .empty,
     env: std.ArrayList([]const u8) = .empty,
 
     fn method(self: Command) []const u8 {
@@ -99,6 +115,8 @@ const Command = struct {
             .@"set-metadata" => "sessions.set-metadata",
             .@"set-state" => "sessions.set-state",
             .@"set-summary" => "sessions.set-summary",
+            .@"remove-metadata" => "sessions.remove-metadata",
+            .@"clear-metadata" => "sessions.clear-metadata",
         };
     }
 
@@ -120,6 +138,7 @@ const ParseError = error{
     MissingValue,
     UnknownFlag,
     InvalidMetadata,
+    InvalidFilter,
     InvalidDuration,
     InvalidSince,
 } || Allocator.Error;
@@ -174,7 +193,21 @@ const ParseError = error{
 ///     [--source <name>]`
 ///   * `sessions emit-event <session_id> --event <name> [--payload-json <json>]
 ///     [--source <name>]`
-///   * `sessions set-metadata <session_id> --key <key> --value <value>`
+///
+/// Agent-reported metadata verbs (MAX-4 — namespaced key → arbitrary JSON value
+/// an agent attaches to a session; Maxx stores/displays/filters it verbatim and
+/// never interprets it as workflow state):
+///
+///   * `sessions set-metadata <session_id> --key <key>
+///     (--value <string> | --value-json <json>) [--source <name>]`: set/merge one
+///     key. `--value-json` carries a structured (nested) value.
+///   * `sessions remove-metadata <session_id> --key <key> [--key <key> ...]`:
+///     drop one or more keys.
+///   * `sessions clear-metadata <session_id>`: drop all metadata.
+///   * `sessions list --filter <key>[=<value>] [--filter ...]`: list only
+///     sessions whose metadata matches every filter (key present, or key=value).
+///   * `sessions create`/`update` also accept repeatable `--metadata key=value`
+///     (string values).
 ///
 /// Agent-declared workflow state verbs (MAX-3 — a small, validated state the UI
 /// displays as a badge, distinct from the free-form `declare-state`):
@@ -217,7 +250,7 @@ pub fn run(alloc: Allocator) !u8 {
             try stderr.print(
                 "error: unknown subcommand. Try: create, get, list, update, cancel, action, " ++
                     "wait, watch, archive, restart, events, declare-state, emit-event, set-metadata, " ++
-                    "set-state, set-summary\n",
+                    "remove-metadata, clear-metadata, set-state, set-summary\n",
                 .{},
             );
             return 1;
@@ -228,6 +261,10 @@ pub fn run(alloc: Allocator) !u8 {
         },
         error.InvalidMetadata => {
             try stderr.print("error: --metadata expects key=value\n", .{});
+            return 1;
+        },
+        error.InvalidFilter => {
+            try stderr.print("error: --filter expects key or key=value\n", .{});
             return 1;
         },
         error.InvalidDuration => {
@@ -428,7 +465,13 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         } else if (try flagValue(alloc, arg, iter, "--payload-json")) |v| {
             cmd.payload_json = v;
         } else if (try flagValue(alloc, arg, iter, "--key")) |v| {
+            // `--key` names the single key for `set-metadata` and, when repeated,
+            // the keys to drop for `remove-metadata`; record it in both shapes so
+            // either method can read it.
             cmd.key = v;
+            try cmd.keys.append(alloc, v);
+        } else if (try flagValue(alloc, arg, iter, "--value-json")) |v| {
+            cmd.value_json = v;
         } else if (try flagValue(alloc, arg, iter, "--value")) |v| {
             cmd.value = v;
         } else if (try flagValue(alloc, arg, iter, "--reason")) |v| {
@@ -444,6 +487,15 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         } else if (try flagValue(alloc, arg, iter, "--metadata")) |v| {
             const eq = std.mem.indexOfScalar(u8, v, '=') orelse return error.InvalidMetadata;
             try cmd.metadata.append(alloc, .{ v[0..eq], v[eq + 1 ..] });
+        } else if (try flagValue(alloc, arg, iter, "--filter")) |v| {
+            // `key` (presence) or `key=value` (equality). An empty key is invalid.
+            if (std.mem.indexOfScalar(u8, v, '=')) |eq| {
+                if (eq == 0) return error.InvalidFilter;
+                try cmd.filters.append(alloc, .{ .key = v[0..eq], .value = v[eq + 1 ..] });
+            } else {
+                if (v.len == 0) return error.InvalidFilter;
+                try cmd.filters.append(alloc, .{ .key = v, .value = null });
+            }
         } else if (try flagValue(alloc, arg, iter, "--env")) |v| {
             try cmd.env.append(alloc, v);
         } else if (std.mem.eql(u8, arg, "--json")) {
@@ -560,13 +612,42 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
         try json.objectField("payload_json");
         try json.write(v);
     }
-    if (cmd.key) |v| {
+    if (cmd.verb == .@"remove-metadata") {
+        // remove-metadata carries the keys to drop as an array (repeatable
+        // `--key`); it never sends a scalar `key`.
+        if (cmd.keys.items.len > 0) {
+            try json.objectField("keys");
+            try json.beginArray();
+            for (cmd.keys.items) |k| try json.write(k);
+            try json.endArray();
+        }
+    } else if (cmd.key) |v| {
         try json.objectField("key");
         try json.write(v);
     }
     if (cmd.value) |v| {
         try json.objectField("value");
         try json.write(v);
+    }
+    if (cmd.value_json) |v| {
+        // Raw JSON text carried as a string; the server parses and validates it.
+        try json.objectField("value_json");
+        try json.write(v);
+    }
+    if (cmd.filters.items.len > 0) {
+        try json.objectField("metadata_filter");
+        try json.beginArray();
+        for (cmd.filters.items) |f| {
+            try json.beginObject();
+            try json.objectField("key");
+            try json.write(f.key);
+            if (f.value) |val| {
+                try json.objectField("value");
+                try json.write(val);
+            }
+            try json.endObject();
+        }
+        try json.endArray();
     }
     if (cmd.reason) |v| {
         try json.objectField("reason");
@@ -1019,4 +1100,170 @@ test "exitCode maps wait outcomes and error codes" {
         @as(u8, 1),
         exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unsupported_action\"}}", .action),
     );
+}
+
+// MARK: - MAX-4 agent-reported metadata
+
+test "parseCommand set-metadata with value-json" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Note: ArgIteratorGeneral consumes shell quotes, so use a quote-free JSON
+    // value here; the quoted-string case is covered by the buildRequest test.
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions set-metadata ID-1 --key run.attempts --value-json [1,2,3]",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"set-metadata");
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("run.attempts", cmd.key.?);
+    try testing.expectEqualStrings("[1,2,3]", cmd.value_json.?);
+    try testing.expectEqualStrings("sessions.set-metadata", cmd.method());
+}
+
+test "buildRequest set-metadata emits value_json" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"set-metadata",
+        .id = "id-1",
+        .key = "pr.url",
+        .value_json = "\"https://example.com/pr/1\"",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.set-metadata", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("pr.url", params.get("key").?.string);
+    try testing.expectEqualStrings(
+        "\"https://example.com/pr/1\"",
+        params.get("value_json").?.string,
+    );
+}
+
+test "parseCommand remove-metadata collects repeated keys" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions remove-metadata ID-9 --key repo --key branch",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"remove-metadata");
+    try testing.expectEqualStrings("ID-9", cmd.id.?);
+    try testing.expectEqual(@as(usize, 2), cmd.keys.items.len);
+    try testing.expectEqualStrings("repo", cmd.keys.items[0]);
+    try testing.expectEqualStrings("branch", cmd.keys.items[1]);
+    try testing.expectEqualStrings("sessions.remove-metadata", cmd.method());
+}
+
+test "buildRequest remove-metadata emits keys array, not scalar key" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cmd: Command = .{ .verb = .@"remove-metadata", .id = "id-1", .key = "branch" };
+    try cmd.keys.append(alloc, "repo");
+    try cmd.keys.append(alloc, "branch");
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.remove-metadata", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    // The scalar `key` is omitted for remove-metadata; only `keys` is sent.
+    try testing.expect(params.get("key") == null);
+    const keys = params.get("keys").?.array;
+    try testing.expectEqual(@as(usize, 2), keys.items.len);
+    try testing.expectEqualStrings("repo", keys.items[0].string);
+    try testing.expectEqualStrings("branch", keys.items[1].string);
+}
+
+test "parseCommand clear-metadata" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "sessions clear-metadata ID-2");
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"clear-metadata");
+    try testing.expectEqualStrings("ID-2", cmd.id.?);
+    try testing.expectEqualStrings("sessions.clear-metadata", cmd.method());
+}
+
+test "parseCommand list with metadata filters" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions list --filter repo=org/repo --filter linear.issue",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .list);
+    try testing.expectEqual(@as(usize, 2), cmd.filters.items.len);
+    try testing.expectEqualStrings("repo", cmd.filters.items[0].key);
+    try testing.expectEqualStrings("org/repo", cmd.filters.items[0].value.?);
+    try testing.expectEqualStrings("linear.issue", cmd.filters.items[1].key);
+    try testing.expect(cmd.filters.items[1].value == null);
+}
+
+test "buildRequest list emits metadata_filter array" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cmd: Command = .{ .verb = .list };
+    try cmd.filters.append(alloc, .{ .key = "repo", .value = "org/repo" });
+    try cmd.filters.append(alloc, .{ .key = "branch", .value = null });
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    const filters = params.get("metadata_filter").?.array;
+    try testing.expectEqual(@as(usize, 2), filters.items.len);
+    try testing.expectEqualStrings("repo", filters.items[0].object.get("key").?.string);
+    try testing.expectEqualStrings("org/repo", filters.items[0].object.get("value").?.string);
+    try testing.expectEqualStrings("branch", filters.items[1].object.get("key").?.string);
+    // A key-only filter omits `value`.
+    try testing.expect(filters.items[1].object.get("value") == null);
+}
+
+test "parseCommand filter rejects empty key" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "sessions list --filter =value");
+    defer iter.deinit();
+
+    try testing.expectError(error.InvalidFilter, parseCommand(alloc, &iter));
 }

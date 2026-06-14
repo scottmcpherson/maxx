@@ -126,12 +126,27 @@ extension Ghostty {
                     }
                 }
 
-                // Agent-declared workflow state badge (Control API set-state/
-                // set-summary). Shown only when an agent has explicitly declared
-                // a state or summary; never inferred from terminal output.
-                if let declared = surfaceView.declaredAgentState {
-                    AgentStateBadge(declared: declared)
-                        .zIndex(1)
+                // Agent-provided overlays, pinned top-left and stacked vertically:
+                // the agent-declared workflow-state badge (Control API set-state/
+                // set-summary) and, beneath it, the agent-reported metadata chip
+                // (set-metadata etc.). Both are shown ONLY when an agent has
+                // explicitly declared/reported them — never inferred from terminal
+                // output — and the metadata chip is never treated as workflow
+                // state. Grouping them here keeps both clear of the top-right
+                // read-only badge and the bottom URL-hover / child-exited bars.
+                if surfaceView.declaredAgentState != nil || !surfaceView.agentMetadata.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let declared = surfaceView.declaredAgentState {
+                            AgentStateBadge(declared: declared)
+                        }
+                        if !surfaceView.agentMetadata.isEmpty {
+                            AgentMetadataBadge(metadata: surfaceView.agentMetadata)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(8)
+                    .zIndex(1)
                 }
 
                 // Show key state indicator for active key tables and/or pending key sequences
@@ -1119,44 +1134,41 @@ extension Ghostty {
         @State private var showingPopover = false
 
         var body: some View {
-            VStack {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let state = declared.state {
-                            HStack(spacing: 5) {
-                                Image(systemName: Self.symbol(for: state))
-                                    .font(.system(size: 12))
-                                Text(state.label)
-                                    .font(.system(size: 12, weight: .medium))
-                            }
+            // Leading content only; the enclosing overlay column pins it
+            // top-leading and stacks the metadata chip beneath it.
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let state = declared.state {
+                        HStack(spacing: 5) {
+                            Image(systemName: Self.symbol(for: state))
+                                .font(.system(size: 12))
+                            Text(state.label)
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(badgeBackground(for: state))
+                        .foregroundStyle(Self.color(for: state))
+                    }
+
+                    if let summary = declared.summary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(badgeBackground(for: state))
-                            .foregroundStyle(Self.color(for: state))
-                        }
-
-                        if let summary = declared.summary, !summary.isEmpty {
-                            Text(summary)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
-                                .frame(maxWidth: 320, alignment: .leading)
-                        }
+                            .background(
+                                RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                            .frame(maxWidth: 320, alignment: .leading)
                     }
-                    .onTapGesture { showingPopover = true }
-                    .backport.pointerStyle(.link)
-                    .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                        AgentStatePopoverView(declared: declared)
-                    }
-
-                    Spacer()
                 }
-                .padding(8)
+                .onTapGesture { showingPopover = true }
+                .backport.pointerStyle(.link)
+                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                    AgentStatePopoverView(declared: declared)
+                }
 
                 Spacer()
             }
@@ -1242,6 +1254,108 @@ extension Ghostty {
             }
             .padding(16)
             .frame(width: 280)
+        }
+    }
+
+    // MARK: Agent-Reported Metadata Badge
+
+    /// A compact chip listing agent-reported metadata (Control API
+    /// `set-metadata` / `update` / `remove-metadata` / `clear-metadata`, MAX-4).
+    ///
+    /// Rendered in the top-left agent-overlay column beneath the agent-state
+    /// badge (see the combined overlay in `SurfaceWrapper`), deliberately away
+    /// from the bottom URL-hover / child-exited bars it would otherwise overlap.
+    /// It collapses to a single chip (with a key count) and reveals the full
+    /// key/value list in a popover, so a session with many keys never clutters
+    /// the surface. It renders only what an agent explicitly reported; Maxx never
+    /// infers any of it from terminal output and never treats a key as
+    /// authoritative workflow state — the chip and popover are display
+    /// affordances only.
+    struct AgentMetadataBadge: View {
+        let metadata: [String: ControlJSONValue]
+
+        @State private var showingPopover = false
+
+        /// Stable key order for display: sorted so the chip and popover never
+        /// reshuffle as the underlying dictionary rehashes.
+        private var sortedKeys: [String] { metadata.keys.sorted() }
+
+        var body: some View {
+            // Leading content only; the enclosing overlay column pins it
+            // top-leading and stacks it under the agent-state badge.
+            HStack {
+                Button {
+                    showingPopover.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "tag.fill")
+                            .font(.system(size: 11))
+                        Text(metadata.count == 1 ? "1 key" : "\(metadata.count) keys")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .backport.pointerStyle(.link)
+                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                    AgentMetadataPopoverView(metadata: metadata, sortedKeys: sortedKeys)
+                }
+
+                Spacer()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+        }
+
+        private var accessibilityLabel: String {
+            let pairs = sortedKeys.map { "\($0): \(metadata[$0]?.displayString ?? "")" }
+            return "Agent-reported metadata. " + pairs.joined(separator: ". ")
+        }
+    }
+
+    /// Popover listing every agent-reported metadata key/value, framed so the
+    /// user reads it as agent-provided, not Maxx-derived. Values are shown as
+    /// their compact JSON (a bare string shows unquoted) and are selectable so a
+    /// user can copy e.g. a `pr.url` — still a display affordance, not an
+    /// interpreted link.
+    struct AgentMetadataPopoverView: View {
+        let metadata: [String: ControlJSONValue]
+        let sortedKeys: [String]
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "tag.fill")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 13))
+                    Text("Agent metadata")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(sortedKeys, id: \.self) { key in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(key)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            Text(metadata[key]?.displayString ?? "")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                Text("Reported by the agent — not derived by Maxx.")
+                    .font(.system(size: 10).italic())
+                    .foregroundColor(.secondary)
+            }
+            .padding(16)
+            .frame(width: 300, alignment: .leading)
         }
     }
 
