@@ -81,7 +81,7 @@ caller **source** and a requested **capability**; the policy returns **allow**,
   same-user local caller.
 - **Safe defaults**: unknown sources are denied; external/webhook/token sources
   cannot mutate terminal state unless a capability is explicitly allowlisted;
-  output/captured-line reads require explicit opt-in; an unlisted *mutation* by a
+  output/captured-line reads require explicit opt-in; an unlisted _mutation_ by a
   local source defaults to **confirm**.
 
 Decisions are **no-inference**: they depend only on the explicit caller,
@@ -90,16 +90,16 @@ names, branch names, paths, or idle time.
 
 ### Built-in sources
 
-| Source               | Kind     | May…                                                        |
-| -------------------- | -------- | ----------------------------------------------------------- |
-| `local-cli` (default)| local    | every implemented capability, no confirmation.              |
-| `local-prompt`       | local    | read freely; **confirm** every mutation.                    |
-| `trusted-automation` | webhook  | `tabs:spawn` and `state:set` only.                          |
-| `readonly-external`  | external | `tabs:list` only; no mutation, no output read.              |
+| Source                | Kind     | May…                                           |
+| --------------------- | -------- | ---------------------------------------------- |
+| `local-cli` (default) | local    | every implemented capability, no confirmation. |
+| `local-prompt`        | local    | read freely; **confirm** every mutation.       |
+| `trusted-automation`  | webhook  | `tabs:spawn` and `state:set` only.             |
+| `readonly-external`   | external | `tabs:list` only; no mutation, no output read. |
 
 These built-ins are all subsets of `local-cli`, so claiming one via `--as` only
-*reduces* a caller's privileges. Credential-bound external/webhook sources that
-are *more* privileged than the default — and the secure key storage and rotation
+_reduces_ a caller's privileges. Credential-bound external/webhook sources that
+are _more_ privileged than the default — and the secure key storage and rotation
 they require — are explicit follow-up work.
 
 ### Confirmation
@@ -227,7 +227,7 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                   | REST equivalent                                | Purpose                                                                              |
+| Method                   | REST equivalent                                | Purpose                                                                             |
 | ------------------------ | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
 | `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
@@ -237,10 +237,10 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
 | `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
 | `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
-| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                           |
-| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                           |
+| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
+| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
 | `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
-| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                              |
+| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
 | `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                                           |
 | `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
 | `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
@@ -314,7 +314,7 @@ Errors are predictable and documented:
 | `confirmation_required` | The policy requires confirmation; re-send with `confirm: true`.           |
 | `not_found`             | No API-created session with that id.                                      |
 | `already_ended`         | The session was canceled or its surface no longer exists.                 |
-| `unsupported_action`    | Unknown action name.                                                       |
+| `unsupported_action`    | Unknown action name.                                                      |
 | `unsupported`           | Operation not supported for this session (e.g. no command to restart).    |
 | `internal`              | Unexpected server-side failure.                                           |
 

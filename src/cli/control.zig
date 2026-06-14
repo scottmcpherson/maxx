@@ -288,14 +288,13 @@ pub fn run(alloc: Allocator) !u8 {
     // `watch` streams many newline-delimited messages until the session ends or
     // the caller disconnects; print them as they arrive.
     if (cmd.verb == .watch) {
-        streamResponse(arena_alloc, socket_path, request) catch |err| {
+        return streamResponse(arena_alloc, socket_path, request) catch |err| {
             try stderr.print(
                 "error: could not reach Maxx control socket at {s}: {}\n",
                 .{ socket_path, err },
             );
             return 1;
         };
-        return 0;
     }
 
     // `wait` keeps its write side open so the server can detect a caller that
@@ -707,8 +706,16 @@ fn sendRequest(
 /// straight to stdout until the connection closes. Used by `watch`; the write
 /// side stays open so the server keeps the stream alive until the session ends
 /// or we disconnect by closing the fd.
-fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !void {
-    _ = alloc;
+///
+/// Returns the process exit code. A successful watch begins with a stream
+/// message (`{"type":"snapshot",...}`, no `ok` field) and returns 0 once the
+/// stream ends. But `watch` startup is enforced like any other request: if the
+/// server rejects it (policy deny, `not_found`, `invalid_request`,
+/// `confirmation_required`, …) it sends a single `{"ok":false,...}` error
+/// envelope, which we detect on the first line and map to the same stable exit
+/// code as single-shot requests — so automation never reads a denied/bad watch
+/// as a clean start.
+fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !u8 {
     if (socket_path.len >= 104) return error.PathTooLong;
 
     const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
@@ -730,14 +737,60 @@ fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8
     var stdout_writer = std.fs.File.stdout().writer(&out_buf);
     const stdout = &stdout_writer.interface;
 
+    // Buffer bytes until the first newline so we can classify the opening
+    // message before forwarding the rest of the stream verbatim.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(alloc);
+    var checked = false;
+
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = c.read(fd, &buf, buf.len);
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
-        try stdout.writeAll(buf[0..@intCast(n)]);
+        const chunk = buf[0..@intCast(n)];
+
+        if (checked) {
+            try stdout.writeAll(chunk);
+            try stdout.flush();
+            continue;
+        }
+
+        try pending.appendSlice(alloc, chunk);
+        const newline = std.mem.indexOfScalar(u8, pending.items, '\n') orelse continue;
+
+        checked = true;
+        try stdout.writeAll(pending.items);
         try stdout.flush();
+        if (firstLineIsError(alloc, pending.items[0..newline])) {
+            return exitCode(alloc, pending.items[0..newline], .watch);
+        }
+        pending.clearRetainingCapacity();
     }
+
+    // The connection closed before a full first line (defensive): flush what we
+    // have and, if it is an error envelope, surface its exit code.
+    if (!checked and pending.items.len > 0) {
+        try stdout.writeAll(pending.items);
+        try stdout.flush();
+        if (firstLineIsError(alloc, pending.items)) {
+            return exitCode(alloc, pending.items, .watch);
+        }
+    }
+    return 0;
+}
+
+/// True if `line` is a control *response* envelope reporting failure
+/// (`{"ok":false,...}`). A successful `watch` stream never sends an `ok`
+/// envelope — it opens with a stream message (`{"type":...}`) — so this cleanly
+/// distinguishes a rejected watch startup from a normal stream.
+fn firstLineIsError(alloc: Allocator, line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const ok = parsed.value.object.get("ok") orelse return false;
+    return ok == .bool and !ok.bool;
 }
 
 fn writeAll(fd: c_int, bytes: []const u8) !void {
@@ -1170,4 +1223,37 @@ test "parseCommand policy with unknown verb errors" {
     var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "policy frobnicate");
     defer iter.deinit();
     try testing.expectError(error.UnknownVerb, parseCommand(alloc, &iter));
+}
+
+test "firstLineIsError distinguishes error envelopes from stream messages" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // Error response envelopes (a rejected watch startup).
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"unauthorized\"}}"));
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"not_found\"}}"));
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}\n"));
+    // A successful watch opens with a stream message (no `ok` field).
+    try testing.expect(!firstLineIsError(a, "{\"type\":\"snapshot\",\"lifecycle\":\"running\"}"));
+    // A success envelope is not an error, and neither is garbage.
+    try testing.expect(!firstLineIsError(a, "{\"ok\":true,\"result\":{}}"));
+    try testing.expect(!firstLineIsError(a, "not json"));
+}
+
+test "exitCode maps watch startup error responses" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // A denied/bad watch startup must map to the same stable codes as a
+    // single-shot request, not exit 0.
+    try testing.expectEqual(
+        @as(u8, 1),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unauthorized\"}}", .watch),
+    );
+    try testing.expectEqual(
+        @as(u8, 3),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"not_found\"}}", .watch),
+    );
+    try testing.expectEqual(
+        @as(u8, 6),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}", .watch),
+    );
 }
