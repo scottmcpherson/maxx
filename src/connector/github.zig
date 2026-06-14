@@ -47,14 +47,14 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     };
 
     // A stable id: prefer the global node id, fall back to the numeric id.
-    const id = j.getString(obj, "node_id") orelse
+    const id = j.getNonEmptyString(obj, "node_id") orelse
         (try j.getNumberAsString(alloc, obj, "id")) orelse
         {
             log.warn("object missing both \"node_id\" and \"id\"", .{});
             return error.MissingField;
         };
 
-    const title = j.getString(obj, "title") orelse {
+    const title = j.getNonEmptyString(obj, "title") orelse {
         log.warn("object missing \"title\"", .{});
         return error.MissingField;
     };
@@ -85,7 +85,9 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     return event;
 }
 
-/// Assemble a prompt purely by concatenating explicit fields. No interpretation.
+/// Assemble a prompt from explicit payload fields plus a constant "GitHub"
+/// source label and a `#` number sigil. No payload field is interpreted or
+/// transformed — only copied and joined with fixed separators.
 fn buildPrompt(
     alloc: Allocator,
     event_type: []const u8,

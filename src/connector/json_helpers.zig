@@ -19,6 +19,14 @@ pub fn getString(obj: Object, name: []const u8) ?[]const u8 {
     };
 }
 
+/// The string value of `obj[name]` only when it is present, a string, and
+/// non-empty. Use for required fields so an explicitly-empty value (e.g.
+/// `"title": ""`) is treated as missing rather than silently accepted.
+pub fn getNonEmptyString(obj: Object, name: []const u8) ?[]const u8 {
+    const s = getString(obj, name) orelse return null;
+    return if (s.len == 0) null else s;
+}
+
 /// The nested object at `obj[name]`, or null if absent / not an object.
 pub fn getObject(obj: Object, name: []const u8) ?Object {
     const v = obj.get(name) orelse return null;
@@ -68,9 +76,29 @@ test "getString and getObject read explicit fields" {
     try testing.expectEqualStrings("Hi", getString(obj, "title").?);
     try testing.expect(getString(obj, "missing") == null);
     try testing.expect(getString(obj, "flag") == null); // wrong type
+    try testing.expectEqualStrings("Hi", getNonEmptyString(obj, "title").?);
     try testing.expectEqualStrings("v", getObject(obj, "nested").?.get("key").?.string);
     try testing.expectEqualStrings("42", (try getNumberAsString(alloc, obj, "n")).?);
     try testing.expect((try getNumberAsString(alloc, obj, "title")) == null);
+}
+
+test "getNonEmptyString rejects empty strings" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const parsed = try std.json.parseFromSliceLeaky(
+        Value,
+        alloc,
+        \\{"empty":"","full":"x"}
+    ,
+        .{},
+    );
+    const obj = parsed.object;
+    try testing.expect(getNonEmptyString(obj, "empty") == null);
+    try testing.expect(getNonEmptyString(obj, "missing") == null);
+    try testing.expectEqualStrings("x", getNonEmptyString(obj, "full").?);
 }
 
 test "getStringAny returns first present" {

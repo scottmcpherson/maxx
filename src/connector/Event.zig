@@ -45,9 +45,9 @@ title: []const u8,
 /// (issue/PR URL). Optional — null when the payload did not include it.
 url: ?[]const u8 = null,
 
-/// Prompt/context text the launched command should receive. Assembled only by
-/// concatenating explicit payload fields (identifier, title, url, body), never
-/// derived from anything Maxx observes. Optional.
+/// Prompt/context text the launched command should receive. Assembled by
+/// joining explicit payload fields (identifier, title, url, body) with a
+/// constant source label; never derived from anything Maxx observes. Optional.
 prompt: ?[]const u8 = null,
 
 /// Additional explicit fields from the payload. See `Fields`.

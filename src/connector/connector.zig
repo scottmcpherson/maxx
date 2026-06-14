@@ -76,3 +76,104 @@ test "every adapter has a unique, non-empty name and description" {
         }
     }
 }
+
+// Enforce the no-inference rule: payload fields that are *not* explicitly
+// copied by an adapter must never leak into the event, the prompt, the resolved
+// metadata, or the serialized launch request. Both payloads below are stuffed
+// with "bait" fields an inference-happy implementation might latch onto —
+// branch names, head refs, labels, state, assignees, paths, idle time. None of
+// them are fields the adapters copy, so none may appear anywhere downstream.
+fn assertNoLeak(alloc: std.mem.Allocator, source: []const u8, payload: []const u8, bait: []const []const u8) !void {
+    const testing = std.testing;
+    const adapter = adapterByName(source).?;
+    const event = try adapter.parse(alloc, payload);
+
+    // Resolve a launch that echoes everything explicit into the request.
+    const req = try resolve(alloc, .{
+        .command = "agent ${title}",
+        .title = "${title}",
+    }, event, .{ .launched_at = "2026-06-14T00:00:00Z" });
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try json.beginObject();
+    try json.objectField("event");
+    try event.writeJson(&json);
+    try json.objectField("launch");
+    try req.writeControlRequest(alloc, &json);
+    try json.endObject();
+    const serialized = out.written();
+
+    // No bait value may appear in the event, prompt, metadata, or request.
+    for (bait) |needle| {
+        if (std.mem.indexOf(u8, serialized, needle) != null) {
+            std.debug.print("no-inference leak: '{s}' surfaced for {s}\n", .{ needle, source });
+            return error.InferenceLeak;
+        }
+    }
+
+    // Resolved metadata may only use the reserved connector.* provenance keys.
+    const reserved = [_][]const u8{
+        "connector",
+        "connector.event_id",
+        "connector.event_type",
+        "connector.url",
+        "connector.launched_at",
+    };
+    for (req.metadata) |m| {
+        var ok = false;
+        for (reserved) |r| {
+            if (std.mem.eql(u8, m.key, r)) ok = true;
+        }
+        try testing.expect(ok);
+    }
+}
+
+test "no-inference: adapters surface only explicit fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Bait values live in fields the adapters do not copy (branch, head.ref,
+    // labels, state, assignee, path, idle). They must never leak.
+    const linear_payload =
+        \\{
+        \\  "action": "update",
+        \\  "type": "Issue",
+        \\  "data": {
+        \\    "id": "id-1", "identifier": "MAX-99", "title": "Safe Title",
+        \\    "url": "https://linear.app/x",
+        \\    "branch": "feature/LEAK_BRANCH",
+        \\    "state": "LEAK_STATE",
+        \\    "labels": ["LEAK_LABEL"],
+        \\    "assignee": { "name": "LEAK_ASSIGNEE" },
+        \\    "parentId": "LEAK_PARENT"
+        \\  }
+        \\}
+    ;
+    try assertNoLeak(alloc, "linear", linear_payload, &.{
+        "LEAK_BRANCH",   "LEAK_STATE",  "LEAK_LABEL",
+        "LEAK_ASSIGNEE", "LEAK_PARENT", "branch",
+        "state",         "labels",
+    });
+
+    const github_payload =
+        \\{
+        \\  "action": "opened",
+        \\  "issue": {
+        \\    "id": 7, "node_id": "N_1", "number": 3, "title": "Safe Title",
+        \\    "html_url": "https://github.com/a/b/issues/3",
+        \\    "state": "LEAK_STATE",
+        \\    "labels": [{ "name": "LEAK_LABEL" }],
+        \\    "assignees": [{ "login": "LEAK_USER" }],
+        \\    "head": { "ref": "LEAK_HEAD_REF" }
+        \\  },
+        \\  "repository": { "full_name": "a/b", "default_branch": "LEAK_DEFAULT_BRANCH" }
+        \\}
+    ;
+    try assertNoLeak(alloc, "github", github_payload, &.{
+        "LEAK_STATE",    "LEAK_LABEL",          "LEAK_USER",
+        "LEAK_HEAD_REF", "LEAK_DEFAULT_BRANCH", "head",
+        "labels",        "assignees",           "default_branch",
+    });
+}

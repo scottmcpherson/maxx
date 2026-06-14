@@ -36,7 +36,7 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     const root = parsed.object;
 
     // The event type is the top-level discriminator (e.g. "Issue").
-    const event_type = j.getString(root, "type") orelse {
+    const event_type = j.getNonEmptyString(root, "type") orelse {
         log.warn("payload missing top-level \"type\"", .{});
         return error.MissingField;
     };
@@ -46,12 +46,12 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
         return error.MissingField;
     };
 
-    const id = j.getString(data, "id") orelse {
+    const id = j.getNonEmptyString(data, "id") orelse {
         log.warn("payload missing \"data.id\"", .{});
         return error.MissingField;
     };
 
-    const title = j.getString(data, "title") orelse {
+    const title = j.getNonEmptyString(data, "title") orelse {
         log.warn("payload missing \"data.title\"", .{});
         return error.MissingField;
     };
@@ -80,7 +80,9 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     return event;
 }
 
-/// Assemble a prompt purely by concatenating explicit fields. No interpretation.
+/// Assemble a prompt from explicit payload fields plus a constant "Linear"
+/// source label. No payload field is interpreted or transformed — only copied
+/// and joined with fixed separators.
 fn buildPrompt(
     alloc: Allocator,
     event_type: []const u8,

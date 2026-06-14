@@ -31,7 +31,12 @@ const ParseError = error{
     UnknownFlag,
     InvalidPromptDelivery,
     InvalidEnv,
+    HelpRequested,
 } || Allocator.Error;
+
+fn isHelpFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h");
+}
 
 /// A parsed `maxx +connector ...` invocation.
 const Command = struct {
@@ -75,6 +80,10 @@ const Command = struct {
 /// adapter-specific fields like `${issue.identifier}` or `${repo.full_name}`.
 /// A `${name}` with no value is an error; `${name?}` is optional.
 ///
+/// A flag value that begins with `+` (e.g. `--command +foo`) must be written as
+/// `--flag=value` (`--command=+foo`): a bare `+...` token is otherwise consumed
+/// by Maxx's `+action` CLI detection before this action sees it.
+///
 /// Available since: 1.2.0
 pub fn run(alloc: Allocator) !u8 {
     var arena = ArenaAllocator.init(alloc);
@@ -90,7 +99,7 @@ pub fn run(alloc: Allocator) !u8 {
     defer stderr.flush() catch {};
 
     const cmd = parseCommand(arena_alloc, &iter) catch |err| switch (err) {
-        error.MissingVerb => return Action.help_error,
+        error.MissingVerb, error.HelpRequested => return Action.help_error,
         error.UnknownVerb => {
             try stderr.print("error: unknown subcommand. Try: resolve, list\n", .{});
             return 1;
@@ -176,10 +185,11 @@ fn runResolve(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
 
     // Read the payload from the given file, or stdin when omitted or "-".
     const payload = readPayload(alloc, cmd.payload) catch |err| {
-        try stderr.print(
-            "error: could not read payload{s}: {}\n",
-            .{ if (cmd.payload) |p| p else " from stdin", err },
-        );
+        const where = if (cmd.payload) |p|
+            try std.fmt.allocPrint(alloc, "file '{s}'", .{p})
+        else
+            "stdin";
+        try stderr.print("error: could not read payload from {s}: {}\n", .{ where, err });
         return 1;
     };
 
@@ -268,12 +278,15 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         first = iter.next() orelse return error.MissingVerb;
     }
 
+    if (isHelpFlag(first)) return error.HelpRequested;
     const verb = std.meta.stringToEnum(Verb, first) orelse return error.UnknownVerb;
 
     var cmd: Command = .{ .verb = verb };
     while (iter.next()) |raw_arg| {
         const arg: []const u8 = raw_arg;
-        if (try flagValue(alloc, arg, iter, "--source")) |v| {
+        if (isHelpFlag(arg)) {
+            return error.HelpRequested;
+        } else if (try flagValue(alloc, arg, iter, "--source")) |v| {
             cmd.source = v;
         } else if (try flagValue(alloc, arg, iter, "--payload")) |v| {
             cmd.payload = v;
@@ -367,5 +380,18 @@ test "parseCommand rejects unknown verb and bad prompt delivery" {
         var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "connector resolve --env NOEQUALS");
         defer iter.deinit();
         try testing.expectError(error.InvalidEnv, parseCommand(alloc, &iter));
+    }
+}
+
+test "parseCommand surfaces help requests" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    for ([_][]const u8{ "connector --help", "connector -h", "connector resolve --help" }) |line| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, line);
+        defer iter.deinit();
+        try testing.expectError(error.HelpRequested, parseCommand(alloc, &iter));
     }
 }
