@@ -1,0 +1,164 @@
+# Maxx Connector Adapter Layer
+
+The connector adapter layer lets configured external trigger sources — starting
+with **Linear** and **GitHub** — turn a structured event payload into a visible
+Maxx tab launch, while keeping Maxx strictly a terminal-native runtime/control
+plane. Maxx owns visible tab orchestration and process launch; it never reasons
+about the workflow. The connector layer is the thin, typed seam between an
+external system's payload and the [Control API](./control-api.md)'s tab-launch
+primitive.
+
+A connector turns _“this event happened in Linear/GitHub”_ into _“open a visible
+tab running this command with this context.”_ What that command then **does**
+with the context is entirely the launched agent's job (its prompt, skill, or
+upstream connector configuration) — never Maxx's.
+
+## The product boundary
+
+- Maxx owns **visible runtime/control-plane** responsibilities: opening a tab,
+  launching a process with an explicit command/cwd/env, showing provenance, and
+  exposing normal tab controls (review, stop, restart, detach).
+- The connector layer only **resolves** an explicit payload into an explicit
+  launch request. It assigns no Maxx meaning to an "issue", "pull request",
+  "branch", "worktree", or "test" — those are just payload fields to copy.
+- Workflow reasoning lives **downstream**, in the launched command.
+
+## No-inference rule
+
+This is the load-bearing constraint, enforced by design and asserted in tests.
+An adapter and the resolver MUST NOT:
+
+- infer workflow intent from branch names, file paths, process names, tab
+  titles, idle time, or any other incidental signal;
+- scrape, regex, or otherwise interpret terminal output;
+- attach Maxx domain meaning to source concepts.
+
+An adapter MAY only read fields the payload states **explicitly**. Identifying
+which explicit object a payload carries (e.g. GitHub's `pull_request` vs `issue`
+key) is structural parsing of the payload's own shape — that is the adapter's
+job — not inference of intent from runtime state.
+
+## Pieces
+
+| Piece                        | File                                     | Responsibility                                                         |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------- |
+| `Adapter`                    | `src/connector/Adapter.zig`              | The source-adapter interface.                                          |
+| `TriggerEvent`               | `src/connector/Event.zig`                | Normalized, source-agnostic event of explicit fields.                  |
+| `LaunchTemplate` / `resolve` | `src/connector/Template.zig`             | Per-connector launch config and its resolution into a `LaunchRequest`. |
+| `linear`, `github`           | `src/connector/linear.zig`, `github.zig` | Starter adapters.                                                      |
+
+## The adapter interface
+
+An adapter is a small value:
+
+```zig
+pub const adapter: Adapter = .{
+    .name = "linear",
+    .description = "Linear issue/event webhook payloads",
+    .parseFn = parse,
+};
+
+fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent { ... }
+```
+
+`parse`'s entire job is to validate the payload shape just enough to copy the
+explicit fields a launch needs, assemble the prompt/context by concatenating
+those fields, and return a `TriggerEvent`. It raises a clear, typed error on bad
+input:
+
+- `InvalidPayload` — not valid JSON, or not a JSON object.
+- `MissingField` — a required field was absent or the wrong type.
+- `UnsupportedEventType` — the payload isn't one this adapter handles.
+
+### Adding a new source adapter
+
+1. Create `src/connector/<name>.zig` exposing `pub const adapter: Adapter`.
+2. Implement `parse` to copy explicit payload fields into a `TriggerEvent`
+   (`source`, `id`, `type`, `title`, optional `url`/`prompt`, and extra
+   `fields`). Read only what the payload states; never infer.
+3. Append it to `adapters` in `src/connector/connector.zig`.
+4. Add fixture-based tests (a representative payload, plus negative tests for
+   missing required fields and unsupported types).
+
+## TriggerEvent
+
+The normalized event. Every field is an explicit value copied from the payload:
+
+| Field    | Meaning                                                       |
+| -------- | ------------------------------------------------------------- |
+| `source` | Connector name (`linear`, `github`).                          |
+| `id`     | Stable source id for the event (provenance/de-dup).           |
+| `type`   | The source's own event/trigger type, verbatim.                |
+| `title`  | Human-facing tab title.                                       |
+| `url`    | Canonical source URL, when the payload provides one.          |
+| `prompt` | Prompt/context text, assembled from explicit fields.          |
+| `fields` | Extra explicit fields, dotted keys (e.g. `issue.identifier`). |
+
+## Launch templates
+
+A `LaunchTemplate` is the configuration half of a connector — how to turn a
+`TriggerEvent` into a visible tab:
+
+| Field             | Meaning                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `command`         | Command to run (required, templated).                              |
+| `cwd`             | Working directory (optional, templated; only when explicitly set). |
+| `title`           | Tab title (optional, templated; defaults to the event title).      |
+| `env`             | Extra `KEY=VALUE` entries (values templated).                      |
+| `prompt_delivery` | `env` (default), `stdin`, or `file`.                               |
+
+### Placeholders
+
+Templated fields use `${field}` placeholders filled **only** from explicit event
+fields: `${source}`, `${id}`, `${type}`, `${title}`, `${url}`, `${prompt}`, plus
+any adapter field such as `${issue.identifier}` or `${repo.full_name}`.
+
+- `${name}` is required — a missing/empty value is an error naming the field.
+- `${name?}` is optional — a missing value resolves to the empty string.
+- A `$` not immediately followed by `{` is a literal dollar sign.
+
+### Prompt delivery
+
+The resolved `prompt` reaches the launched command per `prompt_delivery`:
+
+- `env` — exposed as `MAXX_CONNECTOR_PROMPT`.
+- `stdin` — streamed to stdin by the runner.
+- `file` — written to a temp file by the runner; its path is passed via
+  `MAXX_CONNECTOR_PROMPT_FILE`.
+
+## Resolution and provenance
+
+`connector.resolve(alloc, template, event, opts)` substitutes placeholders and
+returns a `LaunchRequest`: the concrete `command`, `cwd`, `title`, `env`,
+`prompt`/`prompt_delivery`, and connector provenance `metadata`. Provenance uses
+reserved, explicit keys shown on the launched tab:
+
+- `connector` — the source name.
+- `connector.event_id` — the source event id.
+- `connector.event_type` — the source event type.
+- `connector.url` — the source URL, when provided.
+- `connector.launched_at` — launch timestamp, when the caller supplies one.
+
+A `LaunchRequest` is exactly the input the Control API's `sessions.create`
+consumes. `LaunchRequest.writeControlRequest` emits that request shape.
+
+## CLI
+
+```
+maxx +connector list
+maxx +connector resolve --source linear --command claude \
+    --cwd /repo --title '${issue.identifier}: ${title}' \
+    --env KEY='${source}' --payload event.json
+```
+
+`resolve` reads a payload (from `--payload <file>`, or stdin when omitted/`-`),
+parses it with the named adapter, resolves the launch, and prints the normalized
+event plus the `sessions.create` control request the launch corresponds to.
+
+## What is intentionally not here yet
+
+This layer **resolves** a launch; it does not **execute** one. Sending the
+resolved `sessions.create` to a running Maxx, receiving webhooks, and fetching
+payloads over the network (with the associated auth) are the **runner**, kept
+separate so the resolution logic stays pure and exhaustively testable. The
+`resolve` CLI output is precisely the request a future runner will send.
