@@ -24,6 +24,10 @@ enum ControlEventKind: String, Codable {
     case event
     /// An agent set a metadata key (`set-metadata`).
     case metadata
+    /// An agent declared a validated, human-facing workflow state (`set-state`).
+    case workflowState = "workflow-state"
+    /// An agent set the human-readable summary line (`set-summary`).
+    case summary
     /// Maxx recorded a runtime lifecycle action it performed (archive/restart).
     case lifecycle
 }

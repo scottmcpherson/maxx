@@ -62,6 +62,15 @@ enum ControlMethod: String, Codable {
 
     /// Return a session's audit log (declared states/events + lifecycle actions).
     case sessionsEvents = "sessions.events"
+
+    // MARK: Agent-declared workflow state (MAX-3)
+
+    /// Declare a validated, human-facing workflow state for display
+    /// (`running`/`needsInput`/`blocked`/`complete`/`failed`).
+    case sessionsSetState = "sessions.set-state"
+
+    /// Set the short human-readable summary shown alongside the workflow state.
+    case sessionsSetSummary = "sessions.set-summary"
 }
 
 // MARK: - Errors
@@ -147,6 +156,12 @@ struct ControlRequest: Codable {
         /// Replay/baseline event sequence for `wait --event` and `watch`.
         var since: Int?
 
+        // MARK: Agent-declared workflow state (MAX-3)
+
+        /// Short human-readable summary for `set-summary`. (`set-state` reuses
+        /// the `state` field above, validated against the workflow vocabulary.)
+        var summary: String?
+
         enum CodingKeys: String, CodingKey {
             case id, title, cwd, command, env, metadata, status, location
             case action, input, state, event, lifecycle, message, source
@@ -154,6 +169,7 @@ struct ControlRequest: Codable {
             case key, value, reason, signal
             case timeoutMs = "timeout_ms"
             case since
+            case summary
         }
     }
 }
@@ -188,6 +204,21 @@ struct ControlSessionView: Codable, Equatable {
     /// Sequence of the most recent audit-log entry (omitted if none). Use as a
     /// baseline for `wait --event --since` / `watch --since` to avoid races.
     var lastEventSeq: Int?
+    /// Agent-declared workflow state for display: one of `running`, `needsInput`,
+    /// `blocked`, `complete`, `failed`. Omitted until declared via `set-state`;
+    /// never inferred. Distinct from caller-owned `status` and Maxx-owned
+    /// `lifecycle`.
+    var workflowState: String?
+    /// When `workflowState` was last declared (ISO-8601), if ever.
+    var workflowStateAt: String?
+    /// Who declared `workflowState`, if ever.
+    var workflowStateSource: String?
+    /// Agent-declared summary line, set via `set-summary`. Omitted until declared.
+    var summary: String?
+    /// When `summary` was last declared (ISO-8601), if ever.
+    var summaryAt: String?
+    /// Who declared `summary`, if ever.
+    var summarySource: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -199,6 +230,12 @@ struct ControlSessionView: Codable, Equatable {
         case archiveReason = "archive_reason"
         case restartCount = "restart_count"
         case lastEventSeq = "last_event_seq"
+        case workflowState = "workflow_state"
+        case workflowStateAt = "workflow_state_at"
+        case workflowStateSource = "workflow_state_source"
+        case summary
+        case summaryAt = "summary_at"
+        case summarySource = "summary_source"
     }
 }
 

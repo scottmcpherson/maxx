@@ -49,6 +49,16 @@ extension Ghostty {
         /// Explicit lifecycle state reported by Claude/Codex agent hooks.
         @Published private(set) var agentActivityState: TerminalAgentActivityState = .idle
 
+        /// Agent-declared workflow state + summary for display, set ONLY by an
+        /// explicit Control API `set-state` / `set-summary` call (see MAX-3).
+        ///
+        /// This is deliberately distinct from `agentActivityState`: that value is
+        /// derived by Maxx from agent hook *events*, whereas this is recorded
+        /// exactly as an agent declares it and is never inferred from terminal
+        /// output, process state, branch names, paths, or idle time. Nil until a
+        /// declaration arrives, so terminal behavior is unchanged otherwise.
+        @Published private(set) var declaredAgentState: ControlDeclaredState?
+
         /// Stable hook identity for this surface.
         let agentSurfaceID: String
 
@@ -1022,6 +1032,13 @@ extension Ghostty {
             if oldState != nextState {
                 notifySidebarMetadataChanged()
             }
+        }
+
+        /// Apply an explicit agent-declared workflow state/summary for display.
+        /// Called only from the Control API host in response to an explicit
+        /// `set-state` / `set-summary` request — never from output inference.
+        func applyDeclaredAgentState(_ declared: ControlDeclaredState) {
+            declaredAgentState = declared
         }
 
         private func interruptRunningAgentActivity() {

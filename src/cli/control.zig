@@ -49,6 +49,9 @@ const Verb = enum {
     @"declare-state",
     @"emit-event",
     @"set-metadata",
+    // MAX-3 agent-declared workflow state verbs.
+    @"set-state",
+    @"set-summary",
 };
 
 /// A parsed `maxx +control sessions ...` invocation.
@@ -73,6 +76,7 @@ const Command = struct {
     value: ?[]const u8 = null,
     reason: ?[]const u8 = null,
     signal: ?[]const u8 = null,
+    summary: ?[]const u8 = null,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
@@ -93,6 +97,8 @@ const Command = struct {
             .@"declare-state" => "sessions.declare-state",
             .@"emit-event" => "sessions.emit-event",
             .@"set-metadata" => "sessions.set-metadata",
+            .@"set-state" => "sessions.set-state",
+            .@"set-summary" => "sessions.set-summary",
         };
     }
 
@@ -170,6 +176,14 @@ const ParseError = error{
 ///     [--source <name>]`
 ///   * `sessions set-metadata <session_id> --key <key> --value <value>`
 ///
+/// Agent-declared workflow state verbs (MAX-3 — a small, validated state the UI
+/// displays as a badge, distinct from the free-form `declare-state`):
+///
+///   * `sessions set-state <session_id> --state <value> [--source <name>]` where
+///     `<value>` is one of `running`, `needsInput`, `blocked`, `complete`,
+///     `failed`. An unknown value is rejected.
+///   * `sessions set-summary <session_id> --summary <text> [--source <name>]`
+///
 /// The create response includes a stable `session_id` to use for all later
 /// operations. The raw JSON response is printed to stdout. Exit codes are
 /// stable: 0 success/matched, 1 generic error, 2 `wait` timeout, 3 missing
@@ -202,7 +216,8 @@ pub fn run(alloc: Allocator) !u8 {
         error.UnknownVerb => {
             try stderr.print(
                 "error: unknown subcommand. Try: create, get, list, update, cancel, action, " ++
-                    "wait, watch, archive, restart, events, declare-state, emit-event, set-metadata\n",
+                    "wait, watch, archive, restart, events, declare-state, emit-event, set-metadata, " ++
+                    "set-state, set-summary\n",
                 .{},
             );
             return 1;
@@ -420,6 +435,8 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.reason = v;
         } else if (try flagValue(alloc, arg, iter, "--signal")) |v| {
             cmd.signal = v;
+        } else if (try flagValue(alloc, arg, iter, "--summary")) |v| {
+            cmd.summary = v;
         } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
             cmd.timeout_ms = parseDurationMs(v) orelse return error.InvalidDuration;
         } else if (try flagValue(alloc, arg, iter, "--since")) |v| {
@@ -557,6 +574,10 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     }
     if (cmd.signal) |v| {
         try json.objectField("signal");
+        try json.write(v);
+    }
+    if (cmd.summary) |v| {
+        try json.objectField("summary");
         try json.write(v);
     }
     if (cmd.timeout_ms) |v| {
@@ -817,6 +838,50 @@ test "parseCommand declare-state with flags" {
     try testing.expectEqualStrings("all green", cmd.message.?);
     try testing.expectEqualStrings("agent-a", cmd.source.?);
     try testing.expectEqualStrings("sessions.declare-state", cmd.method());
+}
+
+test "parseCommand set-state with flags" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions set-state ID-1 --state needsInput --source release-agent",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"set-state");
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("needsInput", cmd.state.?);
+    try testing.expectEqualStrings("release-agent", cmd.source.?);
+    try testing.expectEqualStrings("sessions.set-state", cmd.method());
+}
+
+test "buildRequest set-summary includes summary" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"set-summary",
+        .id = "id-1",
+        .summary = "Waiting on user confirmation for release notes wording.",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.set-summary", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings(
+        "Waiting on user confirmation for release notes wording.",
+        params.get("summary").?.string,
+    );
 }
 
 test "parseCommand wait with state, timeout, since" {

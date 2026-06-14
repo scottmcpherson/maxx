@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Explicit inputs for creating a terminal through the control API.
 struct ControlCreateRequest {
@@ -52,6 +53,10 @@ protocol ControlSurfaceHandle {
     @discardableResult
     func interrupt(signal: Int32?) -> Bool
     func close()
+    /// Push an explicit agent-declared workflow state/summary to the surface so
+    /// the UI can render a badge. Called only in response to an explicit
+    /// `set-state`/`set-summary` request — never from output inference.
+    func applyDeclaredState(_ declared: ControlDeclaredState)
 }
 
 /// The in-memory registry of API-created sessions plus the request dispatcher.
@@ -65,6 +70,12 @@ final class ControlSessionRegistry {
     private var sessions: [UUID: ControlSession] = [:]
     private let now: () -> Date
     private let makeID: () -> UUID
+
+    /// Telemetry for declaration events only — the explicit `set-state` /
+    /// `set-summary` calls Maxx receives, not any inferred interpretation.
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
+        category: "ControlSessionRegistry")
 
     private static let iso8601: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -111,6 +122,10 @@ final class ControlSessionRegistry {
                 return .success(.init(session: view, event: event))
             case .sessionsSetMetadata:
                 return .success(.init(session: try setMetadata(request.params, host: host)))
+            case .sessionsSetState:
+                return .success(.init(session: try setState(request.params, host: host)))
+            case .sessionsSetSummary:
+                return .success(.init(session: try setSummary(request.params, host: host)))
             case .sessionsEvents:
                 return .success(.init(events: try events(request.params, host: host)))
             case .sessionsWait, .sessionsWatch:
@@ -335,6 +350,77 @@ final class ControlSessionRegistry {
             pid: host.surface(for: session.surfaceID)?.pid)
         sessions[session.id] = session
         return view(of: session, host: host)
+    }
+
+    // MARK: - Agent-declared workflow state (MAX-3)
+
+    /// Declare a validated, human-facing workflow state (`set-state`). Records
+    /// the state with its timestamp and source, appends an audit entry, pushes
+    /// the declaration to the UI, and logs the declaration event. An unknown
+    /// state is rejected by validation before any field is touched, so the
+    /// current declared state survives a bad request.
+    private func setState(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let state = try ControlValidation.validateWorkflowState(params?.state)
+        let source = try ControlValidation.validateSource(params?.source)
+        let at = now()
+
+        session.workflowState = state
+        session.workflowStateAt = at
+        session.workflowStateSource = source
+        session.appendEvent(
+            kind: .workflowState,
+            name: state.rawValue,
+            source: source,
+            createdAt: at,
+            pid: host.surface(for: session.surfaceID)?.pid)
+        sessions[session.id] = session
+        pushDeclaration(session, host: host)
+        Self.logger.info(
+            "declared state \(state.rawValue, privacy: .public) for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
+        return view(of: session, host: host)
+    }
+
+    /// Set the human-readable summary line (`set-summary`), independently of
+    /// `set-state` so an agent can update the displayed text without changing
+    /// status. Records the summary with its timestamp and source, appends an
+    /// audit entry, pushes the declaration to the UI, and logs the event.
+    private func setSummary(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let summary = try ControlValidation.validateSummary(params?.summary)
+        let source = try ControlValidation.validateSource(params?.source)
+        let at = now()
+
+        session.summary = summary
+        session.summaryAt = at
+        session.summarySource = source
+        session.appendEvent(
+            kind: .summary,
+            name: "summary",
+            source: source,
+            message: summary,
+            createdAt: at,
+            pid: host.surface(for: session.surfaceID)?.pid)
+        sessions[session.id] = session
+        pushDeclaration(session, host: host)
+        Self.logger.info(
+            "declared summary for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
+        return view(of: session, host: host)
+    }
+
+    /// Push the session's current declared workflow state + summary to its live
+    /// surface so the UI badge reflects it. A no-op if the surface is gone. This
+    /// is the only path from a declaration to the UI; it carries explicit
+    /// declared values only — never anything Maxx inferred.
+    private func pushDeclaration(_ session: ControlSession, host: ControlSessionHost) {
+        guard let declared = session.declaredStateForDisplay else { return }
+        host.surface(for: session.surfaceID)?.applyDeclaredState(declared)
     }
 
     // MARK: - Lifecycle control
@@ -658,7 +744,13 @@ final class ControlSessionRegistry {
             archivedAt: session.archivedAt.map(Self.iso8601.string(from:)),
             archiveReason: session.archiveReason,
             restartCount: session.restartCount > 0 ? session.restartCount : nil,
-            lastEventSeq: session.lastSeq)
+            lastEventSeq: session.lastSeq,
+            workflowState: session.workflowState?.rawValue,
+            workflowStateAt: session.workflowStateAt.map(Self.iso8601.string(from:)),
+            workflowStateSource: session.workflowStateSource,
+            summary: session.summary,
+            summaryAt: session.summaryAt.map(Self.iso8601.string(from:)),
+            summarySource: session.summarySource)
     }
 
     /// Build the wire view of an audit-log entry.
