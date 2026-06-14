@@ -285,7 +285,10 @@ fields is rejected with `invalid_request`. `sessions.action cancel`/`close` is
 - `restart` replays the session's recorded command (or a `--command` you supply)
   in a fresh surface while keeping the stable `session_id`, increments
   `restart_count`, and revives an archived/closed session. A session created with
-  no command and no supplied command returns `unsupported`.
+  no command and no supplied command returns `unsupported`. A restart begins a
+  fresh run, so it clears the agent-declared `workflow_state`/`summary` (the new
+  surface starts with no badge; re-declare for the new run); the free-form
+  `status` is kept.
 - `interrupt` sends Ctrl-C through the tty by default; `--signal <name>` delivers
   a specific signal (`SIGINT`/`SIGTERM`/`SIGKILL`/`SIGHUP`/`SIGQUIT`) to the
   foreground process via the explicit process-control path — never by

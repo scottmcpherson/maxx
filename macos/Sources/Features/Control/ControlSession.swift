@@ -76,18 +76,19 @@ struct ControlSession {
     var lastSeq: Int? { events.last?.seq }
 
     /// A snapshot of the current declared state + summary for the UI, or nil if
-    /// nothing has been declared. The `updatedAt`/`source` reflect whichever of
-    /// the two declarations is most recent.
+    /// nothing has been declared. The `source`/`updatedAt` describe the state
+    /// badge when a state has been declared (so a later summary update from a
+    /// different source never misattributes the state), and otherwise the
+    /// summary.
     var declaredStateForDisplay: ControlDeclaredState? {
         guard workflowState != nil || summary != nil else { return nil }
-        let stateNewer = (workflowStateAt ?? .distantPast) >= (summaryAt ?? .distantPast)
+        let useState = workflowState != nil
         return ControlDeclaredState(
-            state: workflowState?.rawValue,
-            label: workflowState?.label,
+            state: workflowState,
             summary: summary,
-            source: (stateNewer ? workflowStateSource : summarySource)
+            source: (useState ? workflowStateSource : summarySource)
                 ?? ControlSession.defaultSource,
-            updatedAt: (stateNewer ? workflowStateAt : summaryAt) ?? createdAt)
+            updatedAt: (useState ? workflowStateAt : summaryAt) ?? createdAt)
     }
 
     /// Append an audit-log entry, assigning it the next per-session sequence.
@@ -195,16 +196,15 @@ enum WorkflowState: String, CaseIterable {
 /// set only by an explicit `set-state` / `set-summary` declaration. Maxx never
 /// derives any of it from terminal output or ambient signals.
 struct ControlDeclaredState: Equatable {
-    /// Wire state value (`running`/`needsInput`/…), or nil when only a summary
-    /// has been declared.
-    var state: String?
-    /// Human-facing label for `state` (e.g. "Needs input"), or nil with `state`.
-    var label: String?
+    /// Declared workflow state, or nil when only a summary has been declared. The
+    /// UI derives its label / icon / color from this typed value, so a new state
+    /// can never silently render with a fallback style.
+    var state: WorkflowState?
     /// Latest declared summary line, or nil if none.
     var summary: String?
-    /// Source recorded for the most recent of the two declarations.
+    /// Source recorded for the declaration this snapshot describes.
     var source: String
-    /// When the most recent declaration was made.
+    /// When that declaration was made.
     var updatedAt: Date
 }
 

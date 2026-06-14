@@ -568,8 +568,8 @@ struct ControlSessionRegistryTests {
         #expect(log.result?.events?.last?.source == "release-agent")
 
         // And pushed to the surface for display, with a human-facing label.
-        #expect(host.surfaces[surface]?.declaredState?.state == "needsInput")
-        #expect(host.surfaces[surface]?.declaredState?.label == "Needs input")
+        #expect(host.surfaces[surface]?.declaredState?.state == .needsInput)
+        #expect(host.surfaces[surface]?.declaredState?.state?.label == "Needs input")
         #expect(host.surfaces[surface]?.declaredState?.source == "release-agent")
     }
 
@@ -627,7 +627,7 @@ struct ControlSessionRegistryTests {
         #expect(summarized.result?.session?.workflowState == "running")
         // Both appear in the pushed display snapshot.
         #expect(host.surfaces[surface]?.declaredState?.summary == "Waiting on user confirmation.")
-        #expect(host.surfaces[surface]?.declaredState?.state == "running")
+        #expect(host.surfaces[surface]?.declaredState?.state == .running)
 
         // The summary declaration is also audited under its own kind.
         let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
@@ -689,6 +689,27 @@ struct ControlSessionRegistryTests {
         let after = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
         #expect(after.result?.session?.workflowState == "running")
         #expect(after.result?.session?.lifecycle == "exited")
+    }
+
+    @Test func restartClearsDeclaredWorkflowState() {
+        // A restart begins a fresh run, so the previous run's declared state and
+        // summary must not linger (e.g. a stale `complete` on a now-running tab).
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host, command: "ls")
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "complete")), host: host)
+        _ = registry.handle(
+            request(.sessionsSetSummary, .init(id: id, summary: "done")), host: host)
+
+        let restarted = registry.handle(request(.sessionsRestart, .init(id: id)), host: host)
+        #expect(restarted.ok)
+        #expect(restarted.result?.session?.workflowState == nil)
+        #expect(restarted.result?.session?.summary == nil)
+
+        // The fresh surface shows no badge until the agent re-declares.
+        let newSurface = restarted.result!.session!.surfaceID
+        #expect(host.surfaces[UUID(uuidString: newSurface)!]?.declaredState == nil)
     }
 
     @Test func eventsSinceFiltersBySequence() {

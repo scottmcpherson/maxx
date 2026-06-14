@@ -367,6 +367,8 @@ final class ControlSessionRegistry {
         let state = try ControlValidation.validateWorkflowState(params?.state)
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
+        // Resolve the surface once: used for the audit pid and the UI push.
+        let handle = host.surface(for: session.surfaceID)
 
         session.workflowState = state
         session.workflowStateAt = at
@@ -376,9 +378,9 @@ final class ControlSessionRegistry {
             name: state.rawValue,
             source: source,
             createdAt: at,
-            pid: host.surface(for: session.surfaceID)?.pid)
+            pid: handle?.pid)
         sessions[session.id] = session
-        pushDeclaration(session, host: host)
+        pushDeclaration(session, to: handle)
         Self.logger.info(
             "declared state \(state.rawValue, privacy: .public) for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
         return view(of: session, host: host)
@@ -396,6 +398,8 @@ final class ControlSessionRegistry {
         let summary = try ControlValidation.validateSummary(params?.summary)
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
+        // Resolve the surface once: used for the audit pid and the UI push.
+        let handle = host.surface(for: session.surfaceID)
 
         session.summary = summary
         session.summaryAt = at
@@ -406,9 +410,9 @@ final class ControlSessionRegistry {
             source: source,
             message: summary,
             createdAt: at,
-            pid: host.surface(for: session.surfaceID)?.pid)
+            pid: handle?.pid)
         sessions[session.id] = session
-        pushDeclaration(session, host: host)
+        pushDeclaration(session, to: handle)
         Self.logger.info(
             "declared summary for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
         return view(of: session, host: host)
@@ -418,9 +422,9 @@ final class ControlSessionRegistry {
     /// surface so the UI badge reflects it. A no-op if the surface is gone. This
     /// is the only path from a declaration to the UI; it carries explicit
     /// declared values only — never anything Maxx inferred.
-    private func pushDeclaration(_ session: ControlSession, host: ControlSessionHost) {
+    private func pushDeclaration(_ session: ControlSession, to handle: ControlSurfaceHandle?) {
         guard let declared = session.declaredStateForDisplay else { return }
-        host.surface(for: session.surfaceID)?.applyDeclaredState(declared)
+        handle?.applyDeclaredState(declared)
     }
 
     // MARK: - Lifecycle control
@@ -488,6 +492,18 @@ final class ControlSessionRegistry {
         session.archivedAt = nil
         session.archiveReason = nil
         session.restartCount += 1
+        // A restart begins a fresh run, so the agent-declared workflow state and
+        // summary from the previous run no longer apply — clear them rather than
+        // leave a stale `complete`/`failed` badge on the newly-running surface.
+        // (The fresh surface starts with no badge; the agent re-declares state
+        // for the new run.) This is an explicit consequence of the restart
+        // action, not inference. The free-form `status` is kept, as before.
+        session.workflowState = nil
+        session.workflowStateAt = nil
+        session.workflowStateSource = nil
+        session.summary = nil
+        session.summaryAt = nil
+        session.summarySource = nil
         session.appendEvent(
             kind: .lifecycle,
             name: "restarted",

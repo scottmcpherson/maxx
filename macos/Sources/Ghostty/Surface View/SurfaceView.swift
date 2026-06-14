@@ -1122,11 +1122,11 @@ extension Ghostty {
             VStack {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        if let label = declared.label, let state = declared.state {
+                        if let state = declared.state {
                             HStack(spacing: 5) {
                                 Image(systemName: Self.symbol(for: state))
                                     .font(.system(size: 12))
-                                Text(label)
+                                Text(state.label)
                                     .font(.system(size: 12, weight: .medium))
                             }
                             .padding(.horizontal, 8)
@@ -1166,12 +1166,12 @@ extension Ghostty {
 
         private var accessibilityLabel: String {
             var parts: [String] = []
-            if let label = declared.label { parts.append("Agent state: \(label)") }
+            if let state = declared.state { parts.append("Agent state: \(state.label)") }
             if let summary = declared.summary, !summary.isEmpty { parts.append(summary) }
             return parts.isEmpty ? "Agent-declared state" : parts.joined(separator: ". ")
         }
 
-        private func badgeBackground(for state: String) -> some View {
+        private func badgeBackground(for state: WorkflowState) -> some View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(.regularMaterial)
                 .overlay(
@@ -1180,28 +1180,27 @@ extension Ghostty {
                 )
         }
 
-        /// SF Symbol for each declared state. Unknown values (which validation
-        /// prevents) fall back to a neutral marker.
-        static func symbol(for state: String) -> String {
+        /// SF Symbol for each declared state. Exhaustive over the enum so a new
+        /// state cannot silently render with a fallback icon.
+        static func symbol(for state: WorkflowState) -> String {
             switch state {
-            case "running": return "play.circle.fill"
-            case "needsInput": return "questionmark.circle.fill"
-            case "blocked": return "exclamationmark.octagon.fill"
-            case "complete": return "checkmark.circle.fill"
-            case "failed": return "xmark.octagon.fill"
-            default: return "circle.fill"
+            case .running: return "play.circle.fill"
+            case .needsInput: return "questionmark.circle.fill"
+            case .blocked: return "exclamationmark.octagon.fill"
+            case .complete: return "checkmark.circle.fill"
+            case .failed: return "xmark.octagon.fill"
             }
         }
 
         /// Accent color for each declared state, chosen to be mutually distinct.
-        static func color(for state: String) -> Color {
+        /// Exhaustive over the enum so a new state must pick a color explicitly.
+        static func color(for state: WorkflowState) -> Color {
             switch state {
-            case "running": return .blue
-            case "needsInput": return .orange
-            case "blocked": return .purple
-            case "complete": return .green
-            case "failed": return .red
-            default: return .secondary
+            case .running: return .blue
+            case .needsInput: return .orange
+            case .blocked: return .purple
+            case .complete: return .green
+            case .failed: return .red
             }
         }
     }
@@ -1213,12 +1212,12 @@ extension Ghostty {
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
-                if let label = declared.label, let state = declared.state {
+                if let state = declared.state {
                     HStack(spacing: 8) {
                         Image(systemName: AgentStateBadge.symbol(for: state))
                             .foregroundColor(AgentStateBadge.color(for: state))
                             .font(.system(size: 13))
-                        Text(label)
+                        Text(state.label)
                             .font(.system(size: 13, weight: .semibold))
                     }
                 }
