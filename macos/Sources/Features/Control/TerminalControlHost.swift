@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// Production ``ControlSessionHost`` that drives the real terminal UI.
@@ -114,9 +115,22 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         view.surfaceModel?.sendText(text)
     }
 
-    func interrupt() {
-        // ETX (Ctrl-C). Sent as text so we don't depend on key-event encoding.
-        view.surfaceModel?.sendText("\u{03}")
+    @discardableResult
+    func interrupt(signal: Int32?) -> Bool {
+        guard let signal else {
+            // ETX (Ctrl-C). Sent as text so we don't depend on key-event
+            // encoding, and so the tty delivers it to the whole foreground
+            // process group — the most correct way to interrupt.
+            view.surfaceModel?.sendText("\u{03}")
+            return true
+        }
+        // A specific signal is delivered through the explicit process-control
+        // path (a kernel call against a pid Maxx already knows), never by
+        // synthesizing terminal input. `foregroundPID` is the foreground
+        // process *group* id, so `killpg` delivers to the whole group — matching
+        // what Ctrl-C does, not just the group leader.
+        guard let pid = view.surfaceModel?.foregroundPID else { return false }
+        return killpg(pid_t(pid), signal) == 0
     }
 
     func close() {

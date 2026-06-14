@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// An API-created session.
@@ -10,12 +11,19 @@ import Foundation
 struct ControlSession {
     /// Stable control-session identifier.
     let id: UUID
-    /// The surface (tab) this session manages.
-    let surfaceID: UUID
+    /// The surface (tab) this session manages. Mutable so `restart` can rebind a
+    /// session to the fresh surface it spawns while keeping `id` stable.
+    var surfaceID: UUID
     let title: String?
     let command: String?
     let cwd: String?
-    /// Caller-owned status string.
+    /// Environment overrides captured at create time, replayed on `restart`.
+    let env: [String: String]
+    /// Where the surface was created; replayed on `restart`.
+    let location: ControlLocation
+    /// Caller-owned status string. Doubles as the current agent-declared state:
+    /// `declare-state` writes it (and records an audit entry); `update` writes it
+    /// without one. `wait --state` matches against it.
     var status: String
     /// Caller-owned metadata.
     var metadata: [String: String]
@@ -25,6 +33,46 @@ struct ControlSession {
     /// This is an explicit, Maxx-owned lifecycle fact recorded in response to an
     /// API call — never inferred from terminal output or ambient signals.
     var canceled: Bool
+    /// True once the session was explicitly archived. The record is retained for
+    /// inspection but its surface is closed and no longer active.
+    var archived: Bool = false
+    var archivedAt: Date?
+    var archiveReason: String?
+    /// Number of times the session's command has been restarted.
+    var restartCount: Int = 0
+    /// Append-only audit log of agent-declared facts and Maxx-owned lifecycle
+    /// actions. Drives `wait`, `watch`, and `events`.
+    var events: [ControlEvent] = []
+    /// Next sequence number to assign to an appended event. Managed via
+    /// ``appendEvent``; not `private` only so the synthesized memberwise
+    /// initializer stays accessible within the module.
+    var nextSeq: Int = 0
+
+    /// Sequence of the most recently recorded event, or nil if none.
+    var lastSeq: Int? { events.last?.seq }
+
+    /// Append an audit-log entry, assigning it the next per-session sequence.
+    mutating func appendEvent(
+        kind: ControlEventKind,
+        name: String,
+        source: String,
+        message: String? = nil,
+        payload: ControlJSONValue? = nil,
+        createdAt: Date,
+        pid: Int?
+    ) {
+        events.append(ControlEvent(
+            seq: nextSeq,
+            kind: kind,
+            name: name,
+            source: source,
+            message: message,
+            payload: payload,
+            createdAt: createdAt,
+            surfaceID: surfaceID,
+            pid: pid))
+        nextSeq += 1
+    }
 
     /// Documented limits for caller-supplied data. Enforced on create/update.
     enum Limits {
@@ -35,7 +83,18 @@ struct ControlSession {
         static let maxMetadataKeyLength = 64
         static let maxMetadataValueLength = 1024
         static let maxEnvEntries = 256
+        static let maxStateLength = 128
+        static let maxEventNameLength = 128
+        static let maxSourceLength = 128
+        static let maxReasonLength = 1024
+        static let maxPayloadBytes = 8192
     }
+
+    /// The default `source` recorded for agent declarations when the caller does
+    /// not supply one.
+    static let defaultSource = "agent"
+    /// The `source` recorded for Maxx-owned lifecycle entries.
+    static let maxxSource = "maxx"
 }
 
 /// Maxx-owned lifecycle state.
@@ -51,6 +110,16 @@ enum ControlLifecycle: String {
     case exited
     /// The session was canceled via the API, or its surface no longer exists.
     case closed
+    /// The session was explicitly archived; its record is retained but inactive.
+    case archived
+
+    /// A terminal lifecycle is one a session cannot leave except via `restart`.
+    var isTerminal: Bool {
+        switch self {
+        case .running, .exited: return false
+        case .closed, .archived: return true
+        }
+    }
 }
 
 /// Validation for caller-supplied inputs. Pure and side-effect free so it can be
@@ -186,6 +255,101 @@ enum ControlValidation {
             default:
                 return character == "_"
             }
+        }
+    }
+
+    /// Validate an agent-declared state name. States may be namespaced (e.g.
+    /// `tests:passed`) so multiple agents can update the same tab unambiguously.
+    static func validateState(_ state: String?) throws -> String {
+        guard let state, !state.isEmpty else {
+            throw ControlError(.invalidRequest, "state must not be empty")
+        }
+        guard state.count <= ControlSession.Limits.maxStateLength else {
+            throw ControlError(
+                .invalidRequest,
+                "state exceeds \(ControlSession.Limits.maxStateLength) characters")
+        }
+        guard isValidNamespacedName(state) else {
+            throw ControlError(
+                .invalidRequest,
+                "state '\(state)' contains invalid characters (allowed: A-Z a-z 0-9 _ . - : /)")
+        }
+        return state
+    }
+
+    /// Validate an emitted event name. Same character rules as states.
+    static func validateEventName(_ name: String?) throws -> String {
+        guard let name, !name.isEmpty else {
+            throw ControlError(.invalidRequest, "event must not be empty")
+        }
+        guard name.count <= ControlSession.Limits.maxEventNameLength else {
+            throw ControlError(
+                .invalidRequest,
+                "event exceeds \(ControlSession.Limits.maxEventNameLength) characters")
+        }
+        guard isValidNamespacedName(name) else {
+            throw ControlError(
+                .invalidRequest,
+                "event '\(name)' contains invalid characters (allowed: A-Z a-z 0-9 _ . - : /)")
+        }
+        return name
+    }
+
+    /// Validate and default the `source` recorded on a declared fact.
+    static func validateSource(_ source: String?) throws -> String {
+        guard let source else { return ControlSession.defaultSource }
+        guard !source.isEmpty else {
+            throw ControlError(.invalidRequest, "source must not be empty")
+        }
+        guard source.count <= ControlSession.Limits.maxSourceLength else {
+            throw ControlError(
+                .invalidRequest,
+                "source exceeds \(ControlSession.Limits.maxSourceLength) characters")
+        }
+        return source
+    }
+
+    static func validateReason(_ reason: String?) throws -> String? {
+        guard let reason else { return nil }
+        guard reason.count <= ControlSession.Limits.maxReasonLength else {
+            throw ControlError(
+                .invalidRequest,
+                "reason exceeds \(ControlSession.Limits.maxReasonLength) characters")
+        }
+        return reason
+    }
+
+    static func isValidNamespacedName(_ name: String) -> Bool {
+        name.allSatisfy { character in
+            guard let ascii = character.asciiValue else { return false }
+            switch ascii {
+            case UInt8(ascii: "A")...UInt8(ascii: "Z"),
+                 UInt8(ascii: "a")...UInt8(ascii: "z"),
+                 UInt8(ascii: "0")...UInt8(ascii: "9"):
+                return true
+            default:
+                return character == "_" || character == "." || character == "-"
+                    || character == ":" || character == "/"
+            }
+        }
+    }
+
+    /// Map a signal name (case-insensitive, `SIG`-prefix optional) to its number.
+    /// Restricted to the signals it is meaningful to deliver to a foreground
+    /// terminal process.
+    static func parseSignal(_ name: String) throws -> Int32 {
+        let upper = name.uppercased()
+        let bare = upper.hasPrefix("SIG") ? String(upper.dropFirst(3)) : upper
+        switch bare {
+        case "INT": return SIGINT
+        case "TERM": return SIGTERM
+        case "KILL": return SIGKILL
+        case "HUP": return SIGHUP
+        case "QUIT": return SIGQUIT
+        default:
+            throw ControlError(
+                .invalidRequest,
+                "unsupported signal '\(name)' (allowed: SIGINT, SIGTERM, SIGKILL, SIGHUP, SIGQUIT)")
         }
     }
 }

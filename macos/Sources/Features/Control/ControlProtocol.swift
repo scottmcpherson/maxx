@@ -30,6 +30,38 @@ enum ControlMethod: String, Codable {
     /// Send a constrained action: focus, input, interrupt, cancel, close.
     /// (`POST /sessions/{id}/actions`)
     case sessionsAction = "sessions.action"
+
+    // MARK: Lifecycle (MAX-2)
+
+    /// Block until an agent-declared state/event or a Maxx-owned lifecycle is
+    /// observed, or a timeout elapses. Single response carrying the outcome.
+    case sessionsWait = "sessions.wait"
+
+    /// Stream lifecycle/event changes as newline-delimited messages until the
+    /// session ends, the timeout elapses, or the caller disconnects.
+    case sessionsWatch = "sessions.watch"
+
+    /// Archive a session: close its surface but retain the record for later
+    /// inspection.
+    case sessionsArchive = "sessions.archive"
+
+    /// Restart a session's recorded (or caller-supplied) command in a fresh
+    /// surface, keeping the stable session id.
+    case sessionsRestart = "sessions.restart"
+
+    // MARK: Agent declaration hooks (MAX-2)
+
+    /// Declare an agent-owned lifecycle state, recorded with full audit context.
+    case sessionsDeclareState = "sessions.declare-state"
+
+    /// Emit a named agent event with an optional structured payload.
+    case sessionsEmitEvent = "sessions.emit-event"
+
+    /// Set a single caller-owned metadata key.
+    case sessionsSetMetadata = "sessions.set-metadata"
+
+    /// Return a session's audit log (declared states/events + lifecycle actions).
+    case sessionsEvents = "sessions.events"
 }
 
 // MARK: - Errors
@@ -42,6 +74,9 @@ enum ControlErrorCode: String, Codable {
     case notFound = "not_found"
     case alreadyEnded = "already_ended"
     case unsupportedAction = "unsupported_action"
+    /// The operation is not supported for this session in its current state
+    /// (e.g. `restart` on a session with no restartable command).
+    case unsupported
     case internalError = "internal"
 }
 
@@ -84,6 +119,42 @@ struct ControlRequest: Codable {
         var action: String?
         /// Input text for the `input` action.
         var input: String?
+
+        // MARK: Lifecycle (MAX-2)
+
+        /// Agent-declared state name (`declare-state`) or the state to `wait` for.
+        var state: String?
+        /// Event name (`emit-event`) or the event to `wait` for.
+        var event: String?
+        /// Maxx-owned lifecycle value to `wait` for (`running`/`exited`/etc.).
+        var lifecycle: String?
+        /// Human-readable message for `declare-state`.
+        var message: String?
+        /// Who declared a state/event. Defaults to `agent` when omitted.
+        var source: String?
+        /// Raw JSON string payload for `emit-event`.
+        var payloadJson: String?
+        /// Metadata key for `set-metadata`.
+        var key: String?
+        /// Metadata value for `set-metadata`.
+        var value: String?
+        /// Optional reason recorded by `archive`.
+        var reason: String?
+        /// Signal name for the `interrupt` action (default: send Ctrl-C via tty).
+        var signal: String?
+        /// Timeout in milliseconds for `wait`/`watch`.
+        var timeoutMs: Int?
+        /// Replay/baseline event sequence for `wait --event` and `watch`.
+        var since: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, cwd, command, env, metadata, status, location
+            case action, input, state, event, lifecycle, message, source
+            case payloadJson = "payload_json"
+            case key, value, reason, signal
+            case timeoutMs = "timeout_ms"
+            case since
+        }
     }
 }
 
@@ -108,6 +179,15 @@ struct ControlSessionView: Codable, Equatable {
     var metadata: [String: String]
     var createdAt: String
     var pid: Int?
+    /// When the session was archived, if it has been.
+    var archivedAt: String?
+    /// The reason recorded by `archive`, if any.
+    var archiveReason: String?
+    /// How many times the session's command has been restarted (omitted if 0).
+    var restartCount: Int?
+    /// Sequence of the most recent audit-log entry (omitted if none). Use as a
+    /// baseline for `wait --event --since` / `watch --since` to avoid races.
+    var lastEventSeq: Int?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -115,6 +195,10 @@ struct ControlSessionView: Codable, Equatable {
         case title, command, cwd, status, lifecycle, metadata
         case createdAt = "created_at"
         case pid
+        case archivedAt = "archived_at"
+        case archiveReason = "archive_reason"
+        case restartCount = "restart_count"
+        case lastEventSeq = "last_event_seq"
     }
 }
 
@@ -135,17 +219,29 @@ struct ControlResponse: Codable {
         var canceled: Bool?
         /// The action that was applied, echoed back for `sessions.action`.
         var applied: String?
+        /// `wait` outcome: `matched`, `timeout`, or `ended`.
+        var outcome: String?
+        /// The audit-log entry that satisfied a `wait --event`/`--state`.
+        var event: ControlEventView?
+        /// A session's audit log, returned by `sessions.events`.
+        var events: [ControlEventView]?
 
         init(
             session: ControlSessionView? = nil,
             sessions: [ControlSessionView]? = nil,
             canceled: Bool? = nil,
-            applied: String? = nil
+            applied: String? = nil,
+            outcome: String? = nil,
+            event: ControlEventView? = nil,
+            events: [ControlEventView]? = nil
         ) {
             self.session = session
             self.sessions = sessions
             self.canceled = canceled
             self.applied = applied
+            self.outcome = outcome
+            self.event = event
+            self.events = events
         }
     }
 

@@ -45,8 +45,12 @@ protocol ControlSurfaceHandle {
     var isProcessAlive: Bool { get }
     func focus()
     func sendInput(_ text: String)
-    /// Send an interrupt (Ctrl-C / ETX) to the foreground process.
-    func interrupt()
+    /// Interrupt the foreground process group. With `signal == nil`, deliver
+    /// Ctrl-C (ETX) through the tty; with a signal number, send it to the
+    /// foreground process group. Returns false if there was no foreground
+    /// process to signal (so the caller can report `unsupported`).
+    @discardableResult
+    func interrupt(signal: Int32?) -> Bool
     func close()
 }
 
@@ -96,6 +100,24 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try update(request.params, host: host)))
             case .sessionsAction:
                 return try action(request.params, host: host)
+            case .sessionsArchive:
+                return .success(.init(session: try archive(request.params, host: host)))
+            case .sessionsRestart:
+                return .success(.init(session: try restart(request.params, host: host)))
+            case .sessionsDeclareState:
+                return .success(.init(session: try declareState(request.params, host: host)))
+            case .sessionsEmitEvent:
+                let (view, event) = try emitEvent(request.params, host: host)
+                return .success(.init(session: view, event: event))
+            case .sessionsSetMetadata:
+                return .success(.init(session: try setMetadata(request.params, host: host)))
+            case .sessionsEvents:
+                return .success(.init(events: try events(request.params, host: host)))
+            case .sessionsWait, .sessionsWatch:
+                // wait/watch are long-lived and handled by the streaming path in
+                // ControlServer; they never reach this single-shot dispatcher.
+                throw ControlError(
+                    .invalidRequest, "wait/watch require a streaming connection")
             }
         } catch let error as ControlError {
             return .failure(error)
@@ -140,6 +162,8 @@ final class ControlSessionRegistry {
             title: title,
             command: command,
             cwd: cwd,
+            env: env,
+            location: location,
             status: status,
             metadata: metadata,
             createdAt: now(),
@@ -220,7 +244,16 @@ final class ControlSessionRegistry {
             return .success(.init(session: view(of: session, host: host), applied: "input"))
 
         case "interrupt":
-            try requireLiveSurface(session, host: host).interrupt()
+            let handle = try requireLiveSurface(session, host: host)
+            // No signal → deliver Ctrl-C through the tty (the most correct way to
+            // interrupt the foreground process group). A named signal is sent to
+            // the same foreground process group via the explicit process-control
+            // path. The host reports delivery so we never claim success when
+            // there was no foreground process to signal.
+            let signal = try params?.signal.map(ControlValidation.parseSignal)
+            guard handle.interrupt(signal: signal) else {
+                throw ControlError(.unsupported, "session has no foreground process to signal")
+            }
             return .success(.init(session: view(of: session, host: host), applied: "interrupt"))
 
         case "cancel", "close":
@@ -231,7 +264,317 @@ final class ControlSessionRegistry {
         }
     }
 
+    // MARK: - Agent declaration hooks
+
+    /// Declare an agent-owned lifecycle state. Writes the session's current state
+    /// and records an auditable entry (source, timestamp, surface, pid).
+    private func declareState(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let state = try ControlValidation.validateState(params?.state)
+        let source = try ControlValidation.validateSource(params?.source)
+        let message = try validateMessage(params?.message)
+
+        session.status = state
+        session.appendEvent(
+            kind: .state,
+            name: state,
+            source: source,
+            message: message,
+            createdAt: now(),
+            pid: host.surface(for: session.surfaceID)?.pid)
+        sessions[session.id] = session
+        return view(of: session, host: host)
+    }
+
+    /// Emit a named agent event with an optional validated JSON payload.
+    private func emitEvent(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> (ControlSessionView, ControlEventView) {
+        var session = try requireSession(params?.id)
+        let name = try ControlValidation.validateEventName(params?.event)
+        let source = try ControlValidation.validateSource(params?.source)
+        let payload = try params?.payloadJson.map(ControlJSONValue.parse)
+
+        session.appendEvent(
+            kind: .event,
+            name: name,
+            source: source,
+            payload: payload,
+            createdAt: now(),
+            pid: host.surface(for: session.surfaceID)?.pid)
+        sessions[session.id] = session
+        // `appendEvent` always appends, so `last` is the entry we just recorded.
+        let recorded = eventView(session.events[session.events.count - 1], sessionID: session.id)
+        return (view(of: session, host: host), recorded)
+    }
+
+    /// Set a single caller-owned metadata key (the auditable, one-key form of
+    /// `update`).
+    private func setMetadata(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        guard let key = params?.key, !key.isEmpty else {
+            throw ControlError(.invalidRequest, "set-metadata requires 'key'")
+        }
+        let source = try ControlValidation.validateSource(params?.source)
+
+        var merged = session.metadata
+        merged[key] = params?.value ?? ""
+        session.metadata = try ControlValidation.validateMetadata(merged)
+        session.appendEvent(
+            kind: .metadata,
+            name: key,
+            source: source,
+            createdAt: now(),
+            pid: host.surface(for: session.surfaceID)?.pid)
+        sessions[session.id] = session
+        return view(of: session, host: host)
+    }
+
+    // MARK: - Lifecycle control
+
+    /// Archive a session: close its surface but keep the record (and its full
+    /// audit log) for later inspection. Idempotent.
+    private func archive(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let reason = try ControlValidation.validateReason(params?.reason)
+
+        if !session.archived {
+            if !session.canceled, let handle = host.surface(for: session.surfaceID) {
+                handle.close()
+            }
+            let date = now()
+            session.archived = true
+            session.archivedAt = date
+            session.archiveReason = reason
+            session.appendEvent(
+                kind: .lifecycle,
+                name: "archived",
+                source: ControlSession.maxxSource,
+                message: reason,
+                createdAt: date,
+                pid: nil)
+        }
+        sessions[session.id] = session
+        return view(of: session, host: host)
+    }
+
+    /// Restart a session's command in a fresh surface, keeping the stable session
+    /// id. Restart is well-defined only when Maxx has a recorded command or the
+    /// caller supplies one; otherwise it is an explicit `unsupported` error.
+    private func restart(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        // A caller-supplied command takes precedence for this restart only; the
+        // session's recorded command remains the default for future restarts.
+        let override = try ControlValidation.validateCommand(params?.command)
+        guard let command = override ?? session.command, !command.isEmpty else {
+            throw ControlError(
+                .unsupported,
+                "session has no restartable command; pass a command to restart it")
+        }
+
+        if !session.canceled, !session.archived, let handle = host.surface(for: session.surfaceID) {
+            handle.close()
+        }
+
+        let newSurface = try host.createTerminal(.init(
+            title: session.title,
+            command: command,
+            cwd: session.cwd,
+            env: session.env,
+            location: session.location))
+
+        session.surfaceID = newSurface
+        session.canceled = false
+        session.archived = false
+        session.archivedAt = nil
+        session.archiveReason = nil
+        session.restartCount += 1
+        session.appendEvent(
+            kind: .lifecycle,
+            name: "restarted",
+            source: ControlSession.maxxSource,
+            message: override != nil ? "command override" : nil,
+            createdAt: now(),
+            pid: host.surface(for: newSurface)?.pid)
+        sessions[session.id] = session
+        return view(of: session, host: host)
+    }
+
+    /// Return a session's audit log, optionally only entries after `since`.
+    private func events(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> [ControlEventView] {
+        let session = try requireSession(params?.id)
+        let since = params?.since
+        return session.events
+            .filter { since == nil || $0.seq > since! }
+            .map { eventView($0, sessionID: session.id) }
+    }
+
+    // MARK: - Wait / Watch (driven by the streaming server path)
+
+    enum WaitCondition {
+        case state(String)
+        case event(String)
+        case lifecycle(ControlLifecycle)
+    }
+
+    struct WaitPlan {
+        let sessionID: UUID
+        let condition: WaitCondition
+        /// `wait --event` matches only entries with `seq` greater than this.
+        let baselineSeq: Int
+    }
+
+    enum WaitProgress {
+        case matched(ControlSessionView, ControlEventView?)
+        case ended(ControlSessionView)
+        case pending(ControlSessionView)
+    }
+
+    /// Validate a `wait` request and capture its baseline. Throws `not_found`
+    /// (missing target) / `invalid_request` exactly like the single-shot handlers.
+    func beginWait(_ params: ControlRequest.Params?) throws -> WaitPlan {
+        let session = try requireSession(params?.id)
+        let chosen = [params?.state, params?.event, params?.lifecycle].filter { $0 != nil }
+        guard chosen.count == 1 else {
+            throw ControlError(
+                .invalidRequest,
+                "wait requires exactly one of --state, --event, or --lifecycle")
+        }
+
+        let condition: WaitCondition
+        if params?.state != nil {
+            condition = .state(try ControlValidation.validateState(params?.state))
+        } else if params?.event != nil {
+            condition = .event(try ControlValidation.validateEventName(params?.event))
+        } else {
+            guard let raw = params?.lifecycle, let parsed = ControlLifecycle(rawValue: raw) else {
+                throw ControlError(
+                    .invalidRequest,
+                    "lifecycle must be one of running, exited, closed, archived")
+            }
+            condition = .lifecycle(parsed)
+        }
+
+        // Default baseline = the current last sequence, so only events that
+        // arrive after the wait begins count. `--since` lets callers close the
+        // race by passing a sequence they already observed.
+        let baseline = params?.since ?? (session.lastSeq ?? -1)
+        return WaitPlan(sessionID: session.id, condition: condition, baselineSeq: baseline)
+    }
+
+    /// Evaluate a wait once. Returns nil only if the session vanished (it never
+    /// does today; defensive). The server polls this until it resolves or times
+    /// out.
+    func pollWait(_ plan: WaitPlan, host: ControlSessionHost) -> WaitProgress? {
+        guard let session = sessions[plan.sessionID] else { return nil }
+        let snapshot = view(of: session, host: host)
+        let current = lifecycle(of: session, host: host)
+
+        switch plan.condition {
+        case let .state(target):
+            if session.status == target {
+                let stateEvent = session.events.last { $0.kind == .state && $0.name == target }
+                return .matched(snapshot, stateEvent.map { eventView($0, sessionID: session.id) })
+            }
+            return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
+
+        case let .lifecycle(target):
+            if current == target { return .matched(snapshot, nil) }
+            return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
+
+        case let .event(name):
+            if let match = session.events.first(where: {
+                $0.kind == .event && $0.name == name && $0.seq > plan.baselineSeq
+            }) {
+                return .matched(snapshot, eventView(match, sessionID: session.id))
+            }
+            return current.isTerminal ? .ended(snapshot) : .pending(snapshot)
+        }
+    }
+
+    struct WatchPlan {
+        let sessionID: UUID
+        var lastSeq: Int
+        var lastLifecycle: String
+    }
+
+    struct WatchUpdate {
+        var messages: [ControlStreamMessage]
+        var plan: WatchPlan
+        var ended: Bool
+    }
+
+    /// Validate a `watch` request and produce the initial snapshot message.
+    func beginWatch(_ params: ControlRequest.Params?, host: ControlSessionHost) throws
+        -> (WatchPlan, ControlStreamMessage) {
+        let session = try requireSession(params?.id)
+        let current = lifecycle(of: session, host: host)
+        // `--since` replays entries after that sequence; default streams only new
+        // ones. The snapshot always carries the current state regardless.
+        let lastSeq = params?.since ?? (session.lastSeq ?? -1)
+        let plan = WatchPlan(
+            sessionID: session.id, lastSeq: lastSeq, lastLifecycle: current.rawValue)
+        let snapshot = ControlStreamMessage(
+            type: "snapshot",
+            session: view(of: session, host: host),
+            lifecycle: current.rawValue)
+        return (plan, snapshot)
+    }
+
+    /// Produce the watch messages accumulated since the last poll plus the
+    /// updated plan. `ended` is true once the session reaches a terminal state.
+    func pollWatch(_ plan: WatchPlan, host: ControlSessionHost) -> WatchUpdate {
+        guard let session = sessions[plan.sessionID] else {
+            return WatchUpdate(messages: [], plan: plan, ended: true)
+        }
+        var messages: [ControlStreamMessage] = []
+        var next = plan
+
+        for event in session.events where event.seq > next.lastSeq {
+            messages.append(ControlStreamMessage(
+                type: "event", event: eventView(event, sessionID: session.id)))
+            next.lastSeq = event.seq
+        }
+
+        let current = lifecycle(of: session, host: host)
+        if current.rawValue != next.lastLifecycle {
+            messages.append(ControlStreamMessage(
+                type: "lifecycle",
+                session: view(of: session, host: host),
+                lifecycle: current.rawValue))
+            next.lastLifecycle = current.rawValue
+        }
+
+        return WatchUpdate(messages: messages, plan: next, ended: current.isTerminal)
+    }
+
     // MARK: - Helpers
+
+    private func validateMessage(_ message: String?) throws -> String? {
+        guard let message else { return nil }
+        guard message.count <= ControlSession.Limits.maxReasonLength else {
+            throw ControlError(
+                .invalidRequest,
+                "message exceeds \(ControlSession.Limits.maxReasonLength) characters")
+        }
+        return message
+    }
 
     private func requireSession(_ idString: String?) throws -> ControlSession {
         guard let idString, !idString.isEmpty else {
@@ -274,21 +617,22 @@ final class ControlSessionRegistry {
         return .success(.init(session: view(of: session, host: host), canceled: true))
     }
 
-    /// Build the wire view of a session, computing lifecycle from explicit state
-    /// only (cancel flag, surface existence, kernel process liveness).
+    /// Compute the Maxx-owned lifecycle from explicit state only: the archive/
+    /// cancel flags, surface existence, and kernel-reported process liveness.
+    /// Never consults terminal output.
+    private func lifecycle(of session: ControlSession, host: ControlSessionHost) -> ControlLifecycle {
+        if session.archived { return .archived }
+        if session.canceled { return .closed }
+        guard let handle = host.surface(for: session.surfaceID) else { return .closed }
+        return handle.isProcessAlive ? .running : .exited
+    }
+
+    /// Build the wire view of a session.
     private func view(of session: ControlSession, host: ControlSessionHost) -> ControlSessionView {
-        let lifecycle: ControlLifecycle
-        let pid: Int?
-        if session.canceled {
-            lifecycle = .closed
-            pid = nil
-        } else if let handle = host.surface(for: session.surfaceID) {
-            lifecycle = handle.isProcessAlive ? .running : .exited
-            pid = handle.pid
-        } else {
-            lifecycle = .closed
-            pid = nil
-        }
+        let lifecycle = lifecycle(of: session, host: host)
+        // Expose the pid whenever a surface still exists (running or exited), to
+        // match the MAX-1 behavior; a closed/archived session has none.
+        let pid: Int? = lifecycle.isTerminal ? nil : host.surface(for: session.surfaceID)?.pid
 
         return ControlSessionView(
             sessionID: session.id.uuidString,
@@ -300,6 +644,25 @@ final class ControlSessionRegistry {
             lifecycle: lifecycle.rawValue,
             metadata: session.metadata,
             createdAt: Self.iso8601.string(from: session.createdAt),
-            pid: pid)
+            pid: pid,
+            archivedAt: session.archivedAt.map(Self.iso8601.string(from:)),
+            archiveReason: session.archiveReason,
+            restartCount: session.restartCount > 0 ? session.restartCount : nil,
+            lastEventSeq: session.lastSeq)
+    }
+
+    /// Build the wire view of an audit-log entry.
+    private func eventView(_ event: ControlEvent, sessionID: UUID) -> ControlEventView {
+        ControlEventView(
+            seq: event.seq,
+            kind: event.kind.rawValue,
+            name: event.name,
+            source: event.source,
+            message: event.message,
+            payload: event.payload,
+            createdAt: Self.iso8601.string(from: event.createdAt),
+            sessionID: sessionID.uuidString,
+            surfaceID: event.surfaceID.uuidString,
+            pid: event.pid)
     }
 }

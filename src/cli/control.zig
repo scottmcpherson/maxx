@@ -33,7 +33,23 @@ pub const Options = struct {
     }
 };
 
-const Verb = enum { create, get, list, update, cancel, action };
+const Verb = enum {
+    create,
+    get,
+    list,
+    update,
+    cancel,
+    action,
+    // MAX-2 lifecycle control + agent declaration verbs.
+    wait,
+    watch,
+    archive,
+    restart,
+    events,
+    @"declare-state",
+    @"emit-event",
+    @"set-metadata",
+};
 
 /// A parsed `maxx +control sessions ...` invocation.
 const Command = struct {
@@ -46,6 +62,19 @@ const Command = struct {
     location: ?[]const u8 = null,
     action: ?[]const u8 = null,
     input: ?[]const u8 = null,
+    // MAX-2 fields.
+    state: ?[]const u8 = null,
+    event: ?[]const u8 = null,
+    lifecycle: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+    source: ?[]const u8 = null,
+    payload_json: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+    reason: ?[]const u8 = null,
+    signal: ?[]const u8 = null,
+    timeout_ms: ?u64 = null,
+    since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
     env: std.ArrayList([]const u8) = .empty,
 
@@ -56,6 +85,14 @@ const Command = struct {
             .list => "sessions.list",
             .update => "sessions.update",
             .cancel, .action => "sessions.action",
+            .wait => "sessions.wait",
+            .watch => "sessions.watch",
+            .archive => "sessions.archive",
+            .restart => "sessions.restart",
+            .events => "sessions.events",
+            .@"declare-state" => "sessions.declare-state",
+            .@"emit-event" => "sessions.emit-event",
+            .@"set-metadata" => "sessions.set-metadata",
         };
     }
 
@@ -77,6 +114,8 @@ const ParseError = error{
     MissingValue,
     UnknownFlag,
     InvalidMetadata,
+    InvalidDuration,
+    InvalidSince,
 } || Allocator.Error;
 
 /// The `+control` action provides an external, local control surface for Maxx.
@@ -105,12 +144,36 @@ const ParseError = error{
 ///   * `sessions cancel <session_id>`: cancel/close a session (idempotent).
 ///
 ///   * `sessions action <session_id> --action <name>`: send a constrained
-///     action — `focus`, `input` (with `--input <text>`), `interrupt`,
-///     `cancel`, or `close`.
+///     action — `focus`, `input` (with `--input <text>`), `interrupt`
+///     (optionally `--signal SIGTERM`), `cancel`, or `close`.
+///
+/// Lifecycle control verbs (the `maxxctl` half of the surface — Maxx runtime
+/// primitives):
+///
+///   * `sessions wait <session_id>`: block until a condition holds. Pass exactly
+///     one of `--state <name>`, `--event <name>`, or `--lifecycle <value>`, with
+///     optional `--timeout <dur>` and `--since <seq>`.
+///   * `sessions watch <session_id> [--json] [--since <seq>] [--timeout <dur>]`:
+///     stream newline-delimited lifecycle/event messages until the session ends.
+///   * `sessions archive <session_id> [--reason <text>]`: close the surface but
+///     retain the record.
+///   * `sessions restart <session_id> [--command <cmd>|--last-command]`: replay
+///     the recorded (or supplied) command in a fresh surface.
+///   * `sessions events <session_id> [--since <seq>]`: print the audit log.
+///
+/// Agent declaration verbs (the `maxx-agent-hook` half — agents declaring their
+/// own workflow-relevant lifecycle facts):
+///
+///   * `sessions declare-state <session_id> --state <name> [--message <text>]
+///     [--source <name>]`
+///   * `sessions emit-event <session_id> --event <name> [--payload-json <json>]
+///     [--source <name>]`
+///   * `sessions set-metadata <session_id> --key <key> --value <value>`
 ///
 /// The create response includes a stable `session_id` to use for all later
-/// operations. The raw JSON response is printed to stdout; the exit code is 0
-/// on success and 1 on any error.
+/// operations. The raw JSON response is printed to stdout. Exit codes are
+/// stable: 0 success/matched, 1 generic error, 2 `wait` timeout, 3 missing
+/// target, 4 `wait` target ended before matching, 5 unsupported operation.
 ///
 /// Note: a flag value that begins with `+` (e.g. a command literally starting
 /// with a plus) must use the `--flag=value` form (`--command=+foo`); the
@@ -137,7 +200,11 @@ pub fn run(alloc: Allocator) !u8 {
             return 1;
         },
         error.UnknownVerb => {
-            try stderr.print("error: unknown subcommand. Try: create, get, list, update, cancel, action\n", .{});
+            try stderr.print(
+                "error: unknown subcommand. Try: create, get, list, update, cancel, action, " ++
+                    "wait, watch, archive, restart, events, declare-state, emit-event, set-metadata\n",
+                .{},
+            );
             return 1;
         },
         error.MissingValue => {
@@ -146,6 +213,14 @@ pub fn run(alloc: Allocator) !u8 {
         },
         error.InvalidMetadata => {
             try stderr.print("error: --metadata expects key=value\n", .{});
+            return 1;
+        },
+        error.InvalidDuration => {
+            try stderr.print("error: --timeout expects a duration like 30s, 500ms, 5m, or 1h\n", .{});
+            return 1;
+        },
+        error.InvalidSince => {
+            try stderr.print("error: --since expects an integer sequence number\n", .{});
             return 1;
         },
         error.UnknownFlag => {
@@ -174,7 +249,23 @@ pub fn run(alloc: Allocator) !u8 {
 
     const request = try buildRequest(arena_alloc, cmd, token);
 
-    const response = sendRequest(arena_alloc, socket_path, request) catch |err| {
+    // `watch` streams many newline-delimited messages until the session ends or
+    // the caller disconnects; print them as they arrive.
+    if (cmd.verb == .watch) {
+        streamResponse(arena_alloc, socket_path, request) catch |err| {
+            try stderr.print(
+                "error: could not reach Maxx control socket at {s}: {}\n",
+                .{ socket_path, err },
+            );
+            return 1;
+        };
+        return 0;
+    }
+
+    // `wait` keeps its write side open so the server can detect a caller that
+    // gives up; other single-shot requests half-close after sending the request.
+    const half_close = cmd.verb != .wait;
+    const response = sendRequest(arena_alloc, socket_path, request, half_close) catch |err| {
         try stderr.print(
             "error: could not reach Maxx control socket at {s}: {}\n",
             .{ socket_path, err },
@@ -190,7 +281,73 @@ pub fn run(alloc: Allocator) !u8 {
     try stdout.writeAll("\n");
     try stdout.flush();
 
-    return if (responseOk(arena_alloc, trimmed)) 0 else 1;
+    return exitCode(arena_alloc, trimmed, cmd.verb);
+}
+
+/// Parse a human duration into milliseconds. Accepts a bare integer (seconds) or
+/// an integer with a `ms`/`s`/`m`/`h` suffix. Returns null on anything else.
+fn parseDurationMs(s: []const u8) ?u64 {
+    // Cap the result well within i64 range: the server decodes `timeout_ms` as a
+    // signed integer and then clamps it to its own maximum, so a saturating
+    // multiply that overflowed i64 would be rejected as malformed rather than
+    // clamped. 24h is far above any real wait and safely representable.
+    const max_ms: u64 = 24 * 3_600_000;
+
+    const t = std.mem.trim(u8, s, &std.ascii.whitespace);
+    if (t.len == 0) return null;
+
+    var num_end: usize = 0;
+    while (num_end < t.len and std.ascii.isDigit(t[num_end])) : (num_end += 1) {}
+    if (num_end == 0) return null;
+
+    const value = std.fmt.parseInt(u64, t[0..num_end], 10) catch return null;
+    const unit = t[num_end..];
+
+    const mult: u64 = if (unit.len == 0) 1000 // bare number = seconds
+        else if (std.mem.eql(u8, unit, "ms")) 1 else if (std.mem.eql(u8, unit, "s")) 1000 else if (std.mem.eql(u8, unit, "m")) 60_000 else if (std.mem.eql(u8, unit, "h")) 3_600_000 else return null;
+
+    return @min(value *| mult, max_ms);
+}
+
+/// Map a response to a stable, documented exit code:
+///   0 success/matched · 1 generic error · 2 wait timeout ·
+///   3 missing target (not_found) · 4 wait target ended · 5 unsupported op.
+fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, response, .{}) catch return 1;
+    defer parsed.deinit();
+    if (parsed.value != .object) return 1;
+    const obj = parsed.value.object;
+
+    const ok = obj.get("ok") orelse return 1;
+    if (ok == .bool and ok.bool) {
+        if (verb == .wait) {
+            if (obj.get("result")) |result| {
+                if (result == .object) {
+                    if (result.object.get("outcome")) |outcome| {
+                        if (outcome == .string) {
+                            if (std.mem.eql(u8, outcome.string, "timeout")) return 2;
+                            if (std.mem.eql(u8, outcome.string, "ended")) return 4;
+                        }
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+    if (obj.get("error")) |err| {
+        if (err == .object) {
+            if (err.object.get("code")) |code| {
+                if (code == .string) {
+                    if (std.mem.eql(u8, code.string, "not_found")) return 3;
+                    if (std.mem.eql(u8, code.string, "unsupported")) return 5;
+                    // `unsupported_action` is an unknown/misspelled action name —
+                    // a caller usage error, which is a generic (exit 1) failure.
+                }
+            }
+        }
+    }
+    return 1;
 }
 
 /// Resolve the control directory: `$MAXX_CONTROL_DIR` or `/tmp/maxx-control-<uid>`.
@@ -243,11 +400,39 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.input = v;
         } else if (try flagValue(alloc, arg, iter, "--id")) |v| {
             cmd.id = v;
+        } else if (try flagValue(alloc, arg, iter, "--state")) |v| {
+            cmd.state = v;
+        } else if (try flagValue(alloc, arg, iter, "--event")) |v| {
+            cmd.event = v;
+        } else if (try flagValue(alloc, arg, iter, "--lifecycle")) |v| {
+            cmd.lifecycle = v;
+        } else if (try flagValue(alloc, arg, iter, "--message")) |v| {
+            cmd.message = v;
+        } else if (try flagValue(alloc, arg, iter, "--source")) |v| {
+            cmd.source = v;
+        } else if (try flagValue(alloc, arg, iter, "--payload-json")) |v| {
+            cmd.payload_json = v;
+        } else if (try flagValue(alloc, arg, iter, "--key")) |v| {
+            cmd.key = v;
+        } else if (try flagValue(alloc, arg, iter, "--value")) |v| {
+            cmd.value = v;
+        } else if (try flagValue(alloc, arg, iter, "--reason")) |v| {
+            cmd.reason = v;
+        } else if (try flagValue(alloc, arg, iter, "--signal")) |v| {
+            cmd.signal = v;
+        } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
+            cmd.timeout_ms = parseDurationMs(v) orelse return error.InvalidDuration;
+        } else if (try flagValue(alloc, arg, iter, "--since")) |v| {
+            cmd.since = std.fmt.parseInt(i64, v, 10) catch return error.InvalidSince;
         } else if (try flagValue(alloc, arg, iter, "--metadata")) |v| {
             const eq = std.mem.indexOfScalar(u8, v, '=') orelse return error.InvalidMetadata;
             try cmd.metadata.append(alloc, .{ v[0..eq], v[eq + 1 ..] });
         } else if (try flagValue(alloc, arg, iter, "--env")) |v| {
             try cmd.env.append(alloc, v);
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            // `watch` always emits JSON; accept the documented flag as a no-op.
+        } else if (std.mem.eql(u8, arg, "--last-command")) {
+            // `restart` replays the recorded command by default; accept as a no-op.
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else {
@@ -333,6 +518,55 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
         try json.objectField("action");
         try json.write(v);
     }
+    if (cmd.state) |v| {
+        try json.objectField("state");
+        try json.write(v);
+    }
+    if (cmd.event) |v| {
+        try json.objectField("event");
+        try json.write(v);
+    }
+    if (cmd.lifecycle) |v| {
+        try json.objectField("lifecycle");
+        try json.write(v);
+    }
+    if (cmd.message) |v| {
+        try json.objectField("message");
+        try json.write(v);
+    }
+    if (cmd.source) |v| {
+        try json.objectField("source");
+        try json.write(v);
+    }
+    if (cmd.payload_json) |v| {
+        // The server receives the raw JSON text as a string and validates it.
+        try json.objectField("payload_json");
+        try json.write(v);
+    }
+    if (cmd.key) |v| {
+        try json.objectField("key");
+        try json.write(v);
+    }
+    if (cmd.value) |v| {
+        try json.objectField("value");
+        try json.write(v);
+    }
+    if (cmd.reason) |v| {
+        try json.objectField("reason");
+        try json.write(v);
+    }
+    if (cmd.signal) |v| {
+        try json.objectField("signal");
+        try json.write(v);
+    }
+    if (cmd.timeout_ms) |v| {
+        try json.objectField("timeout_ms");
+        try json.write(v);
+    }
+    if (cmd.since) |v| {
+        try json.objectField("since");
+        try json.write(v);
+    }
     if (cmd.metadata.items.len > 0) {
         try json.objectField("metadata");
         try json.beginObject();
@@ -356,8 +590,15 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
 }
 
 /// Send `request` (followed by a newline) to the control socket and return the
-/// full response bytes.
-fn sendRequest(alloc: Allocator, socket_path: []const u8, request: []const u8) ![]u8 {
+/// full response bytes. `half_close` shuts the write side after sending, which
+/// is correct for single-shot requests but must be false for `wait` (the server
+/// watches for an orderly client disconnect while it blocks).
+fn sendRequest(
+    alloc: Allocator,
+    socket_path: []const u8,
+    request: []const u8,
+    half_close: bool,
+) ![]u8 {
     if (socket_path.len >= 104) return error.PathTooLong;
 
     const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
@@ -374,7 +615,7 @@ fn sendRequest(alloc: Allocator, socket_path: []const u8, request: []const u8) !
 
     try writeAll(fd, request);
     try writeAll(fd, "\n");
-    _ = c.shutdown(fd, SHUT_WR);
+    if (half_close) _ = c.shutdown(fd, SHUT_WR);
 
     var response: std.ArrayList(u8) = .empty;
     errdefer response.deinit(alloc);
@@ -388,6 +629,43 @@ fn sendRequest(alloc: Allocator, socket_path: []const u8, request: []const u8) !
     }
 
     return response.toOwnedSlice(alloc);
+}
+
+/// Connect, send `request`, and stream the server's newline-delimited messages
+/// straight to stdout until the connection closes. Used by `watch`; the write
+/// side stays open so the server keeps the stream alive until the session ends
+/// or we disconnect by closing the fd.
+fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !void {
+    _ = alloc;
+    if (socket_path.len >= 104) return error.PathTooLong;
+
+    const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return error.SocketFailed;
+    defer _ = c.close(fd);
+
+    var addr: std.posix.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+
+    if (c.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) != 0) {
+        return error.ConnectFailed;
+    }
+
+    try writeAll(fd, request);
+    try writeAll(fd, "\n");
+
+    var out_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&out_buf);
+    const stdout = &stdout_writer.interface;
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = c.read(fd, &buf, buf.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        try stdout.writeAll(buf[0..@intCast(n)]);
+        try stdout.flush();
+    }
 }
 
 fn writeAll(fd: c_int, bytes: []const u8) !void {
@@ -518,4 +796,162 @@ test "responseOk parses ok flag" {
     try testing.expect(responseOk(testing.allocator, "{\"ok\":true}"));
     try testing.expect(!responseOk(testing.allocator, "{\"ok\":false}"));
     try testing.expect(!responseOk(testing.allocator, "not json"));
+}
+
+test "parseCommand declare-state with flags" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions declare-state ID-1 --state tests:passed --message \"all green\" --source agent-a",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"declare-state");
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("tests:passed", cmd.state.?);
+    try testing.expectEqualStrings("all green", cmd.message.?);
+    try testing.expectEqualStrings("agent-a", cmd.source.?);
+    try testing.expectEqualStrings("sessions.declare-state", cmd.method());
+}
+
+test "parseCommand wait with state, timeout, since" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions wait ID-9 --state ready --timeout 2m --since 5",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .wait);
+    try testing.expectEqualStrings("ID-9", cmd.id.?);
+    try testing.expectEqualStrings("ready", cmd.state.?);
+    try testing.expectEqual(@as(u64, 120_000), cmd.timeout_ms.?);
+    try testing.expectEqual(@as(i64, 5), cmd.since.?);
+}
+
+test "parseCommand watch and restart accept no-op flags" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var w = try std.process.ArgIteratorGeneral(.{}).init(alloc, "sessions watch ID --json");
+    defer w.deinit();
+    const watch = try parseCommand(alloc, &w);
+    try testing.expect(watch.verb == .watch);
+    try testing.expectEqualStrings("ID", watch.id.?);
+
+    var r = try std.process.ArgIteratorGeneral(.{}).init(alloc, "sessions restart ID --last-command");
+    defer r.deinit();
+    const restart = try parseCommand(alloc, &r);
+    try testing.expect(restart.verb == .restart);
+    try testing.expectEqualStrings("ID", restart.id.?);
+}
+
+test "parseDurationMs parses units" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(?u64, 30_000), parseDurationMs("30"));
+    try testing.expectEqual(@as(?u64, 500), parseDurationMs("500ms"));
+    try testing.expectEqual(@as(?u64, 45_000), parseDurationMs("45s"));
+    try testing.expectEqual(@as(?u64, 300_000), parseDurationMs("5m"));
+    try testing.expectEqual(@as(?u64, 3_600_000), parseDurationMs("1h"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs("abc"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs("10x"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs(""));
+}
+
+test "buildRequest emit-event includes event and payload_json" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"emit-event",
+        .id = "id-1",
+        .event = "pr.opened",
+        .payload_json = "{\"pr\":123}",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.emit-event", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("pr.opened", params.get("event").?.string);
+    // payload_json is carried as a JSON string for the server to parse.
+    try testing.expectEqualStrings("{\"pr\":123}", params.get("payload_json").?.string);
+}
+
+test "buildRequest wait includes timeout_ms and lifecycle" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .wait,
+        .id = "id-1",
+        .lifecycle = "exited",
+        .timeout_ms = 1500,
+        .since = 3,
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.wait", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("exited", params.get("lifecycle").?.string);
+    try testing.expectEqual(@as(i64, 1500), params.get("timeout_ms").?.integer);
+    try testing.expectEqual(@as(i64, 3), params.get("since").?.integer);
+}
+
+test "exitCode maps wait outcomes and error codes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    try testing.expectEqual(
+        @as(u8, 0),
+        exitCode(a, "{\"ok\":true,\"result\":{\"outcome\":\"matched\"}}", .wait),
+    );
+    try testing.expectEqual(
+        @as(u8, 2),
+        exitCode(a, "{\"ok\":true,\"result\":{\"outcome\":\"timeout\"}}", .wait),
+    );
+    try testing.expectEqual(
+        @as(u8, 4),
+        exitCode(a, "{\"ok\":true,\"result\":{\"outcome\":\"ended\"}}", .wait),
+    );
+    try testing.expectEqual(
+        @as(u8, 3),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"not_found\"}}", .wait),
+    );
+    try testing.expectEqual(
+        @as(u8, 5),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unsupported\"}}", .restart),
+    );
+    // A plain successful response for a non-wait verb is exit 0.
+    try testing.expectEqual(@as(u8, 0), exitCode(a, "{\"ok\":true,\"result\":{}}", .archive));
+    // A generic error is exit 1.
+    try testing.expectEqual(
+        @as(u8, 1),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"invalid_request\"}}", .archive),
+    );
+    // An unknown action name is a usage error -> generic exit 1, not 5.
+    try testing.expectEqual(
+        @as(u8, 1),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unsupported_action\"}}", .action),
+    );
 }

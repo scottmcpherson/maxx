@@ -192,38 +192,56 @@ final class ControlServer {
         }
     }
 
+    /// Timeout defaults and the poll cadence for blocking wait/watch loops.
+    private static let waitDefaultTimeoutMs = 30_000
+    private static let maxTimeoutMs = 3_600_000  // 1 hour hard cap
+    private static let pollIntervalMicros: useconds_t = 150_000  // 150 ms
+
     private func handleConnection(_ fd: Int32) {
         defer { Darwin.close(fd) }
 
-        // Bound how long a single connection can occupy a worker thread: a
-        // client that connects and never sends a full request must not pin the
-        // thread (and exhaust the pool) indefinitely.
+        // Never let a write to a vanished client raise SIGPIPE and kill the app.
+        setNoSigpipe(fd)
+
+        // Bound how long a single connection can occupy a worker thread while we
+        // read the request: a client that connects and never sends a full
+        // request must not pin the thread (and exhaust the pool) indefinitely.
+        // Blocking wait/watch loops do not read again, so this does not bound
+        // their (separately capped) duration.
         setReadTimeout(fd, seconds: 5)
 
-        let response: ControlResponse
-        if let data = readRequest(fd) {
-            response = makeResponse(for: data)
-        } else {
-            response = .failure(ControlError(.invalidRequest, "could not read request"))
+        guard let data = readRequest(fd) else {
+            sendResponse(.failure(ControlError(.invalidRequest, "could not read request")), to: fd)
+            return
         }
-        sendResponse(response, to: fd)
-    }
 
-    private func makeResponse(for data: Data) -> ControlResponse {
         let request: ControlRequest
         do {
             request = try JSONDecoder().decode(ControlRequest.self, from: data)
         } catch {
-            return .failure(ControlError(.invalidRequest, "invalid JSON request"))
+            sendResponse(.failure(ControlError(.invalidRequest, "invalid JSON request")), to: fd)
+            return
         }
 
         guard authorize(request.token) else {
             Self.logger.warning(
                 "denied control request: unauthorized (method=\(request.method.rawValue, privacy: .public))")
-            return .failure(ControlError(.unauthorized, "invalid or missing token"))
+            sendResponse(.failure(ControlError(.unauthorized, "invalid or missing token")), to: fd)
+            return
         }
 
-        // Hop to the main actor to mutate session/terminal state.
+        switch request.method {
+        case .sessionsWait:
+            handleWait(request, fd: fd)
+        case .sessionsWatch:
+            handleWatch(request, fd: fd)
+        default:
+            sendResponse(dispatch(request), to: fd)
+        }
+    }
+
+    /// Single-shot dispatch: hop to the main actor, run the handler, log.
+    private func dispatch(_ request: ControlRequest) -> ControlResponse {
         let response = DispatchQueue.main.sync {
             MainActor.assumeIsolated {
                 self.registry.handle(request, host: self.host)
@@ -233,13 +251,123 @@ final class ControlServer {
         // Observability: log the method and outcome, never the params (which may
         // contain commands, env vars, or other secrets).
         if response.ok {
-            Self.logger.info(
-                "control \(request.method.rawValue, privacy: .public): ok")
+            Self.logger.info("control \(request.method.rawValue, privacy: .public): ok")
         } else {
             Self.logger.info(
                 "control \(request.method.rawValue, privacy: .public): error \(response.error?.code ?? "?", privacy: .public)")
         }
         return response
+    }
+
+    // MARK: - Wait (blocking single response)
+
+    /// Block until the wait condition is observed or the timeout elapses, then
+    /// send exactly one response carrying the outcome. The poll runs on this
+    /// connection's background thread, hopping to the main actor only for the
+    /// brief condition check, so the UI is never blocked.
+    private func handleWait(_ request: ControlRequest, fd: Int32) {
+        let plan: ControlSessionRegistry.WaitPlan
+        do {
+            plan = try DispatchQueue.main.sync {
+                try MainActor.assumeIsolated { try self.registry.beginWait(request.params) }
+            }
+        } catch let error as ControlError {
+            Self.logger.info("control sessions.wait: error \(error.code.rawValue, privacy: .public)")
+            sendResponse(.failure(error), to: fd)
+            return
+        } catch {
+            sendResponse(.failure(ControlError(.internalError, "\(error)")), to: fd)
+            return
+        }
+
+        let timeoutMs = min(request.params?.timeoutMs ?? Self.waitDefaultTimeoutMs, Self.maxTimeoutMs)
+        let deadline = Date().addingTimeInterval(Double(max(0, timeoutMs)) / 1000.0)
+
+        while true {
+            let progress = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { self.registry.pollWait(plan, host: self.host) }
+            }
+            switch progress {
+            case let .matched(view, event)?:
+                Self.logger.info("control sessions.wait: ok")
+                sendResponse(.success(.init(session: view, outcome: "matched", event: event)), to: fd)
+                return
+            case let .ended(view)?:
+                Self.logger.info("control sessions.wait: ended")
+                sendResponse(.success(.init(session: view, outcome: "ended")), to: fd)
+                return
+            case let .pending(view)?:
+                if Date() >= deadline {
+                    Self.logger.info("control sessions.wait: timeout")
+                    sendResponse(.success(.init(session: view, outcome: "timeout")), to: fd)
+                    return
+                }
+                if peerClosed(fd) { return }
+                usleep(Self.pollIntervalMicros)
+            case .none:
+                sendResponse(.failure(ControlError(.notFound, "session no longer exists")), to: fd)
+                return
+            }
+        }
+    }
+
+    // MARK: - Watch (streaming many responses)
+
+    /// Stream newline-delimited ``ControlStreamMessage`` objects as lifecycle and
+    /// events change, until the session ends, the (optional) timeout elapses, or
+    /// the client disconnects.
+    private func handleWatch(_ request: ControlRequest, fd: Int32) {
+        let initial: (ControlSessionRegistry.WatchPlan, ControlStreamMessage)
+        do {
+            initial = try DispatchQueue.main.sync {
+                try MainActor.assumeIsolated {
+                    try self.registry.beginWatch(request.params, host: self.host)
+                }
+            }
+        } catch let error as ControlError {
+            Self.logger.info("control sessions.watch: error \(error.code.rawValue, privacy: .public)")
+            sendResponse(.failure(error), to: fd)
+            return
+        } catch {
+            sendResponse(.failure(ControlError(.internalError, "\(error)")), to: fd)
+            return
+        }
+
+        Self.logger.info("control sessions.watch: streaming")
+        var plan = initial.0
+        if !writeStreamMessage(initial.1, to: fd) { return }
+
+        // An explicit timeout caps the stream; otherwise it runs until the
+        // session ends or the client disconnects.
+        let deadline = request.params?.timeoutMs
+            .map { Date().addingTimeInterval(Double(max(0, min($0, Self.maxTimeoutMs))) / 1000.0) }
+
+        while true {
+            let update = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { self.registry.pollWatch(plan, host: self.host) }
+            }
+            plan = update.plan
+            // Stop the moment a write fails (the client disconnected).
+            for message in update.messages where !writeStreamMessage(message, to: fd) {
+                return
+            }
+            if update.ended {
+                _ = writeStreamMessage(
+                    ControlStreamMessage(type: "end", lifecycle: plan.lastLifecycle), to: fd)
+                return
+            }
+            if let deadline, Date() >= deadline { return }
+            if peerClosed(fd) { return }
+            usleep(Self.pollIntervalMicros)
+        }
+    }
+
+    /// Non-blocking check for an orderly peer shutdown (the client closed the
+    /// connection). A peeked read of 0 bytes means EOF.
+    private func peerClosed(_ fd: Int32) -> Bool {
+        var byte: UInt8 = 0
+        let n = recv(fd, &byte, 1, Int32(MSG_PEEK) | Int32(MSG_DONTWAIT))
+        return n == 0
     }
 
     private func authorize(_ provided: String?) -> Bool {
@@ -289,20 +417,47 @@ final class ControlServer {
     private func sendResponse(_ response: ControlResponse, to fd: Int32) {
         guard var out = try? JSONEncoder().encode(response) else { return }
         out.append(0x0A)
-        out.withUnsafeBytes { raw in
-            guard var pointer = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+        writeAll(out, to: fd)
+    }
+
+    /// Encode and write one streaming message terminated by a newline. Returns
+    /// false if the write failed (e.g. the client disconnected), signaling the
+    /// streaming loop to stop.
+    private func writeStreamMessage(_ message: ControlStreamMessage, to fd: Int32) -> Bool {
+        guard var out = try? JSONEncoder().encode(message) else { return false }
+        out.append(0x0A)
+        return writeAll(out, to: fd)
+    }
+
+    /// Write all bytes. Returns false if the peer went away (write failed).
+    /// SIGPIPE is disabled per-connection (``setNoSigpipe``) so a write to a
+    /// disconnected client returns EPIPE here rather than killing the app.
+    @discardableResult
+    private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+        data.withUnsafeBytes { raw -> Bool in
+            guard var pointer = raw.bindMemory(to: UInt8.self).baseAddress else { return true }
             var remaining = raw.count
             while remaining > 0 {
                 let n = write(fd, pointer, remaining)
                 if n < 0 {
                     if errno == EINTR { continue }
-                    return
+                    return false
                 }
-                if n == 0 { return }
+                if n == 0 { return false }
                 pointer = pointer.advanced(by: n)
                 remaining -= n
             }
+            return true
         }
+    }
+
+    /// Disable SIGPIPE for this connection so writing to a disconnected client
+    /// returns EPIPE instead of terminating the process. Essential for `watch`,
+    /// which may write to a client that has gone away.
+    private func setNoSigpipe(_ fd: Int32) {
+        var on: Int32 = 1
+        _ = setsockopt(
+            fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
     // MARK: - Token generation
