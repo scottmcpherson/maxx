@@ -95,6 +95,28 @@ maxx +control sessions emit-event <session_id> --event pr.opened --payload-json 
 maxx +control sessions set-metadata <session_id> --key reviewer --value alice
 ```
 
+### Agent-declared workflow state (displayed)
+
+A small, validated workflow state an agent declares for **human-facing display**:
+Maxx shows it as a badge on the tab and a one-line summary. This is distinct from
+the free-form `declare-state` above (machine coordination for `wait`) and from
+the Maxx-owned `lifecycle` (process liveness).
+
+```bash
+maxx +control sessions set-state <session_id> --state running
+maxx +control sessions set-state <session_id> --state needsInput --source release-agent
+maxx +control sessions set-state <session_id> --state blocked
+maxx +control sessions set-state <session_id> --state complete
+maxx +control sessions set-state <session_id> --state failed
+maxx +control sessions set-summary <session_id> --summary "Waiting on user confirmation for release notes wording."
+```
+
+`set-state` accepts exactly one of `running`, `needsInput`, `blocked`,
+`complete`, or `failed`; any other value is rejected with `invalid_request` and
+the current declared state is left unchanged. `set-summary` is independent of
+`set-state`, so an agent can update the displayed text without changing status.
+Both record an audit entry and are surfaced in `get` / `list` / `watch`.
+
 The raw JSON response is printed to stdout. Exit codes are stable so scripts can
 branch on them:
 
@@ -137,13 +159,16 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`    | Agent declares a lifecycle state (audited).                 |
 | `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`    | Agent emits a named event with optional JSON payload.       |
 | `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`     | Agent sets one caller-owned metadata key.                   |
+| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display. |
+| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`  | Agent sets the human-readable summary shown with the state. |
 
 ### Audit entries
 
-`declare-state`, `emit-event`, and `set-metadata` append to a per-session,
-append-only audit log. Each entry is fully auditable and carries a monotonic
-`seq`, a `kind` (`state` / `event` / `metadata`, plus `lifecycle` for the
-`archive` / `restart` actions Maxx records itself), the declared `name`, the
+`declare-state`, `emit-event`, `set-metadata`, `set-state`, and `set-summary`
+append to a per-session, append-only audit log. Each entry is fully auditable and
+carries a monotonic `seq`, a `kind` (`state` / `event` / `metadata` /
+`workflow-state` / `summary`, plus `lifecycle` for the `archive` / `restart`
+actions Maxx records itself), the declared `name`, the
 `source` (agent-supplied, or `maxx` for runtime entries), the `created_at`
 timestamp, the `session_id` and `surface_id`, and the foreground `pid` observed
 at record time. `wait`, `watch`, and `events` all read from this one log — never
@@ -215,6 +240,13 @@ Errors are predictable and documented:
   text. Use it for all later operations.
 - `surface_id` is the underlying terminal surface; exposed for correlation only.
 - `status` and `metadata` are **caller-owned**. `lifecycle` is **Maxx-owned**.
+- `workflow_state` and `summary` are **agent-declared for display** (`set-state` /
+  `set-summary`): Maxx records and shows them verbatim and never infers them.
+  They are intentionally separate from the free-form `status`, and from the
+  Maxx-owned `lifecycle`, so the UI presents them as agent-provided rather than
+  Maxx-derived. `workflow_state` is one of `running`, `needsInput`, `blocked`,
+  `complete`, `failed`; the response also carries `workflow_state_at` /
+  `workflow_state_source` and `summary_at` / `summary_source`.
 - The API only ever lists/controls **API-created** sessions. The user's
   manually-opened terminals are never reachable through it.
 
@@ -224,6 +256,8 @@ Errors are predictable and documented:
 - `metadata`: ≤ 32 keys; keys match `[A-Za-z0-9_.-]` and ≤ 64 chars; values ≤
   1024 chars.
 - `env`: ≤ 256 `KEY=VALUE` entries; keys match `[A-Za-z0-9_]`.
+- `summary` (`set-summary`) ≤ 1024 chars; `set-state` accepts only the fixed
+  workflow vocabulary above.
 
 `sessions.update` uses **merge** semantics for metadata (provided keys overwrite
 or add) and only accepts `status`/`metadata` — any attempt to set server-owned
@@ -251,7 +285,10 @@ fields is rejected with `invalid_request`. `sessions.action cancel`/`close` is
 - `restart` replays the session's recorded command (or a `--command` you supply)
   in a fresh surface while keeping the stable `session_id`, increments
   `restart_count`, and revives an archived/closed session. A session created with
-  no command and no supplied command returns `unsupported`.
+  no command and no supplied command returns `unsupported`. A restart begins a
+  fresh run, so it clears the agent-declared `workflow_state`/`summary` (the new
+  surface starts with no badge; re-declare for the new run); the free-form
+  `status` is kept.
 - `interrupt` sends Ctrl-C through the tty by default; `--signal <name>` delivers
   a specific signal (`SIGINT`/`SIGTERM`/`SIGKILL`/`SIGHUP`/`SIGQUIT`) to the
   foreground process via the explicit process-control path — never by

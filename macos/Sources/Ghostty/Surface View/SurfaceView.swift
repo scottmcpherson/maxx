@@ -126,6 +126,14 @@ extension Ghostty {
                     }
                 }
 
+                // Agent-declared workflow state badge (Control API set-state/
+                // set-summary). Shown only when an agent has explicitly declared
+                // a state or summary; never inferred from terminal output.
+                if let declared = surfaceView.declaredAgentState {
+                    AgentStateBadge(declared: declared)
+                        .zIndex(1)
+                }
+
                 // Show key state indicator for active key tables and/or pending key sequences
                 KeyStateIndicator(
                     keyTables: surfaceView.keyTables,
@@ -1092,6 +1100,148 @@ extension Ghostty {
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(Color.orange.opacity(0.6), lineWidth: 1.5)
                 )
+        }
+    }
+
+    // MARK: Agent-Declared State Badge
+
+    /// A badge overlay showing an agent-declared workflow state + summary
+    /// (Control API `set-state` / `set-summary`).
+    ///
+    /// Positioned in the top-left corner so it does not collide with the
+    /// top-right read-only badge. It renders only what an agent explicitly
+    /// declared; Maxx never infers any of this from terminal output. Kept
+    /// visually separate from the process-lifecycle and inferred-activity UI so
+    /// it reads as agent-provided, not Maxx-derived.
+    struct AgentStateBadge: View {
+        let declared: ControlDeclaredState
+
+        @State private var showingPopover = false
+
+        var body: some View {
+            VStack {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let state = declared.state {
+                            HStack(spacing: 5) {
+                                Image(systemName: Self.symbol(for: state))
+                                    .font(.system(size: 12))
+                                Text(state.label)
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(badgeBackground(for: state))
+                            .foregroundStyle(Self.color(for: state))
+                        }
+
+                        if let summary = declared.summary, !summary.isEmpty {
+                            Text(summary)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                                .frame(maxWidth: 320, alignment: .leading)
+                        }
+                    }
+                    .onTapGesture { showingPopover = true }
+                    .backport.pointerStyle(.link)
+                    .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                        AgentStatePopoverView(declared: declared)
+                    }
+
+                    Spacer()
+                }
+                .padding(8)
+
+                Spacer()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+        }
+
+        private var accessibilityLabel: String {
+            var parts: [String] = []
+            if let state = declared.state { parts.append("Agent state: \(state.label)") }
+            if let summary = declared.summary, !summary.isEmpty { parts.append(summary) }
+            return parts.isEmpty ? "Agent-declared state" : parts.joined(separator: ". ")
+        }
+
+        private func badgeBackground(for state: WorkflowState) -> some View {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.regularMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Self.color(for: state).opacity(0.6), lineWidth: 1.5)
+                )
+        }
+
+        /// SF Symbol for each declared state. Exhaustive over the enum so a new
+        /// state cannot silently render with a fallback icon.
+        static func symbol(for state: WorkflowState) -> String {
+            switch state {
+            case .running: return "play.circle.fill"
+            case .needsInput: return "questionmark.circle.fill"
+            case .blocked: return "exclamationmark.octagon.fill"
+            case .complete: return "checkmark.circle.fill"
+            case .failed: return "xmark.octagon.fill"
+            }
+        }
+
+        /// Accent color for each declared state, chosen to be mutually distinct.
+        /// Exhaustive over the enum so a new state must pick a color explicitly.
+        static func color(for state: WorkflowState) -> Color {
+            switch state {
+            case .running: return .blue
+            case .needsInput: return .orange
+            case .blocked: return .purple
+            case .complete: return .green
+            case .failed: return .red
+            }
+        }
+    }
+
+    /// Popover detailing an agent-declared state: its source and when it was
+    /// declared, framed so the user reads it as agent-provided, not Maxx-derived.
+    struct AgentStatePopoverView: View {
+        let declared: ControlDeclaredState
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                if let state = declared.state {
+                    HStack(spacing: 8) {
+                        Image(systemName: AgentStateBadge.symbol(for: state))
+                            .foregroundColor(AgentStateBadge.color(for: state))
+                            .font(.system(size: 13))
+                        Text(state.label)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                }
+
+                if let summary = declared.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Declared by \(declared.source)")
+                    Text("Updated \(declared.updatedAt.formatted(date: .abbreviated, time: .standard))")
+                }
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+
+                Text("Reported by the agent — not derived by Maxx.")
+                    .font(.system(size: 10).italic())
+                    .foregroundColor(.secondary)
+            }
+            .padding(16)
+            .frame(width: 280)
         }
     }
 

@@ -48,8 +48,48 @@ struct ControlSession {
     /// initializer stays accessible within the module.
     var nextSeq: Int = 0
 
+    // MARK: Agent-declared workflow state (MAX-3)
+    //
+    // Explicit, human-facing workflow state + summary an agent declares through
+    // `set-state` / `set-summary`. These are deliberately separate from the
+    // free-form `status` (`declare-state`, machine coordination for `wait`) and
+    // from the Maxx-owned `lifecycle` (process liveness): this vocabulary is
+    // small, validated, and surfaced to the user as a badge. Every field here is
+    // set ONLY in response to an explicit declaration — never inferred from
+    // terminal output, process names, paths, idle time, or process exit.
+
+    /// Latest declared workflow state, or nil until an agent declares one.
+    var workflowState: WorkflowState?
+    /// When `workflowState` was last declared.
+    var workflowStateAt: Date?
+    /// Who declared `workflowState` (defaults to `agent`).
+    var workflowStateSource: String?
+    /// Latest declared summary line, set independently of `workflowState` so an
+    /// agent can update the displayed text without changing status.
+    var summary: String?
+    /// When `summary` was last declared.
+    var summaryAt: Date?
+    /// Who declared `summary` (defaults to `agent`).
+    var summarySource: String?
+
     /// Sequence of the most recently recorded event, or nil if none.
     var lastSeq: Int? { events.last?.seq }
+
+    /// A snapshot of the current declared state + summary for the UI, or nil if
+    /// nothing has been declared. The `source`/`updatedAt` describe the state
+    /// badge when a state has been declared (so a later summary update from a
+    /// different source never misattributes the state), and otherwise the
+    /// summary.
+    var declaredStateForDisplay: ControlDeclaredState? {
+        guard workflowState != nil || summary != nil else { return nil }
+        let useState = workflowState != nil
+        return ControlDeclaredState(
+            state: workflowState,
+            summary: summary,
+            source: (useState ? workflowStateSource : summarySource)
+                ?? ControlSession.defaultSource,
+            updatedAt: (useState ? workflowStateAt : summaryAt) ?? createdAt)
+    }
 
     /// Append an audit-log entry, assigning it the next per-session sequence.
     mutating func appendEvent(
@@ -88,6 +128,7 @@ struct ControlSession {
         static let maxSourceLength = 128
         static let maxReasonLength = 1024
         static let maxPayloadBytes = 8192
+        static let maxSummaryLength = 1024
     }
 
     /// The default `source` recorded for agent declarations when the caller does
@@ -122,6 +163,51 @@ enum ControlLifecycle: String {
     }
 }
 
+/// An agent-declared workflow state (MAX-3).
+///
+/// A small, fixed vocabulary an agent or workflow tool declares explicitly via
+/// `set-state` so Maxx can display it. Maxx records exactly what is declared and
+/// never originates or infers a value here — not from terminal output, process
+/// names, branch names, paths, idle time, or process exit. The enum is kept
+/// intentionally small; new states are an additive change.
+enum WorkflowState: String, CaseIterable {
+    case running
+    case needsInput
+    case blocked
+    case complete
+    case failed
+
+    /// Human-facing label rendered on the UI badge.
+    var label: String {
+        switch self {
+        case .running: return "Running"
+        case .needsInput: return "Needs input"
+        case .blocked: return "Blocked"
+        case .complete: return "Complete"
+        case .failed: return "Failed"
+        }
+    }
+}
+
+/// A snapshot of a session's agent-declared workflow state + summary, pushed to
+/// the live surface so the UI can render a badge.
+///
+/// Purely a value carrier across the control-plane → UI boundary: every field is
+/// set only by an explicit `set-state` / `set-summary` declaration. Maxx never
+/// derives any of it from terminal output or ambient signals.
+struct ControlDeclaredState: Equatable {
+    /// Declared workflow state, or nil when only a summary has been declared. The
+    /// UI derives its label / icon / color from this typed value, so a new state
+    /// can never silently render with a fallback style.
+    var state: WorkflowState?
+    /// Latest declared summary line, or nil if none.
+    var summary: String?
+    /// Source recorded for the declaration this snapshot describes.
+    var source: String
+    /// When that declaration was made.
+    var updatedAt: Date
+}
+
 /// Validation for caller-supplied inputs. Pure and side-effect free so it can be
 /// unit tested without a running app. Each failure maps to `invalid_request`.
 enum ControlValidation {
@@ -146,6 +232,36 @@ enum ControlValidation {
                 "status exceeds \(ControlSession.Limits.maxStatus) characters")
         }
         return status
+    }
+
+    /// Validate an agent-declared workflow state against the fixed vocabulary.
+    /// An unknown value is rejected with a clear error (and the caller's current
+    /// declared state is left untouched), so a typo never silently becomes a
+    /// state Maxx would display.
+    static func validateWorkflowState(_ state: String?) throws -> WorkflowState {
+        guard let state, !state.isEmpty else {
+            throw ControlError(.invalidRequest, "state must not be empty")
+        }
+        guard let parsed = WorkflowState(rawValue: state) else {
+            let valid = WorkflowState.allCases.map(\.rawValue).joined(separator: ", ")
+            throw ControlError(
+                .invalidRequest,
+                "unknown state '\(state)' (valid: \(valid))")
+        }
+        return parsed
+    }
+
+    /// Validate an agent-declared summary line.
+    static func validateSummary(_ summary: String?) throws -> String {
+        guard let summary, !summary.isEmpty else {
+            throw ControlError(.invalidRequest, "summary must not be empty")
+        }
+        guard summary.count <= ControlSession.Limits.maxSummaryLength else {
+            throw ControlError(
+                .invalidRequest,
+                "summary exceeds \(ControlSession.Limits.maxSummaryLength) characters")
+        }
+        return summary
     }
 
     static func validateCommand(_ command: String?) throws -> String? {

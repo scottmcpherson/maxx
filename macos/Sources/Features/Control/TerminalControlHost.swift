@@ -156,4 +156,10 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
             controller.closeSurface(view, withConfirmation: false)
         }
     }
+
+    func applyDeclaredState(_ declared: ControlDeclaredState) {
+        // An explicit agent declaration only — the surface stores and displays it
+        // verbatim and never derives anything from terminal output.
+        view.applyDeclaredAgentState(declared)
+    }
 }

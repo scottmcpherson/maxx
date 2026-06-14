@@ -21,6 +21,9 @@ final class FakeControlSessionHost: ControlSessionHost {
         var interruptSignals: [Int32?] = []
         var inputs: [String] = []
         var closed = false
+        /// The most recent declared state/summary pushed to this surface for
+        /// display. Lets tests assert the registry → UI path without a real view.
+        var declaredState: ControlDeclaredState?
     }
 
     var surfaces: [UUID: Surface] = [:]
@@ -72,6 +75,9 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     func close() {
         surface.exists = false
         surface.closed = true
+    }
+    func applyDeclaredState(_ declared: ControlDeclaredState) {
+        surface.declaredState = declared
     }
 }
 
@@ -536,6 +542,174 @@ struct ControlSessionRegistryTests {
         let response = registry.handle(
             request(.sessionsSetMetadata, .init(id: id, value: "x")), host: host)
         #expect(response.error?.code == "invalid_request")
+    }
+
+    // MARK: - Agent-declared workflow state (MAX-3)
+
+    @Test func setStateRecordsTimestampSourceAndAudits() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let response = registry.handle(
+            request(.sessionsSetState, .init(
+                id: id, state: "needsInput", source: "release-agent")),
+            host: host)
+        #expect(response.ok)
+        let session = response.result?.session
+        #expect(session?.workflowState == "needsInput")
+        #expect(session?.workflowStateSource == "release-agent")
+        #expect(session?.workflowStateAt != nil)
+
+        // The declaration is recorded in the audit log under a distinct kind.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.last?.kind == "workflow-state")
+        #expect(log.result?.events?.last?.name == "needsInput")
+        #expect(log.result?.events?.last?.source == "release-agent")
+
+        // And pushed to the surface for display, with a human-facing label.
+        #expect(host.surfaces[surface]?.declaredState?.state == .needsInput)
+        #expect(host.surfaces[surface]?.declaredState?.state?.label == "Needs input")
+        #expect(host.surfaces[surface]?.declaredState?.source == "release-agent")
+    }
+
+    @Test func setStateAcceptsEverySupportedValue() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        for value in ["running", "needsInput", "blocked", "complete", "failed"] {
+            let response = registry.handle(
+                request(.sessionsSetState, .init(id: id, state: value)), host: host)
+            #expect(response.ok)
+            #expect(response.result?.session?.workflowState == value)
+        }
+    }
+
+    @Test func setStateRejectsUnknownValueWithoutOverwriting() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "running")), host: host)
+
+        // An unknown value (e.g. a typo) is rejected with a clear error...
+        let bad = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "done")), host: host)
+        #expect(bad.error?.code == "invalid_request")
+
+        // ...and does not overwrite the current declared state.
+        let after = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(after.result?.session?.workflowState == "running")
+    }
+
+    @Test func setStateRejectsEmpty() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "")), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func setSummaryIsIndependentOfState() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "running")), host: host)
+        let summarized = registry.handle(
+            request(.sessionsSetSummary, .init(
+                id: id, summary: "Waiting on user confirmation.")),
+            host: host)
+        // The summary is set without changing the declared state.
+        #expect(summarized.result?.session?.summary == "Waiting on user confirmation.")
+        #expect(summarized.result?.session?.workflowState == "running")
+        // Both appear in the pushed display snapshot.
+        #expect(host.surfaces[surface]?.declaredState?.summary == "Waiting on user confirmation.")
+        #expect(host.surfaces[surface]?.declaredState?.state == .running)
+
+        // The summary declaration is also audited under its own kind.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.last?.kind == "summary")
+    }
+
+    @Test func setSummaryDisplaysEvenWithoutState() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+        _ = registry.handle(
+            request(.sessionsSetSummary, .init(id: id, summary: "Step 2 of 5")), host: host)
+        #expect(host.surfaces[surface]?.declaredState?.summary == "Step 2 of 5")
+        #expect(host.surfaces[surface]?.declaredState?.state == nil)
+    }
+
+    @Test func setSummaryRejectsEmpty() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsSetSummary, .init(id: id, summary: "")), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func declaredWorkflowStateIsSeparateFromStatus() {
+        // Regression: the free-form `status` / `declare-state` machinery must not
+        // feed the displayed workflow state. A fresh session has neither a
+        // declared workflow state nor a pushed display snapshot, and declaring a
+        // free-form state writes `status` only.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let fresh = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(fresh.result?.session?.workflowState == nil)
+        #expect(fresh.result?.session?.summary == nil)
+        #expect(host.surfaces[surface]?.declaredState == nil)
+
+        _ = registry.handle(
+            request(.sessionsDeclareState, .init(id: id, state: "tests:passed")), host: host)
+        let afterDeclare = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(afterDeclare.result?.session?.status == "tests:passed")
+        #expect(afterDeclare.result?.session?.workflowState == nil)
+        #expect(host.surfaces[surface]?.declaredState == nil)
+    }
+
+    @Test func processExitDoesNotChangeDeclaredState() {
+        // Acceptance: process exit (a Maxx-owned lifecycle change) must never set
+        // or change the declared workflow state.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "running")), host: host)
+
+        host.surfaces[surface]?.alive = false
+
+        let after = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(after.result?.session?.workflowState == "running")
+        #expect(after.result?.session?.lifecycle == "exited")
+    }
+
+    @Test func restartClearsDeclaredWorkflowState() {
+        // A restart begins a fresh run, so the previous run's declared state and
+        // summary must not linger (e.g. a stale `complete` on a now-running tab).
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host, command: "ls")
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "complete")), host: host)
+        _ = registry.handle(
+            request(.sessionsSetSummary, .init(id: id, summary: "done")), host: host)
+
+        let restarted = registry.handle(request(.sessionsRestart, .init(id: id)), host: host)
+        #expect(restarted.ok)
+        #expect(restarted.result?.session?.workflowState == nil)
+        #expect(restarted.result?.session?.summary == nil)
+
+        // The fresh surface shows no badge until the agent re-declares.
+        let newSurface = restarted.result!.session!.surfaceID
+        #expect(host.surfaces[UUID(uuidString: newSurface)!]?.declaredState == nil)
     }
 
     @Test func eventsSinceFiltersBySequence() {
