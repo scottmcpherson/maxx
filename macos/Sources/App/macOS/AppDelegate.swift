@@ -151,6 +151,9 @@ class AppDelegate: NSObject,
     /// Signals
     private var signals: [DispatchSourceSignal] = []
 
+    /// The external Maxx Control API server (local Unix-socket control surface).
+    private var controlServer: ControlServer?
+
     private let appIconUpdater = AppIconUpdater()
 
     @MainActor private lazy var menuShortcutManager = Ghostty.MenuShortcutManager()
@@ -249,6 +252,15 @@ class AppDelegate: NSObject,
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
+
+        // Start the external Maxx Control API server. This exposes a local,
+        // token-authenticated Unix-socket surface so trusted scripts and
+        // webhook runners outside Maxx can create and manage tabs/sessions.
+        let controlServer = ControlServer(
+            registry: ControlSessionRegistry(),
+            host: TerminalControlHost(ghostty: ghostty))
+        controlServer.start()
+        self.controlServer = controlServer
 
         // This registers the Ghostty => Services menu to exist.
         NSApp.servicesMenu = menuServices
