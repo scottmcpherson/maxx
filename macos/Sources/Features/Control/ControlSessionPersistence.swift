@@ -168,6 +168,13 @@ struct ControlSessionStore {
     /// the bound without allocating 16 MiB.
     var maxFileBytes: Int = ControlSessionStore.defaultMaxFileBytes
 
+    /// Coarse upper bound on one audit event's encoded size (the 8 KiB payload cap
+    /// plus fixed fields and message). Used only to bound how many events the first
+    /// encode in ``encodedSnapshotFitting`` may include, so it cannot allocate
+    /// gigabytes; it is not a hard limit — the byte-precise trim loop enforces the
+    /// real budget.
+    static let estimatedMaxEventBytes = 10 * 1024  // 10 KiB
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
         category: "ControlSessionStore")
@@ -303,21 +310,38 @@ struct ControlSessionStore {
     private func encodedSnapshotFitting(_ sessions: [ControlSession], now: Date) throws -> Data? {
         let encoder = Self.makeEncoder()
         let retained = retention.apply(to: sessions, now: now)
-        func encoded(_ records: [ControlSession]) throws -> Data {
+        func encoded(_ cap: Int) throws -> Data {
             try encoder.encode(ControlRegistrySnapshot(
-                version: ControlRegistrySnapshot.currentVersion, sessions: records))
+                version: ControlRegistrySnapshot.currentVersion,
+                sessions: retention.cappingEvents(retained, to: cap)))
         }
-        var data = try encoded(retained)
-        if data.count <= maxFileBytes { return data }
-        // Over budget: halve the per-session audit cap toward zero, re-encoding,
-        // until it fits or no events remain.
+        // Total events that would survive a given per-session cap, computed WITHOUT
+        // allocating the capped array — so we can bound the first encode cheaply.
+        func totalEvents(cappedTo cap: Int) -> Int {
+            retained.reduce(0) { $0 + min($1.events.count, cap) }
+        }
+
+        // Bound the events fed to the FIRST encode so it cannot balloon to
+        // gigabytes: a full 500×1000-event registry with 8 KiB payloads is ~4 GB,
+        // and materializing that `Data` on the main actor could block or crash the
+        // mutation that triggered the save. Pick the largest per-session cap whose
+        // worst-case encoded size is still a small multiple of the file budget
+        // (count-based, no encoding). The common case (few events) never trips this,
+        // so no history is lost there; the byte-precise loop below then trims to the
+        // real budget.
+        let maxEventsForFirstEncode = max(1, (maxFileBytes / Self.estimatedMaxEventBytes) * 4)
         var cap = retention.maxEventsPerSession
-        while cap > 0 {
+        while cap > 0 && totalEvents(cappedTo: cap) > maxEventsForFirstEncode {
             cap /= 2
-            data = try encoded(retention.cappingEvents(retained, to: cap))
-            if data.count <= maxFileBytes { return data }
         }
-        return nil
+
+        // Trim by actual encoded size until it fits the budget.
+        var data = try encoded(cap)
+        while data.count > maxFileBytes && cap > 0 {
+            cap /= 2
+            data = try encoded(cap)
+        }
+        return data.count <= maxFileBytes ? data : nil
     }
 
     /// Create the containing directory `0700` if it does not already exist. The

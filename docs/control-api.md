@@ -577,7 +577,11 @@ their sources/timestamps), the mechanical lifecycle flags (`archived`,
 `restart_count`, last-observed lifecycle), the audit log, and the
 `created_at` / `updated_at` / `last_seen_at` timestamps. `updated_at` is bumped on
 any change; `last_seen_at` is the last time Maxx mechanically observed the
-surface still existing (used for retention).
+surface still existing (used for retention). The create-time `env` map is
+deliberately **not** persisted: it can carry secrets (API tokens passed only to
+the spawned agent), so it lives only in memory for the current run and never gets a
+plaintext at-rest copy. (A restored session's `restart` therefore re-spawns with
+the ambient environment, not the original `--env` overrides.)
 
 **Where.** A single versioned JSON document, `registry.json`, in the same
 per-user control directory as the socket and token (honoring `MAXX_CONTROL_DIR`),
@@ -642,8 +646,10 @@ encoded snapshot would exceed the read cap keeps trimming audit events (newest
 kept) until it fits — so persistence never stalls; only the oldest audit history
 of the busiest sessions is dropped. Only if it still cannot fit with every audit
 event removed is the write skipped and the last readable file preserved (logged;
-never a silent unreadable write or data loss). The live in-memory audit log is
-never trimmed; only the on-disk copy is bounded.
+never a silent unreadable write or data loss). The trimming also bounds the events
+fed to the first encode up front (count-based), so even a registry that would
+encode to gigabytes never materializes that blob in memory on the save path. The
+live in-memory audit log is never trimmed; only the on-disk copy is bounded.
 
 **No inference on load.** Rehydration replays exactly what was stored and nothing
 more. A record whose mechanical fields (command, cwd, title) happen to read like

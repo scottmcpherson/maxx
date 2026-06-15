@@ -624,7 +624,13 @@ extension ControlSession: Codable {
             title: try container.decodeIfPresent(String.self, forKey: .title),
             command: try container.decodeIfPresent(String.self, forKey: .command),
             cwd: try container.decodeIfPresent(String.self, forKey: .cwd),
-            env: try container.decodeIfPresent([String: String].self, forKey: .env) ?? [:],
+            // `env` is intentionally NOT restored from disk: create-time `--env`
+            // can carry secrets (e.g. API tokens passed only to the spawned agent),
+            // which must not have a plaintext at-rest copy revived across restarts.
+            // It is runtime-only — held in memory for the current run, never
+            // persisted (see encode(to:)). A legacy file that still contains it is
+            // ignored here and scrubbed on the next save.
+            env: [:],
             // Tolerate an unknown future `location`/`workflow_state` raw value:
             // fall back rather than throw, so an additive enum case from a newer
             // build doesn't drop the whole record on an older build.
@@ -668,7 +674,8 @@ extension ControlSession: Codable {
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(command, forKey: .command)
         try container.encodeIfPresent(cwd, forKey: .cwd)
-        if !env.isEmpty { try container.encode(env, forKey: .env) }
+        // `env` is deliberately omitted from the durable record: it can hold
+        // secrets and must never be written to disk (see init(from:)).
         try container.encode(location, forKey: .location)
         try container.encode(status, forKey: .status)
         if !metadata.isEmpty { try container.encode(metadata, forKey: .metadata) }

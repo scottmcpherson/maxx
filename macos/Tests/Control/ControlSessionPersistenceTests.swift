@@ -325,6 +325,52 @@ struct ControlSessionPersistenceTests {
         #expect(events.last?.message == "event-number-199-with-some-padding-to-take-up-space")
     }
 
+    @Test func saveBoundsManySessionsWithLargeLogsWithoutDroppingRecords() {
+        // Many sessions each with a large audit log must not force encoding the full
+        // (potentially multi-GB) snapshot before trimming. Events are bounded up
+        // front; the file fits and every session record survives (only events are
+        // trimmed, never whole records).
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = ControlSessionStore(fileURL: url, maxFileBytes: 16384)
+        var sessions: [ControlSession] = []
+        for s in 0..<20 {
+            var session = makeSession(at: now)
+            for i in 0..<100 {
+                session.appendEvent(
+                    kind: .event, name: "emit", source: "agent",
+                    message: "s\(s)-e\(i)", payload: nil, createdAt: now, pid: nil)
+            }
+            sessions.append(session)
+        }
+        store.save(sessions, now: now)
+
+        // A readable, budget-fitting file was written with every session present.
+        #expect(store.load(now: now).count == 20)
+    }
+
+    @Test func createTimeEnvIsNotPersisted() {
+        // Secrets passed via `--env` must never get a plaintext at-rest copy: env is
+        // held only in memory for the current run, never written to or restored from
+        // the durable registry.
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = ControlSessionStore(fileURL: url)
+        let session = ControlSession(
+            id: UUID(), surfaceID: UUID(), title: nil, command: "agent", cwd: nil,
+            env: ["API_TOKEN": "sk-secret-token-value"], location: .tab, status: "created",
+            metadata: [:], createdAt: now, updatedAt: now, canceled: false)
+        store.save([session], now: now)
+
+        // The raw bytes on disk contain neither the key nor the secret value.
+        let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        #expect(!raw.contains("sk-secret-token-value"))
+        #expect(!raw.contains("API_TOKEN"))
+
+        // And the reloaded record carries no env.
+        #expect(store.load(now: now).first?.env.isEmpty == true)
+    }
+
     // MARK: - Registry rehydration (simulated restart)
 
     /// Build a registry backed by a store at `url`, with a fixed clock and a host.
