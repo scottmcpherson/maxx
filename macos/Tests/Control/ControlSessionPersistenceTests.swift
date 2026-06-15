@@ -120,7 +120,7 @@ struct ControlSessionPersistenceTests {
         #expect(store.load(now: Date()).isEmpty)
     }
 
-    @Test func loadIgnoresOversizedFileWithoutReadingItIntoMemory() throws {
+    @Test func loadSkipsOversizedFileWithoutReadingItIntoMemory() throws {
         // A file beyond the cap must be skipped (empty load) rather than slurped
         // whole — the launch-time DoS bound. We make a valid-JSON registry that is
         // merely too large, so it is the SIZE, not the content, that rejects it.
@@ -133,9 +133,29 @@ struct ControlSessionPersistenceTests {
         let store = ControlSessionStore(fileURL: url)
         let result = store.loadResult(now: Date())
         #expect(result.sessions.isEmpty)
-        // Oversized within our own private directory is corruption, not a newer
-        // build's file: it stays overwritable so the next write reclaims it.
-        #expect(result.preserveExistingFile == false)
+        // An oversized file is PRESERVED, not overwritten: its version can't be read
+        // cheaply (it sorts after the large sessions array), and this build never
+        // writes oversized files, so it may be a newer build's — a downgrade run
+        // must not clobber it.
+        #expect(result.preserveExistingFile == true)
+    }
+
+    @Test func loadPreservesOversizedNewerVersionFile() throws {
+        // The size guard must not let an older build treat a NEWER-schema registry
+        // as overwritable just because it exceeds the read cap — that would clobber
+        // the newer build's data on the next save. An oversized file (whatever its
+        // version) is preserved, not overwritten.
+        let url = tempStoreURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let newer = ControlRegistrySnapshot.currentVersion + 1
+        let padding = String(repeating: "a", count: ControlSessionStore.defaultMaxFileBytes + 1)
+        let json = "{\"version\":\(newer),\"sessions\":[],\"_pad\":\"\(padding)\"}"
+        try Data(json.utf8).write(to: url)
+        let store = ControlSessionStore(fileURL: url)
+        let result = store.loadResult(now: Date())
+        #expect(result.sessions.isEmpty)
+        #expect(result.preserveExistingFile == true)
     }
 
     // MARK: - Migration / defaults

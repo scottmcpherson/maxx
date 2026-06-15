@@ -198,10 +198,11 @@ struct ControlSessionStore {
     /// must be left untouched.
     struct LoadResult {
         var sessions: [ControlSession]
-        /// True when a registry file exists but is a newer, unreadable schema. The
-        /// caller must then NOT write through this store, so a downgrade run does
-        /// not clobber the newer build's file. False for a missing, corrupt, or
-        /// readable file (all safe to overwrite).
+        /// True when the existing file must be left untouched: a newer, unreadable
+        /// schema version, OR an oversized file whose version cannot be cheaply read
+        /// (so it may be a newer build's). The caller must then NOT write through
+        /// this store, so a downgrade run does not clobber a future build's file.
+        /// False for a missing or corrupt-but-readable file (safe to overwrite).
         var preserveExistingFile: Bool
     }
 
@@ -219,14 +220,19 @@ struct ControlSessionStore {
     /// records for the caller to rehydrate and never touches live surfaces.
     func loadResult(now: Date) -> LoadResult {
         // Bound the read so a corrupt or oversized file cannot exhaust memory at
-        // launch. Check the size before slurping the bytes; the directory is
-        // validated as ours and private before this runs, so the file is one we
-        // wrote — an oversized one means corruption, not an attacker (overwritable).
+        // launch. Crucially, an oversized file is PRESERVED, not overwritten: its
+        // schema `version` cannot be read cheaply (it sorts after the large
+        // `sessions` array in the encoded JSON, so a bounded read can't reach it),
+        // so we cannot rule out that a NEWER build with a larger cap wrote it. This
+        // build never writes an oversized file (save trims to fit), so an oversized
+        // file is either a newer build's or externally corrupted — in neither case
+        // may a downgrade run clobber it. Persistence is suspended for this run
+        // (logged); a same-or-older corrupt oversized file must be removed manually.
         if let size = (try? FileManager.default.attributesOfItem(
             atPath: fileURL.path))?[.size] as? Int, size > maxFileBytes {
             Self.logger.error(
-                "ignoring oversized session registry (\(size) bytes > \(maxFileBytes)) at \(fileURL.path, privacy: .public)")
-            return LoadResult(sessions: [], preserveExistingFile: false)
+                "preserving oversized session registry (\(size) bytes > \(maxFileBytes); may be a newer build's file) at \(fileURL.path, privacy: .public); persistence disabled for this run")
+            return LoadResult(sessions: [], preserveExistingFile: true)
         }
         guard let data = try? Data(contentsOf: fileURL) else {
             return LoadResult(sessions: [], preserveExistingFile: false)  // First run.
