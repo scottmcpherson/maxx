@@ -357,7 +357,11 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
     try printRecord(alloc, rec);
 
     return switch (rec.outcome) {
-        .launched, .duplicate, .dry_run => 0,
+        // A launch that recorded an error_code (e.g. the stdin prompt could not be
+        // delivered, or the dedup state could not be persisted) is a partial
+        // success: the tab exists, but something went wrong, so signal non-zero.
+        .launched => if (rec.error_code != null) @as(u8, 1) else 0,
+        .duplicate, .dry_run => 0,
         .failed => 1,
     };
 }

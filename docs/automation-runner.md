@@ -107,7 +107,14 @@ The resolved prompt reaches the launched command per `--prompt-delivery`:
 - `env` (default) — carried in the `sessions.create` request as
   `MAXX_CONNECTOR_PROMPT`.
 - `stdin` — after the tab is created, the runner sends a `sessions.action`
-  `input` request that types the prompt into the new session.
+  `input` request that types the prompt into the new session. That follow-up is
+  attributed to the **same policy `caller`** as the create (so `input:send` is
+  evaluated against the configured source, never silently the trusted local
+  source), and its response is checked: if delivery is denied or fails, the
+  activity record carries an `error_code` and the command exits non-zero. The
+  launch itself is still recorded (the tab exists; re-firing would duplicate it),
+  so re-deliver the prompt explicitly with `sessions action <id> --action input`
+  rather than re-running the trigger.
 - `file` — the runner writes the prompt to a `0600` temp file
   (`maxx-prompt-<event-id>.txt` in the control directory) and injects its path as
   `MAXX_CONNECTOR_PROMPT_FILE` at create time. The file must outlive the runner

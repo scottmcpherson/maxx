@@ -237,18 +237,20 @@ pub fn dispatch(alloc: Allocator, in: DispatchInput, sender: Sender) Allocator.E
     if (in.request.prompt_delivery == .stdin) {
         if (in.request.prompt) |p| {
             if (rec.session_id) |sid| {
-                const input_req = try buildInputRequest(alloc, in.token, sid, p);
-                _ = sender.send(alloc, input_req) catch |err| {
-                    // The tab launched; only the prompt push failed. Flag it but
-                    // keep the launch — the agent is running.
-                    rec.error_code = "prompt_delivery_failed";
-                    rec.error_message = @errorName(err);
-                };
+                try deliverStdinPrompt(alloc, in, sid, p, sender, &rec);
             }
         }
     }
 
     // 6. Record as seen only after a successful launch.
+    //
+    // We key dedup on the *create* — the create is the side effect that must not
+    // repeat (a retry would spawn a second visible tab). A failed stdin prompt
+    // push (step 5) does not undo the create, so we still record the event; the
+    // failure is surfaced loudly instead (`error_code` set above + a non-zero CLI
+    // exit), and the operator re-delivers the prompt explicitly with
+    // `sessions action <id> --action input` rather than re-firing the trigger and
+    // duplicating the tab.
     if (in.dedup) |store| {
         store.markSeen(in.trigger, in.event.source, key, in.received_at) catch |err| {
             if (rec.error_code == null) {
@@ -260,6 +262,44 @@ pub fn dispatch(alloc: Allocator, in: DispatchInput, sender: Sender) Allocator.E
 
     rec.outcome = .launched;
     return rec;
+}
+
+/// Deliver the resolved prompt to a freshly-created session over stdin via a
+/// `sessions.action input` request, then inspect the result. The follow-up is
+/// attributed to the SAME policy `caller` as the create (so a restricted source
+/// cannot be evaluated as the trusted local source for the `input:send`
+/// capability), and a denied/failed delivery (`ok:false`, a socket error, or an
+/// unparseable response) is recorded on `rec` rather than silently treated as
+/// success. The create already succeeded, so this never throws on a delivery
+/// failure — only allocation failure propagates.
+fn deliverStdinPrompt(
+    alloc: Allocator,
+    in: DispatchInput,
+    session_id: []const u8,
+    prompt: []const u8,
+    sender: Sender,
+    rec: *ActivityRecord,
+) Allocator.Error!void {
+    const input_req = try buildInputRequest(alloc, in.token, in.request.caller, session_id, prompt);
+    const resp = sender.send(alloc, input_req) catch |err| {
+        setPromptError(rec, "prompt_delivery_failed", @errorName(err));
+        return;
+    };
+    switch (parseResponse(alloc, resp) catch {
+        setPromptError(rec, "prompt_delivery_failed", "unparseable response");
+        return;
+    }) {
+        .ok => {},
+        // The server rejected the input (e.g. unauthorized / confirmation_required
+        // / already_ended). The tab launched but the prompt was not delivered.
+        .err => |e| setPromptError(rec, e.code, e.message orelse "prompt delivery rejected"),
+    }
+}
+
+fn setPromptError(rec: *ActivityRecord, code: []const u8, message: ?[]const u8) void {
+    if (rec.error_code != null) return; // keep the first failure
+    rec.error_code = code;
+    rec.error_message = message;
 }
 
 /// Build the runner's explicit provenance metadata. Reserved `runner.*` keys
@@ -284,23 +324,28 @@ fn buildCreateRequest(
     return out.toOwnedSlice();
 }
 
-/// Build a `sessions.action` request that types `input` into `session_id`.
+/// Build a `sessions.action` request that types `input` into `session_id`. The
+/// optional `caller` attributes the action to the same policy source as the
+/// create, so the `input:send` capability is evaluated against that source rather
+/// than defaulting to the trusted local source.
 fn buildInputRequest(
     alloc: Allocator,
     token: []const u8,
+    caller: ?[]const u8,
     session_id: []const u8,
     input: []const u8,
 ) Allocator.Error![]u8 {
     var out: std.io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-    writeInputRequest(&json, token, session_id, input) catch return error.OutOfMemory;
+    writeInputRequest(&json, token, caller, session_id, input) catch return error.OutOfMemory;
     return out.toOwnedSlice();
 }
 
 fn writeInputRequest(
     json: *std.json.Stringify,
     token: []const u8,
+    caller: ?[]const u8,
     session_id: []const u8,
     input: []const u8,
 ) !void {
@@ -313,6 +358,11 @@ fn writeInputRequest(
     try json.beginObject();
     try json.objectField("id");
     try json.write(session_id);
+    // Same policy source as the create — never silently the trusted local source.
+    if (caller) |c| {
+        try json.objectField("caller");
+        try json.write(c);
+    }
     try json.objectField("action");
     try json.write("input");
     try json.objectField("input");
@@ -680,6 +730,8 @@ test "stdin delivery sends a follow-up input action" {
     const req = try connector.resolve(alloc, .{
         .command = "codex",
         .prompt_delivery = .stdin,
+        // A restricted policy source: the follow-up input must be attributed to it.
+        .caller = "trusted-automation",
     }, ev, .{});
 
     var sender = RecordingSender{
@@ -699,15 +751,66 @@ test "stdin delivery sends a follow-up input action" {
     }, sender.sender());
 
     try testing.expectEqual(Outcome.launched, rec.outcome);
+    try testing.expect(rec.error_code == null);
     try testing.expectEqual(@as(usize, 2), sender.requests.items.len);
     // The create request must NOT carry the prompt for stdin delivery.
     try testing.expect(std.mem.indexOf(u8, sender.requests.items[0], "Work on MAX-8") == null);
-    // The follow-up is a sessions.action input carrying the prompt.
+    // The follow-up is a sessions.action input carrying the prompt AND the same
+    // policy caller as the create (so input:send is evaluated against that source,
+    // not the trusted local source).
     const second = sender.requests.items[1];
     try testing.expect(std.mem.indexOf(u8, second, "sessions.action") != null);
     try testing.expect(std.mem.indexOf(u8, second, "\"action\":\"input\"") != null);
     try testing.expect(std.mem.indexOf(u8, second, "Work on MAX-8") != null);
     try testing.expect(std.mem.indexOf(u8, second, "SID-9") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "\"caller\":\"trusted-automation\"") != null);
+}
+
+test "stdin delivery surfaces a rejected input without claiming success" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ base, "seen.json" });
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+
+    const ev = try linearEvent(alloc);
+    const req = try connector.resolve(alloc, .{
+        .command = "codex",
+        .prompt_delivery = .stdin,
+        .caller = "trusted-automation",
+    }, ev, .{});
+
+    // The create succeeds, but the policy denies the follow-up input.
+    var sender = RecordingSender{
+        .alloc = alloc,
+        .responses = &.{
+            "{\"ok\":true,\"result\":{\"session\":{\"session_id\":\"SID-9\"}}}",
+            "{\"ok\":false,\"error\":{\"code\":\"unauthorized\",\"message\":\"input denied\"}}",
+        },
+    };
+    const rec = try dispatch(alloc, .{
+        .trigger = "t",
+        .trigger_type = .script,
+        .event = ev,
+        .request = req,
+        .token = "tok",
+        .received_at = "2026-06-15T00:00:00Z",
+        .dedup = &store,
+    }, sender.sender());
+
+    // The tab launched (the create succeeded), but the prompt failure is surfaced
+    // — not reported as a clean success.
+    try testing.expectEqual(Outcome.launched, rec.outcome);
+    try testing.expectEqualStrings("unauthorized", rec.error_code.?);
+    try testing.expectEqualStrings("input denied", rec.error_message.?);
+    // The create's side effect is recorded so a retry does not spawn a second tab;
+    // the operator re-delivers the prompt explicitly instead.
+    try testing.expect(store.seen("t", "linear", "evt-1"));
 }
 
 test "file delivery writes a temp file and injects the path env" {
