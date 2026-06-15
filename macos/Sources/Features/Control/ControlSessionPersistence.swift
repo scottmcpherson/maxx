@@ -127,6 +127,14 @@ struct ControlSessionStore {
     let fileURL: URL
     var retention: ControlRetentionPolicy = .default
 
+    /// Hard ceiling on the registry file we will read into memory at launch.
+    /// Retention bounds the registry to 500 records, each modest in size, so a
+    /// legitimate file is far smaller than this; the cap exists only so a corrupt
+    /// or oversized file cannot exhaust memory when decoded. Defense in depth: the
+    /// caller validates the control directory as ours and `0700` before reading,
+    /// so an attacker cannot plant the file in the first place.
+    static let maxFileBytes = 16 * 1024 * 1024  // 16 MiB
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
         category: "ControlSessionStore")
@@ -170,6 +178,16 @@ struct ControlSessionStore {
     /// existing file must be preserved. Pure w.r.t. the registry: it returns
     /// records for the caller to rehydrate and never touches live surfaces.
     func loadResult(now: Date) -> LoadResult {
+        // Bound the read so a corrupt or oversized file cannot exhaust memory at
+        // launch. Check the size before slurping the bytes; the directory is
+        // validated as ours and private before this runs, so the file is one we
+        // wrote — an oversized one means corruption, not an attacker (overwritable).
+        if let size = (try? FileManager.default.attributesOfItem(
+            atPath: fileURL.path))?[.size] as? Int, size > Self.maxFileBytes {
+            Self.logger.error(
+                "ignoring oversized session registry (\(size) bytes > \(Self.maxFileBytes)) at \(fileURL.path, privacy: .public)")
+            return LoadResult(sessions: [], preserveExistingFile: false)
+        }
         guard let data = try? Data(contentsOf: fileURL) else {
             return LoadResult(sessions: [], preserveExistingFile: false)  // First run.
         }

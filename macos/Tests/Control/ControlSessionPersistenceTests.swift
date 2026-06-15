@@ -120,6 +120,24 @@ struct ControlSessionPersistenceTests {
         #expect(store.load(now: Date()).isEmpty)
     }
 
+    @Test func loadIgnoresOversizedFileWithoutReadingItIntoMemory() throws {
+        // A file beyond the cap must be skipped (empty load) rather than slurped
+        // whole — the launch-time DoS bound. We make a valid-JSON registry that is
+        // merely too large, so it is the SIZE, not the content, that rejects it.
+        let url = tempStoreURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let padding = String(repeating: "a", count: ControlSessionStore.maxFileBytes + 1)
+        let json = "{\"version\":1,\"sessions\":[],\"_pad\":\"\(padding)\"}"
+        try Data(json.utf8).write(to: url)
+        let store = ControlSessionStore(fileURL: url)
+        let result = store.loadResult(now: Date())
+        #expect(result.sessions.isEmpty)
+        // Oversized within our own private directory is corruption, not a newer
+        // build's file: it stays overwritable so the next write reclaims it.
+        #expect(result.preserveExistingFile == false)
+    }
+
     // MARK: - Migration / defaults
 
     @Test func loadAppliesDefaultsForMissingFields() throws {
@@ -239,6 +257,10 @@ struct ControlSessionPersistenceTests {
     ) -> (ControlSessionRegistry, FakeControlSessionHost) {
         let registry = ControlSessionRegistry(
             now: { clock.now }, store: ControlSessionStore(fileURL: url))
+        // The registry no longer rehydrates in its initializer; the control server
+        // calls rehydrate() only after it has validated the control directory. Tests
+        // stand in for that post-validation step explicitly.
+        registry.rehydrate()
         return (registry, FakeControlSessionHost())
     }
 
@@ -295,6 +317,7 @@ struct ControlSessionPersistenceTests {
         // control API did not create this run.
         let registry2 = ControlSessionRegistry(
             now: { clock.now }, store: ControlSessionStore(fileURL: url))
+        registry2.rehydrate()
         let host2 = FakeControlSessionHost()
         if let surfaceID { host2.surfaces[surfaceID] = FakeControlSessionHost.Surface() }
 
@@ -332,6 +355,25 @@ struct ControlSessionPersistenceTests {
         #expect(restarted?.surfaceID == newSurface.uuidString)
         #expect(restarted?.restored == nil)
         #expect(restarted?.restartCount == 1)
+    }
+
+    @Test func registryDoesNotRehydrateUntilExplicitlyTold() {
+        // Security ordering (MAX-5): the registry must NOT read its store in the
+        // initializer. The control server reads the registry file only after it has
+        // validated the world-writable control directory, so an attacker-planted
+        // file in an insecure /tmp directory is never decoded. Constructing the
+        // registry over a populated store therefore yields an EMPTY registry until
+        // rehydrate() is called (the server's post-validation step).
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = ControlSessionStore(fileURL: url)
+        store.save([makeSession(at: now)], now: now)
+
+        let registry = ControlSessionRegistry(now: { now }, store: store)
+        #expect(registry.count == 0)  // No read happened at construction.
+
+        registry.rehydrate()
+        #expect(registry.count == 1)  // Now, and only now, the file is read.
     }
 
     // MARK: - Agent type declaration

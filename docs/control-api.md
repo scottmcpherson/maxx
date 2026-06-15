@@ -588,6 +588,15 @@ runtime directory (no live session survives a reboot either). Writes are atomic
 (temp file + rename) and happen on every mutation, plus a flush on app
 termination.
 
+**Read safety.** The control directory lives in world-writable `/tmp`, so the
+registry is read **only after** the server validates that directory as ours, a
+real directory (not a symlink), and `0700` with no group/other access — the same
+check that gates the token and socket. The registry is loaded after that check,
+never in a constructor that runs before it, so a file another local user planted
+in an insecure directory is never decoded. The read is also size-capped (16 MiB,
+far above any retention-bounded registry) so a corrupt or oversized file is
+skipped rather than slurped whole at launch.
+
 **Restart rehydration.** On launch the registry loads its records. A restored
 record is **detached** from any live surface: it reads as `closed` with no `pid`
 and is flagged `restored: true` (a mechanical fact about this run, not an

@@ -144,10 +144,21 @@ final class ControlSessionRegistry {
         self.maxBusEvents = max(1, maxBusEvents)
         self.policy = policy
         self.store = store
-        rehydrate()
+        // NB: rehydration is intentionally NOT done here. The store reads a file
+        // from the world-writable control directory (`/tmp/maxx-control-<uid>`),
+        // which must be validated as ours and private before it is trusted. The
+        // owner (``ControlServer``) calls ``rehydrate()`` only after
+        // `prepareDirectory()` has secured that directory; rehydrating in this
+        // initializer would decode an attacker-planted file first.
     }
 
     /// Load persisted records into the in-memory registry on launch (MAX-5).
+    ///
+    /// Must be called only after the control directory has been validated as ours
+    /// and `0700` (``ControlServer`` does this in `prepareDirectory()` before
+    /// invoking this), so a file planted by another local user in an insecure
+    /// `/tmp` directory is never read or decoded. Tests that simulate a restart
+    /// call this directly to stand in for that post-validation step.
     ///
     /// Restored records are marked so the UI can tell a record from a previous
     /// run apart from a live one, and their `lastObservedLifecycle` is baselined
@@ -158,7 +169,7 @@ final class ControlSessionRegistry {
     /// restart and keep archived records from ever aging out). No event bus entries
     /// are replayed — the cross-resource cursor is per-run by design. Nothing here
     /// infers anything: each field is the verbatim persisted value.
-    private func rehydrate() {
+    func rehydrate() {
         guard let store else { return }
         let result = store.loadResult(now: now())
         // A newer build's file must not be overwritten by this (older) run.

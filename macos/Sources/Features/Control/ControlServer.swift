@@ -73,6 +73,13 @@ final class ControlServer {
 
     private func startThrowing() throws {
         try prepareDirectory()
+        // The control directory is now validated as ours and private (0700, a real
+        // directory, not a symlink planted by another local user). Only now is it
+        // safe to read the persisted registry from it: rehydrating earlier (e.g. in
+        // the registry initializer) would decode an attacker-planted file in an
+        // insecure /tmp directory before this check runs (MAX-5). start() always
+        // runs on the main thread, where the registry is isolated.
+        MainActor.assumeIsolated { registry.rehydrate() }
         try writeToken()
 
         let fd = try makeListeningSocket(at: ControlPaths.socket.path)
