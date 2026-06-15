@@ -32,9 +32,13 @@
 //!     build is left untouched: the store loads no entries (suppression is
 //!     disabled, fail-open) and refuses to save, so a newer Maxx's state is never
 //!     clobbered by an older one.
-//!   * **Corrupt-file recovery** — an unreadable/!JSON/!object file loads as
-//!     empty and is overwritten on the next save (a clean recovery, since atomic
-//!     writes mean corruption came from outside).
+//!   * **Corrupt-content recovery** — a malformed file (bad JSON / wrong shape)
+//!     loads as empty and is overwritten on the next save (a clean recovery,
+//!     since atomic writes mean corruption came from outside). An *unreadable*
+//!     store (permission denied, a directory in its place, an I/O error, or one
+//!     larger than the size cap) is different: `open` returns `error.Unreadable`
+//!     rather than pretend it is empty, because dropping recorded events there
+//!     would launch duplicates. The caller fails before any launch side effect.
 
 const DedupStore = @This();
 
@@ -91,15 +95,34 @@ max_bytes: usize = max_file_bytes,
 writable: bool = true,
 dirty: bool = false,
 
-/// Open the store at `path`, reading and pruning any existing state. A missing
-/// file is fine (empty store). A corrupt file loads empty. A newer-schema file
-/// loads empty and marks the store read-only. `parent` owns the store's arena;
-/// `path` is duped into it.
-pub fn open(parent: Allocator, path: []const u8) Allocator.Error!DedupStore {
+pub const OpenError = error{
+    /// The configured store exists but could not be read (permission denied, a
+    /// directory in its place, an I/O error, or larger than the size cap). We do
+    /// NOT treat this as an empty store: a redelivered event already recorded in
+    /// the unreadable file would otherwise be seen as new and launch a duplicate.
+    /// The caller must fail before any launch side effect.
+    Unreadable,
+} || Allocator.Error;
+
+/// Open the store at `path`, reading and pruning any existing state.
+///
+/// Outcomes:
+///   * missing file → empty, writable (the normal first-run case);
+///   * malformed *contents* (bad JSON / wrong shape) → empty, writable — a clean
+///     recovery, since atomic writes mean corruption came from outside;
+///   * newer-schema file → empty, read-only (fail-open, never clobbered);
+///   * unreadable store (permission/isdir/io/oversized) → `error.Unreadable` —
+///     we cannot know what was recorded, so the caller must not proceed.
+///
+/// `parent` owns the store's arena; `path` is duped into it.
+pub fn open(parent: Allocator, path: []const u8) OpenError!DedupStore {
     var store: DedupStore = .{
         .arena = std.heap.ArenaAllocator.init(parent),
         .path = "",
     };
+    // Free the arena on any error return (Unreadable/OOM); the success path
+    // returns the store by value and the caller owns the arena.
+    errdefer store.arena.deinit();
     const a = store.arena.allocator();
     store.path = try a.dupe(u8, path);
     store.load() catch |err| switch (err) {
@@ -107,12 +130,17 @@ pub fn open(parent: Allocator, path: []const u8) Allocator.Error!DedupStore {
         // A newer-schema file must be preserved: load() already set
         // `writable = false`, so leave it read-only (fail-open, no clobber).
         error.NewerSchema => store.entries.clearRetainingCapacity(),
-        // Any other read/parse problem is non-fatal: start from an empty,
-        // writable store and let the next save recover the file.
-        else => {
+        // Only malformed *contents* recover by starting empty.
+        error.Malformed => {
             store.entries.clearRetainingCapacity();
             store.writable = true;
         },
+        // An inability to read the configured store (permission denied, a
+        // directory in its place, an I/O error, or an oversized file we refuse to
+        // read) must NOT masquerade as an empty store — that would drop recorded
+        // events and launch duplicates. Fail so the caller aborts before any
+        // launch.
+        else => return error.Unreadable,
     };
     return store;
 }
@@ -506,7 +534,7 @@ test "newer schema is preserved and not overwritten" {
     try testing.expect(std.mem.indexOf(u8, on_disk, "future") != null);
 }
 
-test "oversized file is refused and loads empty" {
+test "oversized file is refused as unreadable, not treated as empty" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -514,16 +542,28 @@ test "oversized file is refused and loads empty" {
     var td = testing.tmpDir(.{});
     defer td.cleanup();
 
-    // Write a file just over the bound.
+    // Write a file just over the bound. We cannot read it, so open must fail
+    // rather than pretend the store is empty (which would drop recorded events).
     const big = try arena.alloc(u8, max_file_bytes + 16);
     @memset(big, 'x');
     try td.dir.writeFile(.{ .sub_path = "big.json", .data = big });
     const path = try tmpDirPath(arena, &td, "big.json");
 
-    var store = try DedupStore.open(testing.allocator, path);
-    defer store.deinit();
-    try testing.expectEqual(@as(usize, 0), store.count());
-    try testing.expect(store.writable);
+    try testing.expectError(error.Unreadable, DedupStore.open(testing.allocator, path));
+}
+
+test "an unreadable store (a directory in its place) fails open, not empty" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    // A directory where the state file should be is unreadable as a file.
+    try td.dir.makeDir("seen.json");
+    const path = try tmpDirPath(arena, &td, "seen.json");
+
+    try testing.expectError(error.Unreadable, DedupStore.open(testing.allocator, path));
 }
 
 test "markSeen refuses an over-long key instead of growing unbounded" {

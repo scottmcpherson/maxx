@@ -295,9 +295,21 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
         return 1;
     };
 
-    // Open the dedup store (unless suppression is disabled).
+    // Open the dedup store (unless suppression is disabled). An unreadable store
+    // must abort before any launch: proceeding as if empty could re-launch an
+    // event already recorded in the file we cannot read.
     const state_path = cmd.state_file orelse try std.fmt.allocPrint(alloc, "{s}/runner-seen.json", .{dir});
-    var store: ?DedupStore = if (cmd.no_dedup) null else try DedupStore.open(alloc, state_path);
+    var store: ?DedupStore = if (cmd.no_dedup) null else DedupStore.open(alloc, state_path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.Unreadable => {
+            try stderr.print(
+                "error: could not read dedup state file at {s}\n" ++
+                    "Fix its permissions, point --state-file elsewhere, or pass --no-dedup.\n",
+                .{state_path},
+            );
+            return 1;
+        },
+    };
     defer if (store) |*s| s.deinit();
 
     // For real runs we need the token; dry-run skips it.
@@ -385,7 +397,13 @@ fn runListSeen(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
         return 1;
     };
     const state_path = cmd.state_file orelse try std.fmt.allocPrint(alloc, "{s}/runner-seen.json", .{dir});
-    var store = try DedupStore.open(alloc, state_path);
+    var store = DedupStore.open(alloc, state_path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.Unreadable => {
+            try stderr.print("error: could not read dedup state file at {s}\n", .{state_path});
+            return 1;
+        },
+    };
     defer store.deinit();
 
     var out: std.io.Writer.Allocating = .init(alloc);
