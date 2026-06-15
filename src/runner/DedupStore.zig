@@ -94,6 +94,11 @@ max_bytes: usize = max_file_bytes,
 /// overwrite it. Suppression is disabled (fail-open) until the file is gone.
 writable: bool = true,
 dirty: bool = false,
+/// Count of entries dropped (by count cap or age prune) since the last
+/// `compact`. Their `trigger`/`source`/`key`/`at` strings are still allocated in
+/// `arena` as dead bytes; this drives `compactIfNeeded`'s amortized reclamation
+/// for the long-lived `+webhook serve` listener. See `compact`.
+dropped_since_compact: usize = 0,
 
 pub const OpenError = error{
     /// The configured store exists but could not be read (permission denied, a
@@ -291,6 +296,7 @@ pub fn pruneOlderThan(self: *DedupStore, cutoff_iso: []const u8) void {
         }
     }
     if (write_i != self.entries.items.len) {
+        self.dropped_since_compact += self.entries.items.len - write_i;
         self.entries.shrinkRetainingCapacity(write_i);
         self.dirty = true;
     }
@@ -307,11 +313,70 @@ fn enforceCountBound(self: *DedupStore) void {
         self.entries.items[drop..],
     );
     self.entries.shrinkRetainingCapacity(self.max_entries);
+    self.dropped_since_compact += drop;
     self.dirty = true;
 }
 
 pub fn count(self: *const DedupStore) usize {
     return self.entries.items.len;
+}
+
+/// Rebuild the store into a fresh arena, reclaiming the bytes of entries that
+/// count/age pruning has dropped.
+///
+/// `markSeen` dupes every new record's `trigger`/`source`/`key`/`at` strings into
+/// the store's arena; the count cap (`enforceCountBound`) and age prune
+/// (`pruneOlderThan`) only shrink the `entries` slice, so a dropped record's bytes
+/// stay allocated. The one-shot `+runner` exits after a single dispatch and never
+/// notices, but `+webhook serve` keeps one store alive for the whole listener
+/// lifetime: without reclamation its arena (and RSS) grows with *total* deliveries
+/// even though the live entry set stays bounded.
+///
+/// Re-dupes `self.path` and every surviving entry's strings into a new arena (off
+/// the same parent allocator, so `save`'s scratch arena keeps working), swaps it
+/// in, and frees the old one. The live entry set is byte-for-byte identical and
+/// `path`/`writable`/`dirty`/`max_entries`/`max_bytes` are preserved, so
+/// suppression is unchanged. Data-loss sensitive: dropping or corrupting a
+/// surviving entry here would re-launch on the next redelivery, so the fresh arena
+/// is swapped in only after every dup has succeeded — an OOM mid-rebuild frees the
+/// half-built arena and leaves the original store fully intact.
+pub fn compact(self: *DedupStore) Allocator.Error!void {
+    var fresh = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+    errdefer fresh.deinit();
+    const a = fresh.allocator();
+
+    const new_path = try a.dupe(u8, self.path);
+    var new_entries: std.ArrayListUnmanaged(Entry) = .empty;
+    try new_entries.ensureTotalCapacityPrecise(a, self.entries.items.len);
+    for (self.entries.items) |e| {
+        new_entries.appendAssumeCapacity(.{
+            .trigger = try a.dupe(u8, e.trigger),
+            .source = try a.dupe(u8, e.source),
+            .key = try a.dupe(u8, e.key),
+            .at = try a.dupe(u8, e.at),
+        });
+    }
+
+    // Commit only once the rebuild has fully succeeded: past this point nothing
+    // can fail, so the store is never left half-rebuilt.
+    self.arena.deinit();
+    self.arena = fresh;
+    self.path = new_path;
+    self.entries = new_entries;
+    self.dropped_since_compact = 0;
+}
+
+/// Amortized compaction for long-lived callers (`+webhook serve`). Compaction
+/// rebuilds the whole arena, so reclaiming on every dropped record would be O(n)
+/// per event once the store sits at its cap. Instead we let dead bytes accumulate
+/// and reclaim once they reach a full store's worth of entries (`max_entries`):
+/// peak arena overhead stays ~2× the live set and compaction is O(1) amortized per
+/// recorded event (one O(n) rebuild buys ~n cheap drops). A no-op below the
+/// threshold. The one-shot runner never calls this — it exits before the garbage
+/// matters.
+pub fn compactIfNeeded(self: *DedupStore) Allocator.Error!void {
+    if (self.dropped_since_compact < self.max_entries) return;
+    try self.compact();
 }
 
 /// Serialize the current entries to JSON. Caller owns the returned slice.
@@ -647,4 +712,141 @@ test "save refuses to write a file larger than the read cap" {
     // The serialized state exceeds 64 bytes, so save refuses and leaves no file.
     try testing.expectError(error.TooLarge, store.save());
     try testing.expectError(error.FileNotFound, td.dir.access("cap.json", .{}));
+}
+
+test "compact keeps the live set and reclaims dropped-entry memory" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "compact.json");
+
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+    store.max_entries = 4;
+
+    // Insert far more than the cap so enforceCountBound drops most records, leaving
+    // their strings as dead bytes in the arena.
+    for (0..200) |i| {
+        const key = try std.fmt.allocPrint(arena, "key-{d}", .{i});
+        try store.markSeen("trigger", "source", key, "2026-06-15T00:00:00Z");
+    }
+    try testing.expectEqual(@as(usize, 4), store.count());
+    try testing.expect(store.dropped_since_compact >= 196);
+
+    const cap_before = store.arena.queryCapacity();
+    try store.compact();
+    const cap_after = store.arena.queryCapacity();
+
+    // The fresh arena holds only the 4 survivors, so it is materially smaller — the
+    // dropped records' strings were freed with the old arena (a leak here would
+    // also trip testing.allocator on deinit).
+    try testing.expect(cap_after < cap_before);
+    try testing.expectEqual(@as(usize, 0), store.dropped_since_compact);
+
+    // The live set is byte-for-byte intact: newest survivors present, evicted gone.
+    try testing.expectEqual(@as(usize, 4), store.count());
+    try testing.expect(store.seen("trigger", "source", "key-196"));
+    try testing.expect(store.seen("trigger", "source", "key-199"));
+    try testing.expect(!store.seen("trigger", "source", "key-0"));
+}
+
+test "compact preserves path/writable/dirty and round-trips through save+reopen" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "compact-rt.json");
+
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        store.max_entries = 3;
+        for (0..6) |i| {
+            const key = try std.fmt.allocPrint(arena, "k{d}", .{i});
+            try store.markSeen("t", "s", key, "2026-06-15T00:00:00Z");
+        }
+        try testing.expect(store.dirty);
+        try testing.expect(store.writable);
+
+        try store.compact();
+
+        // Identity preserved across the rebuild; the unsaved `dirty` flag survives.
+        try testing.expectEqualStrings(path, store.path);
+        try testing.expect(store.writable);
+        try testing.expect(store.dirty);
+        try testing.expectEqual(@as(usize, 3), store.count());
+
+        try store.save();
+        try testing.expect(!store.dirty); // save cleared it, post-compaction arena and all
+    }
+
+    // Reopen: exactly the survivors persisted — nothing dropped or duplicated by
+    // the compaction.
+    var reopened = try DedupStore.open(testing.allocator, path);
+    defer reopened.deinit();
+    try testing.expectEqual(@as(usize, 3), reopened.count());
+    try testing.expect(reopened.seen("t", "s", "k3"));
+    try testing.expect(reopened.seen("t", "s", "k5"));
+    try testing.expect(!reopened.seen("t", "s", "k0"));
+}
+
+test "compactIfNeeded reclaims only past the amortization threshold" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "amort.json");
+
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+    store.max_entries = 10;
+
+    // Stay under the cap so nothing is dropped: no garbage means no compaction.
+    for (0..8) |i| {
+        const key = try std.fmt.allocPrint(arena, "a{d}", .{i});
+        try store.markSeen("t", "s", key, "2026-06-15T00:00:00Z");
+    }
+    try testing.expectEqual(@as(usize, 0), store.dropped_since_compact);
+    const cap_quiet = store.arena.queryCapacity();
+    try store.compactIfNeeded();
+    try testing.expectEqual(cap_quiet, store.arena.queryCapacity()); // genuinely a no-op
+
+    // Churn well past the cap so dropped_since_compact crosses max_entries.
+    for (8..40) |i| {
+        const key = try std.fmt.allocPrint(arena, "a{d}", .{i});
+        try store.markSeen("t", "s", key, "2026-06-15T00:00:00Z");
+    }
+    try testing.expect(store.dropped_since_compact >= store.max_entries);
+    try store.compactIfNeeded();
+    try testing.expectEqual(@as(usize, 0), store.dropped_since_compact); // reclaimed
+    try testing.expectEqual(@as(usize, 10), store.count());
+    try testing.expect(store.seen("t", "s", "a39"));
+    try testing.expect(!store.seen("t", "s", "a0"));
+}
+
+test "compact on an empty store is a safe no-op" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "empty.json");
+
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+    try store.compact();
+    try testing.expectEqual(@as(usize, 0), store.count());
+    try testing.expect(store.writable);
+    try testing.expectEqualStrings(path, store.path);
+    // Still fully usable after compacting an empty store.
+    try store.markSeen("t", "s", "k", "2026-06-15T00:00:00Z");
+    try testing.expect(store.seen("t", "s", "k"));
 }
