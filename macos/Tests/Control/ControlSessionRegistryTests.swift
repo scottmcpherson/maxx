@@ -1808,6 +1808,11 @@ struct ControlSessionRegistryTests {
             $0.name == "group.joined" && $0.sourceKind == "maxx"
                 && $0.sessionID == id && $0.group == "release-MAX-14"
         })
+        // Create-time metadata is stored and shown but emits NO stream event: a
+        // create surfaces only the mechanical `created`/`group.joined`. A
+        // supervisor must read the provenance from the snapshot/get/list, never
+        // wait on a `kind: metadata` event that a create never produces.
+        #expect(!events.contains { $0.kind == "metadata" })
     }
 
     /// A caller without `groups:create` cannot create a grouped connector launch:

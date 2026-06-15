@@ -609,12 +609,22 @@ a schema-versioned envelope:
 - `group` — the group this event pertains to (the session's current group, or the
   affected group for `group.joined`/`group.left`); omitted when none.
 
-Agent-reported metadata writes (set/remove/clear; the merge in `update`; and the
-`metadata` object supplied at `create`) flow onto this stream as `kind: metadata`
-events that carry the affected key in `name` and reuse the generic
-`message`/`payload` fields. The envelope adds no metadata-value-specific fields,
-so it stays uniform and workflow-neutral: a supervisor learns _which_ key changed
-from the stream and reads the full map verbatim via `get` / `list` / `watch`.
+**Post-create** metadata mutations — `set-metadata`, `remove-metadata`,
+`clear-metadata`, and the metadata merge in `sessions.update` — flow onto this
+stream as `kind: metadata` events that carry the affected key in `name` and reuse
+the generic `message`/`payload` fields. The envelope adds no
+metadata-value-specific fields, so it stays uniform and workflow-neutral: a
+supervisor learns _which_ key changed from the stream and reads the full map
+verbatim via `get` / `list` / `watch`.
+
+**Create-time metadata does not produce a stream event.** A `metadata` object
+supplied to `sessions.create` is stored on the session and pushed to the surface,
+but the only events a create emits are the mechanical `created` (and optional
+`group.joined`) below — there is no `kind: metadata` event for it. So a
+supervisor must not `stream.watch`/`stream.wait` for a create-time `connector.*`
+metadata event: that metadata is available immediately from the create response,
+`sessions.get`, `sessions.list`, and the per-session `watch` snapshot, while a
+grouped connector launch is observed on the stream via `created` + `group.joined`.
 
 ### Events Maxx owns (`source_kind: maxx`, `kind: lifecycle`)
 
