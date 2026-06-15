@@ -77,6 +77,13 @@ enum ControlMethod: String, Codable {
 
     /// Set the short human-readable summary shown alongside the workflow state.
     case sessionsSetSummary = "sessions.set-summary"
+
+    // MARK: Policy (MAX-11)
+
+    /// Evaluate the capability policy for a (caller, capability, target) without
+    /// performing any action. A read-only diagnostic so callers/integrators can
+    /// see whether an action would be allowed, denied, or require confirmation.
+    case policyCheck = "policy.check"
 }
 
 // MARK: - Errors
@@ -86,6 +93,9 @@ enum ControlMethod: String, Codable {
 enum ControlErrorCode: String, Codable {
     case invalidRequest = "invalid_request"
     case unauthorized
+    /// The policy requires explicit user confirmation before this action may
+    /// proceed. Re-send the request with `confirm: true` to approve it.
+    case confirmationRequired = "confirmation_required"
     case notFound = "not_found"
     case alreadyEnded = "already_ended"
     case unsupportedAction = "unsupported_action"
@@ -176,6 +186,21 @@ struct ControlRequest: Codable {
         /// the `state` field above, validated against the workflow vocabulary.)
         var summary: String?
 
+        // MARK: Capability policy (MAX-11)
+
+        /// Explicit caller/source identity used for policy decisions. Distinct
+        /// from `source` (which is free-form audit *attribution* for declared
+        /// facts). When omitted, the request is attributed to the trusted
+        /// first-party local source — the capability token already proves a
+        /// same-user local caller.
+        var caller: String?
+        /// Acknowledge a `confirm` decision: when true, a confirmation-required
+        /// action proceeds instead of returning `confirmation_required`.
+        var confirm: Bool?
+        /// Capability to evaluate for `policy.check` (e.g. `tabs:close`). Ignored
+        /// by every other method.
+        var capability: String?
+
         enum CodingKeys: String, CodingKey {
             case id, title, cwd, command, env, metadata, status, location
             case action, input, state, event, lifecycle, message, source
@@ -188,6 +213,7 @@ struct ControlRequest: Codable {
             case timeoutMs = "timeout_ms"
             case since
             case summary
+            case caller, confirm, capability
         }
     }
 
@@ -267,6 +293,29 @@ struct ControlSessionView: Codable, Equatable {
     }
 }
 
+/// The wire view of a policy evaluation, returned by `policy.check` (and usable
+/// for diagnostics). Reports the decision and the explicit inputs it was based
+/// on, so an integrator can see exactly why an action would be allowed, denied,
+/// or require confirmation.
+struct ControlPolicyDecisionView: Codable, Equatable {
+    /// `allow`, `deny`, or `confirm`.
+    var decision: String
+    var source: String
+    var sourceKind: String?
+    var capability: String
+    var target: String?
+    /// Stable human-readable reason (for `deny`) or empty for `allow`.
+    var reason: String?
+    /// The confirmation prompt text when `decision == confirm`.
+    var prompt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case decision, source
+        case sourceKind = "source_kind"
+        case capability, target, reason, prompt
+    }
+}
+
 struct ControlResponse: Codable {
     var ok: Bool
     var result: Result?
@@ -290,6 +339,8 @@ struct ControlResponse: Codable {
         var event: ControlEventView?
         /// A session's audit log, returned by `sessions.events`.
         var events: [ControlEventView]?
+        /// A policy evaluation, returned by `policy.check`.
+        var policy: ControlPolicyDecisionView?
 
         init(
             session: ControlSessionView? = nil,
@@ -298,7 +349,8 @@ struct ControlResponse: Codable {
             applied: String? = nil,
             outcome: String? = nil,
             event: ControlEventView? = nil,
-            events: [ControlEventView]? = nil
+            events: [ControlEventView]? = nil,
+            policy: ControlPolicyDecisionView? = nil
         ) {
             self.session = session
             self.sessions = sessions
@@ -307,6 +359,7 @@ struct ControlResponse: Codable {
             self.outcome = outcome
             self.event = event
             self.events = events
+            self.policy = policy
         }
     }
 

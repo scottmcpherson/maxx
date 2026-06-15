@@ -76,11 +76,24 @@ final class ControlSessionRegistry {
     private let now: () -> Date
     private let makeID: () -> UUID
 
+    /// The capability policy enforced before every gated side effect (MAX-11).
+    private let policy: ControlPolicy
+    /// Confirmation grants recorded for `once_per_source` capabilities, keyed by
+    /// `"<caller>\u{1}<capability>"`. Lasts for this app/control session, so a
+    /// source confirms such a capability once rather than on every request.
+    private var confirmationGrants: Set<String> = []
+
     /// Telemetry for declaration events only — the explicit `set-state` /
     /// `set-summary` calls Maxx receives, not any inferred interpretation.
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
         category: "ControlSessionRegistry")
+
+    /// Audit/debug log for policy decisions (allow/deny/confirm), separate from
+    /// declaration telemetry so integrators can filter for authorization events.
+    private static let policyLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
+        category: "ControlPolicy")
 
     private static let iso8601: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -90,10 +103,12 @@ final class ControlSessionRegistry {
 
     init(
         now: @escaping () -> Date = Date.init,
-        makeID: @escaping () -> UUID = UUID.init
+        makeID: @escaping () -> UUID = UUID.init,
+        policy: ControlPolicy = .default
     ) {
         self.now = now
         self.makeID = makeID
+        self.policy = policy
     }
 
     /// Number of tracked sessions (including ended ones). Exposed for tests.
@@ -102,9 +117,16 @@ final class ControlSessionRegistry {
     // MARK: - Dispatch
 
     /// Handle one authorized request and produce a response. Token verification
-    /// happens in the transport layer before this is called.
+    /// happens in the transport layer before this is called; capability policy is
+    /// enforced here (``enforce``) before any side effect runs.
     func handle(_ request: ControlRequest, host: ControlSessionHost) -> ControlResponse {
         do {
+            // Capability policy is the first gate: a denied caller never reaches
+            // a handler, and a confirmation-required action returns before any
+            // side effect. `policy.check` and metadata-write methods are ungated
+            // here (see ``ControlPolicyMapping``).
+            try enforce(request.method, request.params)
+
             switch request.method {
             case .sessionsCreate:
                 return .success(.init(session: try create(request.params, host: host)))
@@ -137,6 +159,8 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setSummary(request.params, host: host)))
             case .sessionsEvents:
                 return .success(.init(events: try events(request.params, host: host)))
+            case .policyCheck:
+                return .success(.init(policy: try policyCheck(request.params)))
             case .sessionsWait, .sessionsWatch:
                 // wait/watch are long-lived and handled by the streaming path in
                 // ControlServer; they never reach this single-shot dispatcher.
@@ -148,6 +172,128 @@ final class ControlSessionRegistry {
         } catch {
             return .failure(ControlError(.internalError, "\(error)"))
         }
+    }
+
+    // MARK: - Capability policy enforcement (MAX-11)
+
+    /// Enforce the capability policy for a request before any side effect runs.
+    /// Throws `unauthorized` on a deny and `confirmation_required` on a confirm
+    /// that the caller has not acknowledged; returns normally when the action may
+    /// proceed. Ungated methods (metadata writes, `policy.check`, and unknown
+    /// `action` names) return without a decision so their existing handler/error
+    /// semantics are preserved.
+    ///
+    /// The decision depends only on the explicit caller, capability, and target —
+    /// never on terminal output or any ambient signal — and every outcome is
+    /// recorded to the policy audit log.
+    func enforce(_ method: ControlMethod, _ params: ControlRequest.Params?) throws {
+        guard let capability = ControlPolicyMapping.capability(for: method, params: params) else {
+            return
+        }
+        let source = policy.resolve(params?.caller)
+        let target = ControlPolicyMapping.target(for: method, params: params)
+
+        // A previously granted `once_per_source` confirmation short-circuits to
+        // allow without re-prompting. This is safe because a grant is recorded
+        // only in the `.confirm` branch below — i.e. only for a capability the
+        // evaluator already returned `.confirm` for — so it can never authorize a
+        // capability the policy would deny.
+        if case let .known(configured) = source,
+           configured.confirmScope == .oncePerSource,
+           confirmationGrants.contains(Self.grantKey(source.id, capability)) {
+            logDecision("allow", source: source, capability: capability, target: target,
+                        reason: "prior confirmation grant")
+            return
+        }
+
+        let decision = policy.evaluate(source: source, capability: capability, target: target)
+        switch decision {
+        case .allow:
+            logDecision("allow", source: source, capability: capability, target: target)
+
+        case let .deny(reason):
+            logDecision("deny", source: source, capability: capability, target: target,
+                        reason: reason)
+            throw ControlError(.unauthorized, reason)
+
+        case let .confirm(prompt):
+            if params?.confirm == true {
+                if case let .known(configured) = source, configured.confirmScope == .oncePerSource {
+                    confirmationGrants.insert(Self.grantKey(source.id, capability))
+                }
+                logDecision("confirm-granted", source: source, capability: capability,
+                            target: target, reason: "caller acknowledged")
+            } else {
+                logDecision("confirm-required", source: source, capability: capability,
+                            target: target, reason: "confirmation required")
+                throw ControlError(.confirmationRequired, prompt)
+            }
+        }
+    }
+
+    /// Evaluate the policy for an explicit (caller, capability, target) without
+    /// performing any action — the `policy.check` diagnostic. Records the decision
+    /// to the audit log but never mutates grants or sessions.
+    private func policyCheck(_ params: ControlRequest.Params?) throws -> ControlPolicyDecisionView {
+        guard let raw = params?.capability, !raw.isEmpty else {
+            throw ControlError(.invalidRequest, "policy.check requires 'capability'")
+        }
+        guard let capability = ControlCapability(rawValue: raw) else {
+            let valid = ControlCapability.allCases.map(\.rawValue).joined(separator: ", ")
+            throw ControlError(.invalidRequest, "unknown capability '\(raw)' (valid: \(valid))")
+        }
+        let source = policy.resolve(params?.caller)
+        let target: ControlTarget = (params?.id?.isEmpty == false)
+            ? .session(params!.id!) : .none
+        let decision = policy.evaluate(source: source, capability: capability, target: target)
+        logDecision("check", source: source, capability: capability, target: target)
+
+        switch decision {
+        case .allow:
+            return .init(
+                decision: "allow", source: source.id, sourceKind: source.kind?.rawValue,
+                capability: capability.rawValue, target: targetID(target))
+        case let .deny(reason):
+            return .init(
+                decision: "deny", source: source.id, sourceKind: source.kind?.rawValue,
+                capability: capability.rawValue, target: targetID(target), reason: reason)
+        case let .confirm(prompt):
+            return .init(
+                decision: "confirm", source: source.id, sourceKind: source.kind?.rawValue,
+                capability: capability.rawValue, target: targetID(target), prompt: prompt)
+        }
+    }
+
+    private static func grantKey(_ source: String, _ capability: ControlCapability) -> String {
+        "\(source)\u{1}\(capability.rawValue)"
+    }
+
+    /// A compact target identifier for the diagnostic view (the session id, or a
+    /// short label). Distinct from `ControlTarget.description` (prose for prompts).
+    private func targetID(_ target: ControlTarget) -> String? {
+        switch target {
+        case let .session(id): return id
+        case let .newSurface(location): return location
+        case .collection: return "*"
+        case .none: return nil
+        }
+    }
+
+    /// Log one policy decision with the source, capability, target, and reason.
+    /// Never logs request params (which may carry commands/secrets).
+    private func logDecision(
+        _ outcome: String,
+        source: ControlResolvedSource,
+        capability: ControlCapability,
+        target: ControlTarget,
+        reason: String? = nil
+    ) {
+        let level: OSLogType = (outcome == "deny") ? .error
+            : (outcome == "confirm-required" || outcome == "confirm-granted") ? .default
+            : .info
+        Self.policyLogger.log(
+            level: level,
+            "policy \(outcome, privacy: .public): source=\(source.id, privacy: .public) capability=\(capability.rawValue, privacy: .public) target=\(target.description, privacy: .public) reason=\(reason ?? "-", privacy: .public)")
     }
 
     // MARK: - Handlers
@@ -695,6 +841,9 @@ final class ControlSessionRegistry {
     /// Validate a `wait` request and capture its baseline. Throws `not_found`
     /// (missing target) / `invalid_request` exactly like the single-shot handlers.
     func beginWait(_ params: ControlRequest.Params?) throws -> WaitPlan {
+        // Observing a session is the `tabs:list` capability; enforce it before
+        // the streaming server begins polling.
+        try enforce(.sessionsWait, params)
         let session = try requireSession(params?.id)
         let chosen = [params?.state, params?.event, params?.lifecycle].filter { $0 != nil }
         guard chosen.count == 1 else {
@@ -776,6 +925,8 @@ final class ControlSessionRegistry {
     /// Validate a `watch` request and produce the initial snapshot message.
     func beginWatch(_ params: ControlRequest.Params?, host: ControlSessionHost) throws
         -> (WatchPlan, ControlStreamMessage) {
+        // Streaming a session's events is the `tabs:list` capability.
+        try enforce(.sessionsWatch, params)
         let session = try requireSession(params?.id)
         let current = lifecycle(of: session, host: host)
         // `--since` replays entries after that sequence; default streams only new
