@@ -139,6 +139,11 @@ fields`) — connector payloads stuffed with bait (branch, head ref, labels,
   `runner.*` keys. A polling trigger fires only on its configured exit-code
   contract and forwards the check's stdout as an opaque payload — it never reads
   the output to decide meaning (`src/runner/poll.zig`).
+- `src/webhook/handler.zig` (`no-inference: webhook bait fields never reach the
+  launch`) — a webhook payload stuffed with bait reaches the launch only through
+  the connector adapter's explicit fields; the listener authenticates and frames
+  the request but interprets nothing, and the raw body is handed to the command
+  verbatim (a temp file) rather than scraped.
 - `macos/Tests/Control/ControlSessionPersistenceTests.swift`
   (`rehydrationNeverInfersUndeclaredSemanticFields`) — a persisted record whose
   mechanical fields (command `git commit -m done …`, cwd `/repo/feature-complete`,
