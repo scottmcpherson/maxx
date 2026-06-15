@@ -286,9 +286,10 @@ private struct AgentSkillsPromptBanner: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color(nsColor: theme.foreground))
                 Text("Gives agents the ability to create and manage tabs in Maxx — "
-                    + "for example, ask one to start another session in a new tab. "
-                    + "Installs the maxx-tabs skill in your home folder; you can "
-                    + "remove it anytime in Settings.")
+                    + "for example, ask one to start another session in a new tab, or "
+                    + "supervise a group of child tabs. Installs the maxx-tabs and "
+                    + "maxx-supervisor-workflows skills in your home folder; you can "
+                    + "remove them anytime in Settings.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(nsColor: theme.mutedForeground))
                     .fixedSize(horizontal: false, vertical: true)
