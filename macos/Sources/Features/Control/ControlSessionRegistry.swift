@@ -457,6 +457,12 @@ final class ControlSessionRegistry {
         let status = try ControlValidation.validateStatus(params?.status) ?? "created"
         let group = try ControlValidation.validateGroup(params?.group)
         let agentType = try ControlValidation.validateAgentType(params?.agentType)
+        // A create-time agent-type is the same explicit declared fact as the
+        // standalone `set-agent-type`, and carries a source. Validate the source up
+        // front (before spawning) so an invalid one can't leave a stray tab behind.
+        let agentTypeSource = try agentType.map { _ in
+            try ControlValidation.validateSource(params?.source)
+        }
         // A parent association (MAX-5) is an explicit, caller-supplied edge to a
         // session this registry already knows. We never infer a parent from
         // naming, paths, or spawn order. Whether an edge is *requested* is read
@@ -537,6 +543,17 @@ final class ControlSessionRegistry {
             recordMechanical(
                 session, name: "group.joined", message: group, group: group,
                 createdAt: session.createdAt, pid: pid)
+        }
+        // A create-time agent-type declaration is an explicit declared fact,
+        // identical to `set-agent-type`: record it in the audit log (events /
+        // watch) with its source so supervisors see it and it persists, rather than
+        // it being only an initialized field. `touch: false` keeps
+        // `updatedAt == createdAt` for the brand-new record.
+        if let agentType, let agentTypeSource {
+            record(
+                &session, kind: .metadata, name: "agent_type", source: agentTypeSource,
+                message: agentType, createdAt: session.createdAt, pid: pid)
+            store(&session, touch: false)
         }
         // Surface any metadata supplied at create time so the UI shows it from
         // the start (an explicit caller declaration, never inferred).

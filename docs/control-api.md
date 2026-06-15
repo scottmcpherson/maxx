@@ -616,7 +616,10 @@ clears, lifecycle returns to `running`), and increments `restart_count`.
 **Declared fields.** `agent_type` is an explicit agent self-declaration
 (`set-agent-type`, or `--agent-type` at `create`), stored verbatim like all
 declared facts and never inferred from the command, process name, branch, path, or
-title. `parent` is supplied at `create` time as a known `session_id`; the edge is
+title. Either path records the declaration in the session audit log (`events` /
+`watch`) with its source, so the create-time declaration is as visible and durable
+as a later `set-agent-type` — a supervisor never has to wait for a second request
+to learn it. `parent` is supplied at `create` time as a known `session_id`; the edge is
 verified (`not_found` for an unknown id, `invalid_request` for a non-UUID) and
 persisted, but never inferred from naming or spawn order. Both `set-agent-type`
 and a `--group`/`--parent` association are gated by the same capabilities as the

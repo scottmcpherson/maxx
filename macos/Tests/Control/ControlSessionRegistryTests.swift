@@ -1789,6 +1789,28 @@ struct ControlSessionRegistryTests {
         #expect(host.createdRequests.count == 1)
     }
 
+    @Test func createTimeAgentTypeIsRecordedInAuditLog() {
+        // `--agent-type` at create is the same explicit declared fact as the
+        // standalone `set-agent-type`, so it must land in the session audit log
+        // (events / watch) with its source — not only as an initialized field.
+        // Otherwise a supervisor sees it only if the agent re-declares it.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let created = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "claude", source: "operator", agentType: "claude-code")),
+            host: host)
+        #expect(created.ok)
+        #expect(created.result?.session?.agentType == "claude-code")
+        let id = created.result?.session?.sessionID
+
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        let entry = log.result?.events?.first { $0.name == "agent_type" }
+        #expect(entry?.kind == "metadata")
+        #expect(entry?.message == "claude-code")
+        #expect(entry?.source == "operator")
+    }
+
     // MARK: - Connector launch glue (MAX-14)
 
     /// Policy decision (MAX-14): create-time metadata rides under `tabs:spawn`,
