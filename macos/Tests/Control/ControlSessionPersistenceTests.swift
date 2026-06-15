@@ -281,6 +281,38 @@ struct ControlSessionPersistenceTests {
         #expect(view?.restored == true)
     }
 
+    @Test func restoredSessionIgnoresCoincidentalLiveSurface() {
+        let url = tempStoreURL()
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry1, host1) = makeRegistry(url: url, clock: clock)
+        let created = registry1.handle(
+            request(.sessionsCreate, .init(command: "x")), host: host1)
+        let sid = created.result?.session?.sessionID
+        let surfaceID = UUID(uuidString: created.result?.session?.surfaceID ?? "")
+
+        // Second run: a fresh host that happens to host a LIVE surface reusing the
+        // same UUID — as macOS window restoration would rebuild — but which this
+        // control API did not create this run.
+        let registry2 = ControlSessionRegistry(
+            now: { clock.now }, store: ControlSessionStore(fileURL: url))
+        let host2 = FakeControlSessionHost()
+        if let surfaceID { host2.surfaces[surfaceID] = FakeControlSessionHost.Surface() }
+
+        // The restored record must NOT adopt that surface: it reads as closed (not
+        // running), exposes no pid, and is flagged restored.
+        let view = registry2.handle(
+            request(.sessionsGet, .init(id: sid)), host: host2).result?.session
+        #expect(view?.lifecycle == "closed")
+        #expect(view?.restored == true)
+        #expect(view?.pid == nil)
+
+        // And a control action must not reach the coincidental surface.
+        let focus = registry2.handle(
+            request(.sessionsAction, .init(id: sid, action: "focus")), host: host2)
+        #expect(focus.error?.code == "already_ended")
+        if let surfaceID { #expect(host2.surfaces[surfaceID]?.focusCount == 0) }
+    }
+
     @Test func restoredSessionCanBeRestarted() {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

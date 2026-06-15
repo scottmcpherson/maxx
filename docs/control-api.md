@@ -588,12 +588,17 @@ runtime directory (no live session survives a reboot either). Writes are atomic
 (temp file + rename) and happen on every mutation, plus a flush on app
 termination.
 
-**Restart rehydration.** On launch the registry loads its records. Their surfaces
-no longer exist, so each restored record's lifecycle computes as `closed`, it has
-no `pid`, and it is flagged `restored: true` (a mechanical fact about this run,
-not an inference about the work). A restored record is fully listable/readable via
-`get` / `list` / `events`, and — because its `command` is persisted — is
-`restart`-able: a restart spawns a fresh surface, revives the record (`restored`
+**Restart rehydration.** On launch the registry loads its records. A restored
+record is **detached** from any live surface: it reads as `closed` with no `pid`
+and is flagged `restored: true` (a mechanical fact about this run, not an
+inference about the work). The detachment is a safety boundary — with macOS
+window restoration a freshly rebuilt, user-owned surface can reuse a persisted
+`surface_id`, and the control API must never adopt, observe, signal, or close a
+surface it did not create this run — so a restored record resolves no surface and
+its actions return `already_ended` until it is restarted. A restored record is
+fully listable/readable via `get` / `list` / `events`, and — because its
+`command` is persisted — is `restart`-able: a restart spawns a fresh surface,
+revives the record (`restored`
 clears, lifecycle returns to `running`), and increments `restart_count`.
 
 **Declared fields.** `agent_type` is an explicit agent self-declaration

@@ -491,7 +491,7 @@ final class ControlSessionRegistry {
         // `touch: false` keeps updatedAt == createdAt for a brand-new record.
         store(&session, touch: false)
 
-        let pid = host.surface(for: session.surfaceID)?.pid
+        let pid = liveSurface(of: session, host: host)?.pid
         recordMechanical(
             session, name: "created", group: session.group,
             createdAt: session.createdAt, pid: pid)
@@ -503,7 +503,7 @@ final class ControlSessionRegistry {
         // Surface any metadata supplied at create time so the UI shows it from
         // the start (an explicit caller declaration, never inferred).
         if !metadata.isEmpty {
-            pushMetadata(session, to: host.surface(for: session.surfaceID))
+            pushMetadata(session, to: liveSurface(of: session, host: host))
         }
         return view(of: session, host: host)
     }
@@ -589,7 +589,7 @@ final class ControlSessionRegistry {
             // silent, unobservable mutation.
             let source = try ControlValidation.validateSource(params?.source)
             let at = now()
-            let pid = host.surface(for: session.surfaceID)?.pid
+            let pid = liveSurface(of: session, host: host)?.pid
             for key in validated.keys.sorted() {
                 record(
                     &session,
@@ -604,7 +604,7 @@ final class ControlSessionRegistry {
             store(&session)
         }
         if metadataChanged {
-            pushMetadata(session, to: host.surface(for: session.surfaceID))
+            pushMetadata(session, to: liveSurface(of: session, host: host))
         }
         return view(of: session, host: host)
     }
@@ -674,7 +674,7 @@ final class ControlSessionRegistry {
             source: source,
             message: message,
             createdAt: now(),
-            pid: host.surface(for: session.surfaceID)?.pid)
+            pid: liveSurface(of: session, host: host)?.pid)
         store(&session)
         return view(of: session, host: host)
     }
@@ -696,7 +696,7 @@ final class ControlSessionRegistry {
             source: source,
             payload: payload,
             createdAt: now(),
-            pid: host.surface(for: session.surfaceID)?.pid)
+            pid: liveSurface(of: session, host: host)?.pid)
         store(&session)
         // `record` always appends, so `last` is the entry we just recorded.
         let recorded = eventView(session.events[session.events.count - 1], sessionID: session.id)
@@ -729,7 +729,7 @@ final class ControlSessionRegistry {
         var merged = session.metadata
         merged[key] = value
         session.metadata = try ControlValidation.validateMetadata(merged)
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
         record(
             &session,
             kind: .metadata,
@@ -760,7 +760,7 @@ final class ControlSessionRegistry {
             throw ControlError(.invalidRequest, "remove-metadata requires 'key' or 'keys'")
         }
 
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
         let at = now()
         var changed = false
         for key in targets where session.metadata[key] != nil {
@@ -792,7 +792,7 @@ final class ControlSessionRegistry {
     ) throws -> ControlSessionView {
         var session = try requireSession(params?.id)
         let source = try ControlValidation.validateSource(params?.source)
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
         // Only record/store when there was something to clear, so a redundant
         // clear stays a true no-op: no audit entry, no `updatedAt` bump, no
@@ -829,7 +829,7 @@ final class ControlSessionRegistry {
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
         // Resolve the surface once: used for the audit pid and the UI push.
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
         session.workflowState = state
         session.workflowStateAt = at
@@ -861,7 +861,7 @@ final class ControlSessionRegistry {
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
         // Resolve the surface once: used for the audit pid and the UI push.
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
         session.summary = summary
         session.summaryAt = at
@@ -898,7 +898,7 @@ final class ControlSessionRegistry {
         let agentType = try ControlValidation.validateAgentType(raw)
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
-        let pid = host.surface(for: session.surfaceID)?.pid
+        let pid = liveSurface(of: session, host: host)?.pid
 
         session.agentType = agentType
         record(
@@ -944,7 +944,7 @@ final class ControlSessionRegistry {
         let reason = try ControlValidation.validateReason(params?.reason)
 
         if !session.archived {
-            if !session.canceled, let handle = host.surface(for: session.surfaceID) {
+            if !session.canceled, let handle = liveSurface(of: session, host: host) {
                 handle.close()
             }
             let date = now()
@@ -985,7 +985,7 @@ final class ControlSessionRegistry {
                 "session has no restartable command; pass a command to restart it")
         }
 
-        if !session.canceled, !session.archived, let handle = host.surface(for: session.surfaceID) {
+        if !session.canceled, !session.archived, let handle = liveSurface(of: session, host: host) {
             handle.close()
         }
 
@@ -1305,7 +1305,7 @@ final class ControlSessionRegistry {
                 case ControlLifecycle.exited.rawValue:
                     recordMechanical(
                         session, name: "exited", group: session.group, createdAt: now(),
-                        pid: host.surface(for: session.surfaceID)?.pid)
+                        pid: liveSurface(of: session, host: host)?.pid)
                 case ControlLifecycle.closed.rawValue:
                     // Surface vanished without an API cancel/archive (e.g. the user
                     // closed the tab). cancel()/archive()/restart() set
@@ -1342,7 +1342,7 @@ final class ControlSessionRegistry {
         guard old != newGroup else { return view(of: session, host: host) }
 
         let at = now()
-        let pid = host.surface(for: session.surfaceID)?.pid
+        let pid = liveSurface(of: session, host: host)?.pid
         session.group = newGroup
         store(&session)
         if let old {
@@ -1671,7 +1671,7 @@ final class ControlSessionRegistry {
         if session.canceled {
             throw ControlError(.alreadyEnded, "session \(session.id.uuidString) has already ended")
         }
-        guard let handle = host.surface(for: session.surfaceID) else {
+        guard let handle = liveSurface(of: session, host: host) else {
             throw ControlError(
                 .alreadyEnded,
                 "session \(session.id.uuidString) surface no longer exists")
@@ -1693,7 +1693,7 @@ final class ControlSessionRegistry {
             || session.archived
             || session.lastObservedLifecycle == ControlLifecycle.closed.rawValue
             || session.lastObservedLifecycle == ControlLifecycle.archived.rawValue
-        if !wasCanceled, let handle = host.surface(for: session.surfaceID) {
+        if !wasCanceled, let handle = liveSurface(of: session, host: host) {
             handle.close()
         }
         session.canceled = true
@@ -1712,13 +1712,33 @@ final class ControlSessionRegistry {
         return .success(.init(session: view(of: session, host: host), canceled: true))
     }
 
+    /// The live surface backing a session *this run*, or nil.
+    ///
+    /// A record rehydrated from a previous run (`restoredFromPreviousRun`) is
+    /// intentionally detached: its persisted `surfaceID` names a surface from the
+    /// prior run, and with macOS window restoration a *different*, user-owned
+    /// surface can be rebuilt this run reusing that same UUID. The control API only
+    /// ever owns surfaces it created this run, so it must never adopt, observe,
+    /// signal, or close such a coincidental match. A restored record therefore
+    /// resolves no surface — its lifecycle stays `closed` and actions error as
+    /// `already_ended` — until `restart` spawns a fresh surface this run (which
+    /// clears the flag and rebinds `surfaceID`). This is the MAX-1 ownership
+    /// boundary preserved across a restart, not output inference.
+    private func liveSurface(
+        of session: ControlSession,
+        host: ControlSessionHost
+    ) -> ControlSurfaceHandle? {
+        guard !session.restoredFromPreviousRun else { return nil }
+        return host.surface(for: session.surfaceID)
+    }
+
     /// Compute the Maxx-owned lifecycle from explicit state only: the archive/
     /// cancel flags, surface existence, and kernel-reported process liveness.
     /// Never consults terminal output.
     private func lifecycle(of session: ControlSession, host: ControlSessionHost) -> ControlLifecycle {
         if session.archived { return .archived }
         if session.canceled { return .closed }
-        guard let handle = host.surface(for: session.surfaceID) else { return .closed }
+        guard let handle = liveSurface(of: session, host: host) else { return .closed }
         return handle.isProcessAlive ? .running : .exited
     }
 
@@ -1727,7 +1747,7 @@ final class ControlSessionRegistry {
         let lifecycle = lifecycle(of: session, host: host)
         // Expose the pid whenever a surface still exists (running or exited), to
         // match the MAX-1 behavior; a closed/archived session has none.
-        let pid: Int? = lifecycle.isTerminal ? nil : host.surface(for: session.surfaceID)?.pid
+        let pid: Int? = lifecycle.isTerminal ? nil : liveSurface(of: session, host: host)?.pid
 
         return ControlSessionView(
             sessionID: session.id.uuidString,
