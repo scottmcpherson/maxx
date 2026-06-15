@@ -35,11 +35,13 @@ pub const Options = struct {
 
 /// The top-level command group. `sessions` is the per-session surface (MAX-1..3);
 /// `stream` is the cross-resource structured event stream and `event` the agent
-/// event-declaration shorthand (MAX-7).
+/// event-declaration shorthand (MAX-7); `policy` is the MAX-11 capability
+/// diagnostic.
 const Group = enum {
     sessions,
     stream,
     event,
+    policy,
 };
 
 const Verb = enum {
@@ -64,6 +66,8 @@ const Verb = enum {
     // MAX-7 structured event stream verbs.
     @"set-group",
     emit,
+    // MAX-11 capability policy diagnostic (`policy check`).
+    @"policy-check",
 };
 
 /// A parsed `maxx +control <group> ...` invocation.
@@ -97,6 +101,10 @@ const Command = struct {
     group_name: ?[]const u8 = null,
     tab: ?[]const u8 = null,
     all: ?[]const u8 = null,
+    // MAX-11 capability policy fields.
+    caller: ?[]const u8 = null,
+    capability: ?[]const u8 = null,
+    confirm: bool = false,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
@@ -121,7 +129,7 @@ const Command = struct {
                 .@"set-state" => "sessions.set-state",
                 .@"set-summary" => "sessions.set-summary",
                 .@"set-group" => "sessions.set-group",
-                .emit => unreachable,
+                .emit, .@"policy-check" => unreachable,
             },
             // `stream watch`/`stream wait` are the cross-resource stream.
             .stream => switch (self.verb) {
@@ -131,6 +139,8 @@ const Command = struct {
             },
             // `event emit` is shorthand for an agent event declaration.
             .event => "sessions.emit-event",
+            // `policy check` is the capability diagnostic.
+            .policy => "policy.check",
         };
     }
 
@@ -235,10 +245,24 @@ const ParseError = error{
 ///     [--source <name>]`: shorthand for an agent event declaration (maps to
 ///     `sessions emit-event`).
 ///
+/// Capability policy (MAX-11). Every request resolves to a caller *source* and a
+/// requested *capability*; the running app's policy decides allow / deny /
+/// confirm before any side effect. Global flags:
+///
+///   * `--as <source>`: claim a policy source (e.g. `readonly-external`).
+///     Omitted, the request is the trusted first-party local source.
+///   * `--confirm` (alias `--yes`): approve a confirmation-required action; the
+///     first attempt without it exits 6 and prints the confirmation prompt.
+///
+///   * `policy check --capability <cap> [--as <source>] [<session_id>]`: a
+///     read-only diagnostic that reports whether a (source, capability, target)
+///     would be allowed, denied, or require confirmation — performing no action.
+///
 /// The create response includes a stable `session_id` to use for all later
 /// operations. The raw JSON response is printed to stdout. Exit codes are
 /// stable: 0 success/matched, 1 generic error, 2 `wait` timeout, 3 missing
-/// target, 4 `wait` target ended before matching, 5 unsupported operation.
+/// target, 4 `wait` target ended before matching, 5 unsupported operation,
+/// 6 confirmation required.
 ///
 /// Note: a flag value that begins with `+` (e.g. a command literally starting
 /// with a plus) must use the `--flag=value` form (`--command=+foo`); the
@@ -382,7 +406,8 @@ fn parseDurationMs(s: []const u8) ?u64 {
 
 /// Map a response to a stable, documented exit code:
 ///   0 success/matched · 1 generic error · 2 wait timeout ·
-///   3 missing target (not_found) · 4 wait target ended · 5 unsupported op.
+///   3 missing target (not_found) · 4 wait target ended · 5 unsupported op ·
+///   6 confirmation required (re-send with --confirm to approve).
 fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, response, .{}) catch return 1;
     defer parsed.deinit();
@@ -412,6 +437,7 @@ fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
                 if (code == .string) {
                     if (std.mem.eql(u8, code.string, "not_found")) return 3;
                     if (std.mem.eql(u8, code.string, "unsupported")) return 5;
+                    if (std.mem.eql(u8, code.string, "confirmation_required")) return 6;
                     // `unsupported_action` is an unknown/misspelled action name —
                     // a caller usage error, which is a generic (exit 1) failure.
                 }
@@ -510,6 +536,12 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         {
             // `event emit --json '{...}'` carries the structured payload.
             cmd.payload_json = (try flagValue(alloc, arg, iter, "--json")).?;
+        } else if (try flagValue(alloc, arg, iter, "--as")) |v| {
+            cmd.caller = v;
+        } else if (try flagValue(alloc, arg, iter, "--capability")) |v| {
+            cmd.capability = v;
+        } else if (std.mem.eql(u8, arg, "--confirm") or std.mem.eql(u8, arg, "--yes")) {
+            cmd.confirm = true;
         } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
             cmd.timeout_ms = parseDurationMs(v) orelse return error.InvalidDuration;
         } else if (try flagValue(alloc, arg, iter, "--since")) |v| {
@@ -550,6 +582,7 @@ fn parseVerb(group: Group, s: []const u8) ?Verb {
         .sessions => sessionsVerb(s),
         .stream => streamVerb(s),
         .event => eventVerb(s),
+        .policy => policyVerb(s),
     };
 }
 
@@ -576,6 +609,11 @@ fn streamVerb(s: []const u8) ?Verb {
 
 fn eventVerb(s: []const u8) ?Verb {
     if (std.mem.eql(u8, s, "emit")) return .emit;
+    return null;
+}
+
+fn policyVerb(s: []const u8) ?Verb {
+    if (std.mem.eql(u8, s, "check")) return .@"policy-check";
     return null;
 }
 
@@ -702,6 +740,18 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
         try json.objectField("all");
         try json.write(v);
     }
+    if (cmd.caller) |v| {
+        try json.objectField("caller");
+        try json.write(v);
+    }
+    if (cmd.capability) |v| {
+        try json.objectField("capability");
+        try json.write(v);
+    }
+    if (cmd.confirm) {
+        try json.objectField("confirm");
+        try json.write(true);
+    }
     if (cmd.timeout_ms) |v| {
         try json.objectField("timeout_ms");
         try json.write(v);
@@ -779,10 +829,14 @@ fn sendRequest(
 /// side stays open so the server keeps the stream alive until the session ends
 /// or we disconnect by closing the fd.
 ///
-/// Returns the process exit code: 0 for a normal stream, or the mapped error
-/// code when the server's *first* line is a single error response (e.g. a bad
-/// `--session`/`--tab` filter), so a `watch` honors the same documented exit
-/// codes as the single-shot verbs instead of always exiting 0.
+/// Returns the process exit code. A successful watch begins with a stream
+/// message (`{"type":"snapshot",...}`, no `ok` field) and returns 0 once the
+/// stream ends. But `watch` startup is enforced like any other request: if the
+/// server rejects it (policy deny, `not_found`, `invalid_request`,
+/// `confirmation_required`, …) it sends a single `{"ok":false,...}` error
+/// envelope, which we detect on the first line and map to the same stable exit
+/// code as single-shot requests — so automation never reads a denied/bad watch
+/// as a clean start.
 fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !u8 {
     if (socket_path.len >= 104) return error.PathTooLong;
 
@@ -805,10 +859,11 @@ fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8
     var stdout_writer = std.fs.File.stdout().writer(&out_buf);
     const stdout = &stdout_writer.interface;
 
-    var first_line: std.ArrayList(u8) = .empty;
-    defer first_line.deinit(alloc);
-    var first_done = false;
-    var exit: u8 = 0;
+    // Buffer bytes until the first newline so we can classify the opening
+    // message before forwarding the rest of the stream verbatim.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(alloc);
+    var checked = false;
 
     var buf: [4096]u8 = undefined;
     while (true) {
@@ -816,32 +871,44 @@ fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
         const chunk = buf[0..@intCast(n)];
-        try stdout.writeAll(chunk);
-        try stdout.flush();
 
-        // Accumulate the first line and, once complete, classify it: a stream
-        // carries `hello`/`event`/`end` (no `ok` field), whereas an error is a
-        // single `{"ok":false,...}` object we map to a stable exit code.
-        if (!first_done) {
-            for (chunk) |ch| {
-                if (ch == '\n') {
-                    first_done = true;
-                    break;
-                }
-                try first_line.append(alloc, ch);
-            }
-            if (first_done and isErrorResponse(alloc, first_line.items)) {
-                exit = exitCode(alloc, first_line.items, .watch);
-            }
+        if (checked) {
+            try stdout.writeAll(chunk);
+            try stdout.flush();
+            continue;
+        }
+
+        try pending.appendSlice(alloc, chunk);
+        const newline = std.mem.indexOfScalar(u8, pending.items, '\n') orelse continue;
+
+        checked = true;
+        try stdout.writeAll(pending.items);
+        try stdout.flush();
+        if (firstLineIsError(alloc, pending.items[0..newline])) {
+            return exitCode(alloc, pending.items[0..newline], .watch);
+        }
+        pending.clearRetainingCapacity();
+    }
+
+    // The connection closed before a full first line (defensive): flush what we
+    // have and, if it is an error envelope, surface its exit code.
+    if (!checked and pending.items.len > 0) {
+        try stdout.writeAll(pending.items);
+        try stdout.flush();
+        if (firstLineIsError(alloc, pending.items)) {
+            return exitCode(alloc, pending.items, .watch);
         }
     }
-    return exit;
+    return 0;
 }
 
-/// True only when `line` is a JSON object carrying `"ok": false` (an error
-/// response), as opposed to a stream feed message (which has no `ok` field).
-fn isErrorResponse(alloc: Allocator, line: []const u8) bool {
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch return false;
+/// True if `line` is a control *response* envelope reporting failure
+/// (`{"ok":false,...}`). A successful `watch` stream never sends an `ok`
+/// envelope — it opens with a stream message (`{"type":...}`) — so this cleanly
+/// distinguishes a rejected watch startup from a normal stream.
+fn firstLineIsError(alloc: Allocator, line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch return false;
     defer parsed.deinit();
     if (parsed.value != .object) return false;
     const ok = parsed.value.object.get("ok") orelse return false;
@@ -1164,6 +1231,33 @@ test "parseCommand stream watch with filters and since" {
     try testing.expectEqualStrings("stream.watch", cmd.method());
 }
 
+test "parseCommand stream watch carries policy --as caller" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The MAX-11 policy flags coexist with the MAX-7 stream group/flags.
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "stream watch --group release --as readonly-external",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .stream);
+    try testing.expect(cmd.verb == .watch);
+    try testing.expectEqualStrings("release", cmd.group_name.?);
+    try testing.expectEqualStrings("readonly-external", cmd.caller.?);
+
+    const json = try buildRequest(alloc, cmd, "tok");
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try testing.expectEqualStrings("release", params.get("group").?.string);
+    try testing.expectEqualStrings("readonly-external", params.get("caller").?.string);
+}
+
 test "parseCommand stream wait group --all" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -1321,5 +1415,139 @@ test "exitCode maps wait outcomes and error codes" {
     try testing.expectEqual(
         @as(u8, 1),
         exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unsupported_action\"}}", .action),
+    );
+    // A confirmation-required response maps to its own exit code (6).
+    try testing.expectEqual(
+        @as(u8, 6),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}", .create),
+    );
+}
+
+test "parseCommand action with --as caller and --confirm" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions action ID-1 --action input --input hi --as local-prompt --confirm",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .action);
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("input", cmd.action.?);
+    try testing.expectEqualStrings("local-prompt", cmd.caller.?);
+    try testing.expect(cmd.confirm);
+}
+
+test "buildRequest carries caller and confirm" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .action,
+        .id = "id-1",
+        .action = "close",
+        .caller = "readonly-external",
+        .confirm = true,
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try testing.expectEqualStrings("readonly-external", params.get("caller").?.string);
+    try testing.expectEqual(true, params.get("confirm").?.bool);
+}
+
+test "parseCommand policy check with capability and source" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "policy check --as readonly-external --capability tabs:close --id ID-7",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"policy-check");
+    try testing.expectEqualStrings("policy.check", cmd.method());
+    try testing.expectEqualStrings("readonly-external", cmd.caller.?);
+    try testing.expectEqualStrings("tabs:close", cmd.capability.?);
+    try testing.expectEqualStrings("ID-7", cmd.id.?);
+}
+
+test "buildRequest policy check includes capability" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .group = .policy,
+        .verb = .@"policy-check",
+        .caller = "trusted-automation",
+        .capability = "output:read",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("policy.check", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("trusted-automation", params.get("caller").?.string);
+    try testing.expectEqualStrings("output:read", params.get("capability").?.string);
+}
+
+test "parseCommand policy with unknown verb errors" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "policy frobnicate");
+    defer iter.deinit();
+    try testing.expectError(error.UnknownVerb, parseCommand(alloc, &iter));
+}
+
+test "firstLineIsError distinguishes error envelopes from stream messages" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // Error response envelopes (a rejected watch startup).
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"unauthorized\"}}"));
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"not_found\"}}"));
+    try testing.expect(firstLineIsError(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}\n"));
+    // A successful watch opens with a stream message (no `ok` field).
+    try testing.expect(!firstLineIsError(a, "{\"type\":\"snapshot\",\"lifecycle\":\"running\"}"));
+    // A success envelope is not an error, and neither is garbage.
+    try testing.expect(!firstLineIsError(a, "{\"ok\":true,\"result\":{}}"));
+    try testing.expect(!firstLineIsError(a, "not json"));
+}
+
+test "exitCode maps watch startup error responses" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    // A denied/bad watch startup must map to the same stable codes as a
+    // single-shot request, not exit 0.
+    try testing.expectEqual(
+        @as(u8, 1),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"unauthorized\"}}", .watch),
+    );
+    try testing.expectEqual(
+        @as(u8, 3),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"not_found\"}}", .watch),
+    );
+    try testing.expectEqual(
+        @as(u8, 6),
+        exitCode(a, "{\"ok\":false,\"error\":{\"code\":\"confirmation_required\"}}", .watch),
     );
 }

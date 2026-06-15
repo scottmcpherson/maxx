@@ -1349,6 +1349,76 @@ struct ControlSessionRegistryTests {
         let declared = after.compactMap { $0.event }.filter { $0.sourceKind == "agent" }
         #expect(declared.contains { $0.name == "ci.passed" })
     }
+
+    // MARK: - Capability policy gating of the MAX-7 surface (MAX-11 integration)
+
+    @Test func streamWatchAllowedForReadonlyExternalSource() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        // Observing the stream is `tabs:list`, which `readonly-external` is
+        // allowlisted for — so a watch under that source begins normally.
+        let (_, messages) = try registry.beginStreamWatch(
+            .init(id: id, caller: "readonly-external"), host: host)
+        #expect(messages.first?.type == "hello")
+    }
+
+    @Test func streamWaitDeniedForUnknownSource() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        _ = makeGroupedSession(registry, host, group: "g")
+        // An unknown source is denied by default — before the stream even begins.
+        #expect(throws: ControlError.self) {
+            _ = try registry.beginStreamWait(.init(group: "g", all: "exited", caller: "ghost"), host: host)
+        }
+    }
+
+    @Test func setGroupDeniedForExternalSource() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        // `set-group` needs `groups:create`; an external source without it is
+        // denied (external callers cannot mutate by default).
+        let response = registry.handle(
+            request(.sessionsSetGroup, .init(id: id, group: "release", caller: "readonly-external")),
+            host: host)
+        #expect(response.error?.code == "unauthorized")
+    }
+
+    @Test func setGroupAllowedForDefaultLocalSource() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        // The trusted first-party local source (no `--as`) holds every
+        // implemented capability, including `groups:create`.
+        let response = registry.handle(
+            request(.sessionsSetGroup, .init(id: id, group: "release")), host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.group == "release")
+    }
+
+    @Test func createWithGroupRequiresGroupsCapability() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        // `trusted-automation` may `tabs:spawn` but not `groups:create`, so
+        // `create --group` is denied — and no surface is spawned.
+        let response = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", group: "release", caller: "trusted-automation")),
+            host: host)
+        #expect(response.error?.code == "unauthorized")
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func createWithoutGroupAllowedForTabsSpawnSource() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        // The same source may still spawn a plain (ungrouped) tab.
+        let response = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", caller: "trusted-automation")),
+            host: host)
+        #expect(response.ok)
+        #expect(host.createdRequests.count == 1)
+    }
 }
 
 @MainActor

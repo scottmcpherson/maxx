@@ -155,6 +155,64 @@ struct TerminalAgentActivityTests {
         #expect(reducer.expireRunningState(now: start.addingTimeInterval(TerminalAgentActivityReducer.runningTTL)) == .idle)
     }
 
+    // MARK: - No-inference guardrails (MAX-12)
+    //
+    // The reducer maps only declared hook events / state values; it must never
+    // derive workflow truth from prose, PR URLs, branch/path names, or elapsed
+    // time. See docs/no-inference.md.
+
+    @Test func unrecognizedEventInfersNoState() throws {
+        var reducer = TerminalAgentActivityReducer()
+        // A hook event whose name is not in the declared vocabulary — including
+        // completion-sounding words and PR/branch-like strings — yields no
+        // transition and leaves the reducer in its neutral idle baseline.
+        for name in ["done", "tests-passed", "completed", "ready-for-review",
+                     "https://github.com/x/y/pull/7", "agent/max-12-complete"] {
+            #expect(reducer.apply(event(name, state: nil)) == nil)
+            #expect(reducer.state == .idle)
+        }
+    }
+
+    @Test func proseFieldsNeverProduceState() throws {
+        var reducer = TerminalAgentActivityReducer()
+        // Even when human-facing text fields carry completion prose, the state
+        // comes only from the declared `event` / `state`. An unrecognized event
+        // with a "tests passed / PR ready" title must not light any indicator.
+        let prosey = TerminalAgentActivityEvent(
+            surfaceID: "surface-1",
+            agent: "claude",
+            event: "log",
+            state: nil,
+            statusTitle: "All tests passed — PR ready for review",
+            promptTitle: "done: shipped https://github.com/x/y/pull/9")
+        #expect(reducer.apply(prosey, expectedSurfaceID: "surface-1") == nil)
+        #expect(reducer.state == .idle)
+    }
+
+    @Test func declaredStateStillRendersUnderGuardrails() throws {
+        // Positive control: an explicit declared `state` of "complete" maps to
+        // the supported activity vocabulary (there is no "complete" activity
+        // state, so "running" is the representative positive case). Explicit
+        // declarations are the only thing that ever drives the indicator.
+        var reducer = TerminalAgentActivityReducer()
+        #expect(reducer.apply(event("status", state: "running")) == .running(agent: "claude"))
+        #expect(reducer.apply(event("status", state: "error")) == .error(agent: "claude"))
+    }
+
+    @Test func elapsedTimeOnlyEverYieldsIdleNeverCompletion() throws {
+        // Idle time is never a proxy for completion: the only time-based
+        // transition is the stale-running safety bound, and it can only return
+        // idle — never a completion/success claim.
+        var reducer = TerminalAgentActivityReducer()
+        let start = Date()
+        #expect(reducer.apply(event("prompt-submit", state: "running"), now: start) == .running(agent: "claude"))
+        let expired = reducer.expireRunningState(now: start.addingTimeInterval(TerminalAgentActivityReducer.runningTTL))
+        #expect(expired == .idle)
+        // Repeated expiry from idle is a no-op; time alone produces no new state.
+        #expect(reducer.expireRunningState(now: start.addingTimeInterval(TerminalAgentActivityReducer.runningTTL * 10)) == nil)
+        #expect(reducer.state == .idle)
+    }
+
     @Test func sidebarIndicatorPrecedence() {
         #expect(TerminalSidebarStatusIndicatorState.derive(
             from: [.needsInput(agent: "codex"), .running(agent: "claude")],

@@ -2,8 +2,13 @@ import Foundation
 
 // The lifecycle event/state model layered on top of the MAX-1 control API.
 //
+// This model is one instance of Maxx's no-inference rule: it shows mechanical
+// facts and agent-declared facts, never workflow truth Maxx derived itself. See
+// docs/no-inference.md for the canonical rule and docs/control-api.md for the
+// API.
+//
 // Two kinds of facts flow through this model, and the type names keep the
-// boundary explicit (see docs/control-api.md):
+// boundary explicit:
 //
 //   * Agent-declared semantic facts — states, events, and metadata an agent or
 //     orchestrator explicitly declares through the API. Maxx stores and replays
@@ -36,7 +41,7 @@ enum ControlEventKind: String, Codable {
     /// load-bearing ownership boundary the global event stream exposes as
     /// `source_kind` so a supervisor never has to guess whether Maxx originated a
     /// fact or merely recorded an agent's declaration.
-    var sourceKind: ControlSourceKind {
+    var sourceKind: ControlEventOwner {
         switch self {
         case .lifecycle: return .maxx
         case .state, .event, .metadata, .workflowState, .summary: return .agent
@@ -45,9 +50,11 @@ enum ControlEventKind: String, Codable {
 }
 
 /// Ownership of an event in the structured stream: a Maxx-owned mechanical
-/// runtime fact, or a fact an agent declared. Kept explicit in the envelope so
-/// supervisors can trust the boundary without inspecting the event name.
-enum ControlSourceKind: String, Codable {
+/// runtime fact, or a fact an agent declared. Kept explicit in the envelope
+/// (`source_kind`) so supervisors can trust the boundary without inspecting the
+/// event name. Distinct from ``ControlSourceKind`` (MAX-11), which classifies the
+/// *caller* of a request for capability policy, not the owner of an event.
+enum ControlEventOwner: String, Codable {
     case maxx
     case agent
 }
@@ -131,7 +138,7 @@ struct ControlBusEvent {
     let kind: ControlEventKind
     let name: String
     let source: String
-    let sourceKind: ControlSourceKind
+    let sourceKind: ControlEventOwner
     let message: String?
     let payload: ControlJSONValue?
     let createdAt: Date

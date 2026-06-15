@@ -251,6 +251,15 @@ fn stringField(object: JsonObject, names: []const []const u8) ?[]const u8 {
     return null;
 }
 
+/// Map an explicit, agent-declared hook event name to a normalized status.
+///
+/// This is the no-inference rule on the hook path (see docs/no-inference.md):
+/// the input is the *event name* the agent CLI fires for one of its own hooks
+/// (and, for `pre-tool-use`, the structured `tool_name` from the hook payload),
+/// never terminal output or agent prose. Only the closed vocabulary below is
+/// recognized; any other string returns null so the helper emits no state
+/// rather than guessing one. Do not add fuzzy/substring matching of free text
+/// here — that would turn a declared signal into an inferred one.
 fn normalizeState(event_name: []const u8, tool_name: ?[]const u8) ?NormalizedState {
     if (eventNameMatches(event_name, "pre-tool-use")) {
         if (tool_name) |tool| {
@@ -998,6 +1007,27 @@ test "agent hook state normalization" {
     try std.testing.expectEqual(NormalizedState.idle, normalizeState("SessionEnd", null).?);
     try std.testing.expectEqual(NormalizedState.errored, normalizeState("failure", null).?);
     try std.testing.expectEqual(NormalizedState.needs_input, normalizeState("pre-tool-use", "AskUserQuestion").?);
+}
+
+// No-inference negative fixtures (see docs/no-inference.md): only the closed
+// vocabulary of declared hook event names maps to a state. Arbitrary text that
+// looks meaningful — agent prose, completion words, PR URLs, branch/worktree
+// names, command names — must normalize to no state, so the helper can never
+// manufacture workflow truth from incidental strings.
+test "agent hook state normalization infers nothing from prose or names" {
+    // Prose / completion words an agent might print are not hook events.
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("done", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("tests passed", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("completed", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("ready for review", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("all green, blocked on nothing", null));
+    // PR URLs and branch / worktree / path-like strings are not state.
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("https://github.com/x/y/pull/123", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("agent/max-12-done", null));
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("/Users/x/worktrees/complete", null));
+    // A tool name only matters for the declared `pre-tool-use` event; it is not
+    // itself a state-bearing signal.
+    try std.testing.expectEqual(@as(?NormalizedState, null), normalizeState("tests passed", "Bash"));
 }
 
 test "append line frames writes with a trailing newline" {

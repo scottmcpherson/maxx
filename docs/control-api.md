@@ -38,6 +38,14 @@ metadata. The only Maxx-owned lifecycle signal is derived from explicit session
 state — whether the surface still exists and whether its child process has
 exited (a kernel-reported fact) — never from terminal contents.
 
+Put another way, Maxx shows only **mechanical facts** (things it owns or
+observes as a terminal runtime) and **agent-declared facts** (workflow meaning
+declared through an explicit API call, hook event, or metadata field). It never
+derives **workflow truth** — _complete_, _blocked_, _tests passed_, _PR created_
+— from incidental signals. This is the no-inference rule; the canonical
+statement, the allowed/prohibited sources, and the tests that lock it down live
+in [`no-inference.md`](no-inference.md).
+
 ## Transport & trust boundary
 
 - **Unix domain socket**, created by the running Maxx app at
@@ -51,6 +59,81 @@ exited (a kernel-reported fact) — never from terminal contents.
 - **Wire protocol**: newline-delimited JSON. Connect, write one request object
   followed by a newline (or half-close the write side), and read one response
   object terminated by a newline.
+
+## Capability policy
+
+On top of the token gate, every request is evaluated against a typed
+**capability policy** before any side effect runs. A request resolves to a
+caller **source** and a requested **capability**; the policy returns **allow**,
+**deny**, or **confirm**.
+
+- **Capabilities** are typed values with stable names: `tabs:list`, `tabs:spawn`,
+  `tabs:restart`, `tabs:focus`, `tabs:close`, `input:send`, `keys:press`,
+  `state:set`, `metadata:set`, `groups:create`, plus `output:read`, `groups:list`,
+  and `automation:trigger`. The last three are part of the model but have no
+  method behind them yet, so they are reported **unavailable** and always denied
+  (`output:read` is additionally privacy-sensitive and requires an explicit
+  opt-in even once a readback subsystem exists). `groups:create` became
+  implemented with the structured event stream (MAX-7).
+- **Sources** have a `kind` (`local`, `external`, `webhook`, `token`) and an
+  allowlist (`allow`) plus a confirm-list (`confirm`). A request names its source
+  with `--as <source>` (wire field `caller`); when omitted it is attributed to
+  the trusted first-party local source — the capability token already proves a
+  same-user local caller.
+- **Safe defaults**: unknown sources are denied; external/webhook/token sources
+  cannot mutate terminal state unless a capability is explicitly allowlisted;
+  output/captured-line reads require explicit opt-in; an unlisted _mutation_ by a
+  local source defaults to **confirm**.
+
+Decisions are **no-inference**: they depend only on the explicit caller,
+capability, and target — never on terminal output, captured lines, process
+names, branch names, paths, or idle time.
+
+### Built-in sources
+
+| Source                | Kind     | May…                                           |
+| --------------------- | -------- | ---------------------------------------------- |
+| `local-cli` (default) | local    | every implemented capability, no confirmation. |
+| `local-prompt`        | local    | read freely; **confirm** every mutation.       |
+| `trusted-automation`  | webhook  | `tabs:spawn` and `state:set` only.             |
+| `readonly-external`   | external | `tabs:list` only; no mutation, no output read. |
+
+These built-ins are all subsets of `local-cli`, so claiming one via `--as` only
+_reduces_ a caller's privileges. Credential-bound external/webhook sources that
+are _more_ privileged than the default — and the secure key storage and rotation
+they require — are explicit follow-up work.
+
+### Confirmation
+
+When the policy returns **confirm**, the response is `ok:false` with code
+`confirmation_required` and a human-readable prompt that names the source, the
+requested action, the target, and the consequence. Re-send the request with
+`--confirm` (wire field `confirm: true`) to approve it. A source configured with
+`once_per_source` is prompted only on its first use of a capability for the
+lifetime of the app/control session.
+
+### Diagnostics
+
+`policy check` evaluates a `(source, capability, target)` and reports the
+decision **without performing any action** — useful for debugging an
+integration's permissions:
+
+```bash
+maxx +control policy check --as readonly-external --capability tabs:close
+maxx +control policy check --as readonly-external --capability output:read
+maxx +control policy check --capability tabs:spawn   # the default local source
+```
+
+Every allow/deny/confirm decision (including `policy check`) is written to the
+unified log under the `ControlPolicy` category with the source, capability,
+target, and reason — never the request params.
+
+> Metadata-write enforcement is intentionally deferred until the metadata API
+> rework (MAX-4): a metadata-only `sessions.update` and `sessions.set-metadata`
+> are currently ungated by the capability policy. A `sessions.update` that sets
+> `status` **is** gated by `state:set` (status is the same state field
+> `declare-state` writes and `wait --state` matches), so that path is not a way
+> around `state:set`.
 
 ## CLI
 
@@ -153,6 +236,14 @@ maxx +control stream wait --group release --all declared:complete
 maxx +control event emit --session <session_id> --type declared.status --json '{"step":3,"of":7}'
 ```
 
+All of these are subject to the capability policy above: `stream watch` /
+`stream wait` are gated by `tabs:list` (the same read capability as observing
+sessions), enforced before the long-lived stream begins; `sessions set-group`
+and `sessions create --group` are gated by `groups:create` (a `create --group`
+needs both `tabs:spawn` and `groups:create`); and `event emit` is gated by
+`state:set` like the other declaration verbs. A `--as <source>` / `--confirm`
+applies to these exactly as to any other request.
+
 `stream watch` first prints a `hello` line carrying the current `cursor` and the
 envelope `schema`, then one `{"type":"event","event":{…}}` line per matching
 event, and a final `{"type":"end"}` when a single-session filter's session ends
@@ -186,6 +277,7 @@ branch on them:
 | `3`  | Missing target — no session with that id (`not_found`).           |
 | `4`  | `wait` target ended (session became terminal) before matching.    |
 | `5`  | Unsupported operation for this session (e.g. nothing to restart). |
+| `6`  | Confirmation required — re-send with `--confirm` to approve.      |
 
 `wait` blocks until its condition holds, then prints a single response whose
 `result.outcome` is `matched`, `timeout`, or `ended`. `watch` streams one JSON
@@ -202,26 +294,27 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                   | REST equivalent                                | Purpose                                                      |
-| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------ |
-| `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                   |
-| `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                |
-| `sessions.list`          | `GET /control/v1/sessions`                     | List API-created sessions.                                   |
-| `sessions.update`        | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only.                |
-| `sessions.action`        | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`. |
-| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.   |
-| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).          |
-| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                        |
-| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.     |
-| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).     |
-| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                  |
-| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.        |
-| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                    |
-| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.       |
-| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.  |
-| `sessions.set-group`     | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).    |
-| `stream.watch`           | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).   |
-| `stream.wait`            | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.           |
+| Method                   | REST equivalent                                | Purpose                                                                             |
+| ------------------------ | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
+| `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
+| `sessions.list`          | `GET /control/v1/sessions`                     | List API-created sessions.                                                          |
+| `sessions.update`        | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only.                                       |
+| `sessions.action`        | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
+| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
+| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
+| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
+| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
+| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
+| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
+| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
+| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                                           |
+| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
+| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-group`     | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
+| `stream.watch`           | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
+| `stream.wait`            | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
+| `policy.check`           | `GET /control/v1/policy/check`                 | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
 
 ### Audit entries
 
@@ -284,15 +377,16 @@ Errors are predictable and documented:
 }
 ```
 
-| Code                 | Meaning                                                                |
-| -------------------- | ---------------------------------------------------------------------- |
-| `invalid_request`    | Malformed input, bad limits, or a disallowed update field.             |
-| `unauthorized`       | Missing or wrong capability token.                                     |
-| `not_found`          | No API-created session with that id.                                   |
-| `already_ended`      | The session was canceled or its surface no longer exists.              |
-| `unsupported_action` | Unknown action name.                                                   |
-| `unsupported`        | Operation not supported for this session (e.g. no command to restart). |
-| `internal`           | Unexpected server-side failure.                                        |
+| Code                    | Meaning                                                                   |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `invalid_request`       | Malformed input, bad limits, or a disallowed update field.                |
+| `unauthorized`          | Missing/wrong token, or the policy denied this capability for the source. |
+| `confirmation_required` | The policy requires confirmation; re-send with `confirm: true`.           |
+| `not_found`             | No API-created session with that id.                                      |
+| `already_ended`         | The session was canceled or its surface no longer exists.                 |
+| `unsupported_action`    | Unknown action name.                                                      |
+| `unsupported`           | Operation not supported for this session (e.g. no command to restart).    |
+| `internal`              | Unexpected server-side failure.                                           |
 
 ## Identifiers & ownership
 
