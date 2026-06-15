@@ -127,7 +127,7 @@ struct ControlSessionPersistenceTests {
         let url = tempStoreURL()
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let padding = String(repeating: "a", count: ControlSessionStore.maxFileBytes + 1)
+        let padding = String(repeating: "a", count: ControlSessionStore.defaultMaxFileBytes + 1)
         let json = "{\"version\":1,\"sessions\":[],\"_pad\":\"\(padding)\"}"
         try Data(json.utf8).write(to: url)
         let store = ControlSessionStore(fileURL: url)
@@ -247,6 +247,53 @@ struct ControlSessionPersistenceTests {
         let loaded = store.load(now: now)
         #expect(loaded.count == 1)
         #expect(loaded.first?.id == keep.id)
+    }
+
+    @Test func persistedAuditLogIsBoundedPerSession() {
+        // A chatty session's audit log is otherwise append-only and unbounded; the
+        // persisted copy must keep only the most recent events so the file cannot
+        // grow past the read cap (which would make the next launch reject it).
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = ControlSessionStore(
+            fileURL: url,
+            retention: ControlRetentionPolicy(
+                maxRecords: 100, maxAge: 1_000_000, maxEventsPerSession: 3))
+
+        var session = makeSession(at: now)
+        for i in 0..<10 {
+            session.appendEvent(
+                kind: .event, name: "emit", source: "agent",
+                message: "m\(i)", payload: nil, createdAt: now, pid: nil)
+        }
+        store.save([session], now: now)
+
+        let restored = store.load(now: now).first
+        // Only the newest 3 are kept, and sequencing stays intact for the next run.
+        #expect(restored?.events.map(\.seq) == [7, 8, 9])
+        #expect(restored?.nextSeq == 10)
+    }
+
+    @Test func saveSkipsWritingAFileTheNextLaunchWouldReject() {
+        // The save-side guard mirrors the read-side cap: if the encoded snapshot
+        // would exceed maxFileBytes, the existing readable file is preserved rather
+        // than replaced with one load() would reject (which would lose every
+        // record). A tiny injected cap exercises this without allocating 16 MiB.
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // First, a normal-capped store writes a good registry.
+        let good = ControlSessionStore(fileURL: url)
+        good.save([makeSession(at: now)], now: now)
+        #expect(good.load(now: now).count == 1)
+
+        // Now a store with an absurdly small cap tries to overwrite with a snapshot
+        // that encodes well beyond it.
+        let tiny = ControlSessionStore(fileURL: url, maxFileBytes: 50)
+        tiny.save([makeSession(at: now), makeSession(at: now)], now: now)
+
+        // The previous good file is intact — not clobbered by an unreadable write.
+        #expect(good.load(now: now).count == 1)
     }
 
     // MARK: - Registry rehydration (simulated restart)

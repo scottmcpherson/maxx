@@ -631,7 +631,13 @@ a record older than 14 days (by `max(updated_at, last_seen_at)`) is dropped, but
 a record that may still be live (last-observed lifecycle `running`/`exited`) is
 never aged out, since its `last_seen_at` can lag during a long idle stretch and
 dropping it would lose a still-existing tab's record. A count cap (newest 500) is
-a hard backstop applied to everything. The same policy runs on save and on load.
+a hard backstop applied to everything, and each record's persisted audit log is
+bounded to its most recent events (newest 1000) so one chatty session cannot grow
+the file past the read cap. The same policy runs on save and on load. As a final
+guard, a save whose encoded size would still exceed the read cap is skipped — the
+last readable file is preserved rather than replaced with one the next launch
+would reject (a logged persistence stall, never silent data loss). The live
+in-memory audit log is never trimmed; only the on-disk copy is bounded.
 
 **No inference on load.** Rehydration replays exactly what was stored and nothing
 more. A record whose mechanical fields (command, cwd, title) happen to read like

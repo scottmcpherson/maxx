@@ -73,16 +73,27 @@ private struct FailableDecodable<T: Decodable>: Decodable {
 /// is never aged out, because its `lastSeenAt` can lag arbitrarily during a long
 /// idle stretch with no `reconcile`, and dropping it would lose a still-existing
 /// tab's record across a restart. The **count** cap (`maxRecords`) is a hard
-/// backstop applied to everything, newest-first. Applied identically on save and
-/// on load, so the policy is the single source of truth.
+/// backstop applied to everything, newest-first. The **per-session event** cap
+/// (`maxEventsPerSession`) bounds each record's persisted audit log so a chatty
+/// session cannot grow the file past the read limit. Applied identically on save
+/// and on load, so the policy is the single source of truth.
 struct ControlRetentionPolicy {
     var maxRecords: Int
     var maxAge: TimeInterval
+    /// Cap on the audit events persisted per session. The per-session `events` log
+    /// is append-only and otherwise unbounded, so one chatty session (e.g. repeated
+    /// `emit-event` with payloads) could push the encoded registry past
+    /// ``ControlSessionStore/maxFileBytes`` — after which `loadResult` rejects the
+    /// whole file and every record is lost. We persist only the most recent events
+    /// per session; older entries age out the same way the in-memory bus evicts.
+    /// Declared with a default so existing call sites stay source-compatible. The
+    /// live in-memory log is never touched — only the on-disk copy is bounded.
+    var maxEventsPerSession: Int = 1000
 
     /// 14 days / 500 records: generous enough that a normal week of work is never
     /// lost across restarts, bounded enough that the file stays small.
     static let `default` = ControlRetentionPolicy(
-        maxRecords: 500, maxAge: 60 * 60 * 24 * 14)
+        maxRecords: 500, maxAge: 60 * 60 * 24 * 14, maxEventsPerSession: 1000)
 
     private func recency(_ session: ControlSession) -> Date {
         max(session.updatedAt, session.lastSeenAt ?? session.updatedAt)
@@ -103,7 +114,8 @@ struct ControlRetentionPolicy {
         }
     }
 
-    /// Apply the policy, returning the retained records sorted newest-first.
+    /// Apply the policy, returning the retained records sorted newest-first with
+    /// each record's persisted audit log bounded to the most recent events.
     func apply(to sessions: [ControlSession], now: Date) -> [ControlSession] {
         let cutoff = now.addingTimeInterval(-maxAge)
         return sessions
@@ -112,7 +124,18 @@ struct ControlRetentionPolicy {
             .filter { !isTerminal($0) || recency($0) >= cutoff }
             .sorted { recency($0) > recency($1) }
             .prefix(maxRecords)
-            .map { $0 }
+            .map { trimmingEvents($0) }
+    }
+
+    /// Keep only the most recent `maxEventsPerSession` audit events on the persisted
+    /// copy of a record. `suffix` keeps the newest, so `nextSeq` / `lastSeq` stay
+    /// consistent and sequencing continues monotonically after a restart. Returns
+    /// the record unchanged when it is already within the cap.
+    private func trimmingEvents(_ session: ControlSession) -> ControlSession {
+        guard session.events.count > maxEventsPerSession else { return session }
+        var copy = session
+        copy.events = Array(session.events.suffix(maxEventsPerSession))
+        return copy
     }
 }
 
@@ -127,13 +150,18 @@ struct ControlSessionStore {
     let fileURL: URL
     var retention: ControlRetentionPolicy = .default
 
-    /// Hard ceiling on the registry file we will read into memory at launch.
-    /// Retention bounds the registry to 500 records, each modest in size, so a
+    /// Default hard ceiling on the registry file. Retention bounds the registry to
+    /// 500 records with per-session event caps, each modest in size, so a
     /// legitimate file is far smaller than this; the cap exists only so a corrupt
     /// or oversized file cannot exhaust memory when decoded. Defense in depth: the
     /// caller validates the control directory as ours and `0700` before reading,
     /// so an attacker cannot plant the file in the first place.
-    static let maxFileBytes = 16 * 1024 * 1024  // 16 MiB
+    static let defaultMaxFileBytes = 16 * 1024 * 1024  // 16 MiB
+
+    /// The effective ceiling. The read refuses a larger file and the write skips
+    /// producing one, so the two stay symmetric. Injectable so tests can exercise
+    /// the bound without allocating 16 MiB.
+    var maxFileBytes: Int = ControlSessionStore.defaultMaxFileBytes
 
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.scottmcpherson.maxx",
@@ -183,9 +211,9 @@ struct ControlSessionStore {
         // validated as ours and private before this runs, so the file is one we
         // wrote — an oversized one means corruption, not an attacker (overwritable).
         if let size = (try? FileManager.default.attributesOfItem(
-            atPath: fileURL.path))?[.size] as? Int, size > Self.maxFileBytes {
+            atPath: fileURL.path))?[.size] as? Int, size > maxFileBytes {
             Self.logger.error(
-                "ignoring oversized session registry (\(size) bytes > \(Self.maxFileBytes)) at \(fileURL.path, privacy: .public)")
+                "ignoring oversized session registry (\(size) bytes > \(maxFileBytes)) at \(fileURL.path, privacy: .public)")
             return LoadResult(sessions: [], preserveExistingFile: false)
         }
         guard let data = try? Data(contentsOf: fileURL) else {
@@ -242,6 +270,17 @@ struct ControlSessionStore {
         do {
             try ensureDirectory()
             let data = try Self.makeEncoder().encode(snapshot)
+            // Never write a file the next launch would refuse: `loadResult` rejects
+            // anything over `maxFileBytes`, so overwriting with an oversized blob
+            // would silently lose every persisted record. Per-session event capping
+            // keeps the common case far below this; if a pathological payload still
+            // blows the budget, preserve the last readable file rather than replace
+            // it with an unreadable one (a logged persistence stall, not data loss).
+            guard data.count <= maxFileBytes else {
+                Self.logger.error(
+                    "session registry encodes to \(data.count) bytes (> \(maxFileBytes)); preserving the previous file instead of writing one the next launch would reject")
+                return
+            }
             try data.write(to: fileURL, options: [.atomic])
             // Tighten perms: the atomic write inherits the umask, so re-assert
             // owner-only access for a file that can hold agent-declared metadata.
