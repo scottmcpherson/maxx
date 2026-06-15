@@ -157,6 +157,15 @@ struct ControlSessionStore {
         var preserveExistingFile: Bool
     }
 
+    /// A minimal envelope decoded BEFORE the full snapshot, so the schema version
+    /// is read independently of the (version-specific) `sessions` payload. A newer
+    /// build may change the shape of `sessions` itself; reading `version` first
+    /// lets us recognize such a file as "newer, preserve" rather than failing the
+    /// whole decode and misclassifying it as corrupt-and-overwritable.
+    private struct VersionEnvelope: Decodable {
+        let version: Int
+    }
+
     /// Load the persisted sessions with retention applied, reporting whether the
     /// existing file must be preserved. Pure w.r.t. the registry: it returns
     /// records for the caller to rehydrate and never touches live surfaces.
@@ -164,22 +173,36 @@ struct ControlSessionStore {
         guard let data = try? Data(contentsOf: fileURL) else {
             return LoadResult(sessions: [], preserveExistingFile: false)  // First run.
         }
-        let snapshot: ControlRegistrySnapshot
-        do {
-            snapshot = try Self.makeDecoder().decode(ControlRegistrySnapshot.self, from: data)
-        } catch {
-            // Corrupt/garbage file: safe to start fresh and overwrite.
+        let decoder = Self.makeDecoder()
+
+        // Read the version first. If even that is unreadable, the file is genuine
+        // garbage (not a recognizable registry) — safe to start fresh and let the
+        // next write overwrite it; a single bad byte must not disable persistence
+        // forever.
+        guard let envelope = try? decoder.decode(VersionEnvelope.self, from: data) else {
             Self.logger.error(
-                "ignoring unreadable session registry at \(fileURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
+                "ignoring unreadable session registry at \(fileURL.path, privacy: .public)")
             return LoadResult(sessions: [], preserveExistingFile: false)
         }
-        guard snapshot.version <= ControlRegistrySnapshot.currentVersion else {
-            // A file from a newer build whose schema we do not understand: refuse
-            // to read it AND preserve it, so a downgrade run does not destroy the
-            // newer build's data on its next write. The newer build reads it again.
+
+        guard envelope.version <= ControlRegistrySnapshot.currentVersion else {
+            // A file from a newer build whose schema we do not understand — decided
+            // from `version` alone, regardless of whether we can parse `sessions`.
+            // Refuse to read it AND preserve it, so a downgrade run does not destroy
+            // the newer build's data on its next write. The newer build reads it
+            // again.
             Self.logger.error(
-                "preserving session registry with unsupported version \(snapshot.version) (this build understands up to \(ControlRegistrySnapshot.currentVersion)); persistence disabled for this run")
+                "preserving session registry with unsupported version \(envelope.version) (this build understands up to \(ControlRegistrySnapshot.currentVersion)); persistence disabled for this run")
             return LoadResult(sessions: [], preserveExistingFile: true)
+        }
+
+        // Version is supported: now decode the body (lenient per-record). A failure
+        // here is a corrupt body of a known version — start fresh; overwriting is
+        // safe because no newer build owns this file.
+        guard let snapshot = try? decoder.decode(ControlRegistrySnapshot.self, from: data) else {
+            Self.logger.error(
+                "ignoring unreadable session registry body at \(fileURL.path, privacy: .public)")
+            return LoadResult(sessions: [], preserveExistingFile: false)
         }
         return LoadResult(
             sessions: retention.apply(to: snapshot.sessions, now: now),

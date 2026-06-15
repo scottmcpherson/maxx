@@ -604,4 +604,37 @@ struct ControlSessionPersistenceTests {
         #expect(parsed?["version"] as? Int == 999)
         #expect((parsed?["sessions"] as? [Any])?.isEmpty == true)
     }
+
+    @Test func loadPreservesNewerFileEvenWhenSessionsShapeIsUnparsable() throws {
+        // A newer build may also change the *shape* of `sessions` (here an object
+        // instead of an array). The version is read before the body, so this is
+        // still recognized as newer-and-preserved rather than misread as corrupt.
+        let url = tempStoreURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{ \"version\": 999, \"sessions\": { \"unexpected\": \"shape\" } }".utf8).write(to: url)
+
+        let result = ControlSessionStore(fileURL: url).loadResult(now: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(result.sessions.isEmpty)
+        #expect(result.preserveExistingFile == true)
+    }
+
+    @Test func newerVersionWithIncompatibleSessionsShapeSurvivesMutation() throws {
+        let url = tempStoreURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = "{ \"version\": 999, \"sessions\": { \"unexpected\": \"shape\" } }"
+        try Data(original.utf8).write(to: url)
+
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: url, clock: clock)
+        #expect(registry.count == 0)
+        _ = registry.handle(request(.sessionsCreate, .init()), host: host)
+
+        let after = try Data(contentsOf: url)
+        let parsed = try JSONSerialization.jsonObject(with: after) as? [String: Any]
+        #expect(parsed?["version"] as? Int == 999)
+        // The original object-shaped `sessions` payload is untouched.
+        #expect(parsed?["sessions"] is [String: Any])
+    }
 }
