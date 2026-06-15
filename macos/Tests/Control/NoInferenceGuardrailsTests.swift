@@ -45,7 +45,7 @@ struct NoInferenceGuardrailsTests {
         let created = registry.handle(
             request(.sessionsCreate, .init(
                 title: title, cwd: cwd, command: command,
-                metadata: metadata, status: status)),
+                metadata: metadata?.mapValues { .string($0) }, status: status)),
             host: host)
         return (created.result!.session!.sessionID, surfaceID)
     }
@@ -87,7 +87,7 @@ struct NoInferenceGuardrailsTests {
         // Mechanical facts are still shown verbatim (no semantic embellishment).
         #expect(session.lifecycle == "running")
         #expect(session.status == "tests passed")
-        #expect(session.metadata["pr_url"] == "https://github.com/x/y/pull/42")
+        #expect(session.metadata["pr_url"] == .string("https://github.com/x/y/pull/42"))
     }
 
     @Test func freeFormDeclareStateDoesNotFeedDisplayedWorkflowState() {
@@ -136,7 +136,7 @@ struct NoInferenceGuardrailsTests {
         #expect(session.summary == nil)
         // The cwd and metadata are displayed as the mechanical facts they are.
         #expect(session.cwd == "/Users/dev/.worktrees/max-12-complete")
-        #expect(session.metadata["branch"] == "agent/max-12-done")
+        #expect(session.metadata["branch"] == .string("agent/max-12-done"))
     }
 
     // MARK: Idle time / process lifecycle

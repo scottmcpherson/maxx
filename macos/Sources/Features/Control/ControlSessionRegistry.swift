@@ -268,6 +268,18 @@ final class ControlSessionRegistry {
             merged.merge(validated) { _, new in new }
             session.metadata = try ControlValidation.validateMetadata(merged)
             metadataChanged = true
+
+            // Audit each provided key the same way `set-metadata` does, so a
+            // `watch`/`events` consumer observes update-driven metadata changes.
+            // `update` is a documented metadata-merge path; it must not be a
+            // silent, unobservable mutation.
+            let source = try ControlValidation.validateSource(params?.source)
+            let at = now()
+            let pid = host.surface(for: session.surfaceID)?.pid
+            for key in validated.keys.sorted() {
+                session.appendEvent(
+                    kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+            }
         }
 
         sessions[session.id] = session

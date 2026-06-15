@@ -528,7 +528,7 @@ struct ControlSessionRegistryTests {
         #expect(response.result?.event?.name == "pr.opened")
         #expect(response.result?.event?.kind == "event")
         #expect(response.result?.event?.source == "agent")
-        #expect(response.result?.event?.payload == .object(["pr": .number(123)]))
+        #expect(response.result?.event?.payload == .object(["pr": .integer(123)]))
     }
 
     @Test func emitEventRejectsInvalidPayload() {
@@ -580,13 +580,50 @@ struct ControlSessionRegistryTests {
         #expect(response.ok)
         #expect(response.result?.session?.metadata["run"] == .object([
             "id": .string("run_abc"),
-            "attempts": .array([.number(1), .number(2)]),
+            "attempts": .array([.integer(1), .integer(2)]),
         ]))
         // The structured value is also pushed to the surface for display.
         #expect(host.surfaces[surface]?.metadata?["run"] == .object([
             "id": .string("run_abc"),
-            "attempts": .array([.number(1), .number(2)]),
+            "attempts": .array([.integer(1), .integer(2)]),
         ]))
+    }
+
+    @Test func metadataPreservesLargeIntegerValues() {
+        // Regression: a >2^53 integer supplied via value_json must round-trip
+        // verbatim (not collapse to a lossy Double) through store + display.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(id: id, key: "run.id", valueJson: "9007199254740993")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata["run.id"] == .integer(9_007_199_254_740_993))
+        #expect(response.result?.session?.metadata["run.id"]?.displayString == "9007199254740993")
+    }
+
+    @Test func updateMetadataIsAuditedAndObservableViaWatch() throws {
+        // `update` is a documented metadata-merge path, so a metadata change made
+        // through it must be observable to a `watch`/`events` consumer — not just
+        // the single-key `set-metadata`.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let (plan, _) = try registry.beginWatch(.init(id: id), host: host)
+        let updated = registry.handle(
+            request(.sessionsUpdate, params(id: id, metadata: ["repo": "org/repo"])), host: host)
+        #expect(updated.ok)
+
+        // The active watch surfaces the change as a new metadata audit event.
+        let watch = registry.pollWatch(plan, host: host)
+        #expect(watch.messages.contains {
+            $0.type == "event" && $0.event?.kind == "metadata" && $0.event?.name == "repo"
+        })
+        // And it is in the audit log read back by `events`.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.contains { $0.kind == "metadata" && $0.name == "repo" } == true)
     }
 
     @Test func metadataRoundTripsUnknownKeysWithoutNormalization() {
@@ -1367,18 +1404,34 @@ struct ControlValidationTests {
 
 struct ControlJSONValueTests {
     @Test func parsesNestedJSON() throws {
-        let value = try ControlJSONValue.parse(#"{"a":[1,true,"x"],"b":null}"#)
+        // Integer literals decode to `.integer` (exact), non-integers to `.number`.
+        let value = try ControlJSONValue.parse(#"{"a":[1,true,"x"],"b":null,"c":1.5}"#)
         #expect(value == .object([
-            "a": .array([.number(1), .bool(true), .string("x")]),
+            "a": .array([.integer(1), .bool(true), .string("x")]),
             "b": .null,
+            "c": .number(1.5),
         ]))
     }
 
     @Test func roundTripsThroughCoding() throws {
-        let value = ControlJSONValue.object(["n": .number(42), "s": .string("hi")])
+        let value = ControlJSONValue.object(["n": .integer(42), "f": .number(1.5), "s": .string("hi")])
         let data = try JSONEncoder().encode(value)
         let decoded = try JSONDecoder().decode(ControlJSONValue.self, from: data)
         #expect(decoded == value)
+    }
+
+    @Test func parsesLargeIntegersWithoutPrecisionLoss() throws {
+        // 2^53 + 1 is the canonical value a Double cannot represent; it must
+        // survive parse → serialize byte-for-byte (regression for verbatim
+        // metadata corruption).
+        let value = try ControlJSONValue.parse("9007199254740993")
+        #expect(value == .integer(9_007_199_254_740_993))
+        #expect(value.serializedJSON == "9007199254740993")
+        #expect(value.displayString == "9007199254740993")
+        // Int64.max also round-trips.
+        let max = try ControlJSONValue.parse("9223372036854775807")
+        #expect(max == .integer(Int64.max))
+        #expect(max.serializedJSON == "9223372036854775807")
     }
 
     @Test func rejectsMalformedJSON() {

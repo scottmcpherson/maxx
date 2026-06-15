@@ -101,6 +101,11 @@ struct ControlStreamMessage: Codable {
 enum ControlJSONValue: Codable, Equatable {
     case null
     case bool(Bool)
+    /// A JSON integer that fits in `Int64`. Kept distinct from `number` so large
+    /// integers (external IDs, timestamps, run numbers) round-trip exactly — a
+    /// `Double` silently corrupts integers past 2^53, which would violate the
+    /// "metadata is stored/displayed/filtered verbatim" contract.
+    case integer(Int64)
     case number(Double)
     case string(String)
     case array([ControlJSONValue])
@@ -111,7 +116,13 @@ enum ControlJSONValue: Codable, Equatable {
         if container.decodeNil() {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
+            // Bool first: a JSON `true`/`false` is a `__NSCFBoolean` that would
+            // otherwise also decode as Int64(1)/Int64(0).
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            // Int64 before Double so integer literals keep full precision; a
+            // fractional or out-of-Int64-range number falls through to Double.
+            self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -132,6 +143,7 @@ enum ControlJSONValue: Codable, Equatable {
         switch self {
         case .null: try container.encodeNil()
         case let .bool(value): try container.encode(value)
+        case let .integer(value): try container.encode(value)
         case let .number(value): try container.encode(value)
         case let .string(value): try container.encode(value)
         case let .array(value): try container.encode(value)

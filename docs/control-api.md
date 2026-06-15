@@ -198,8 +198,9 @@ The `method` field mirrors the proposed REST shape:
 
 ### Audit entries
 
-`declare-state`, `emit-event`, the metadata verbs (`set-metadata` /
-`remove-metadata` / `clear-metadata`), `set-state`, and `set-summary` append to a
+`declare-state`, `emit-event`, the metadata mutations (`set-metadata` /
+`remove-metadata` / `clear-metadata`, and the metadata merge in `update`),
+`set-state`, and `set-summary` append to a
 per-session, append-only audit log. Each entry is fully auditable and
 carries a monotonic `seq`, a `kind` (`state` / `event` / `metadata` /
 `workflow-state` / `summary`, plus `lifecycle` for the `archive` / `restart`
@@ -295,7 +296,10 @@ Errors are predictable and documented:
 - `title` ≤ 256 chars, `status` ≤ 128 chars, `command` ≤ 4096 chars.
 - `metadata`: ≤ 32 keys; keys match `[A-Za-z0-9_.-]` and ≤ 64 chars; each value's
   serialized (compact JSON) size ≤ 2048 bytes and the whole map ≤ 16384 bytes.
-  Values may be any JSON (string, number, bool, null, array, object).
+  Values may be any JSON (string, number, bool, null, array, object). JSON
+  integers are preserved exactly across the full `Int64` range (so external ids,
+  timestamps, and run numbers never lose precision); fractional numbers use
+  IEEE-754 double precision.
 - `env`: ≤ 256 `KEY=VALUE` entries; keys match `[A-Za-z0-9_]`.
 - `summary` (`set-summary`) ≤ 1024 chars; `set-state` accepts only the fixed
   workflow vocabulary above.
@@ -334,10 +338,14 @@ Operations:
   compared as a string (a bare string compares as itself; other values as their
   compact JSON, e.g. `3`, `true`, `[1,2]`).
 
-Each set/remove/clear records a `metadata`-kind audit entry (a removal carries
-`message` `removed`, a clear uses `name` `*` with `message` `cleared`) and pushes
-the updated map to the live surface atomically, so the UI/filtering never observe
-a partially-applied change.
+Every post-create metadata mutation records a `metadata`-kind audit entry per
+affected key — `set-metadata`, the per-key merges from `update`,
+`remove-metadata` (each carries `message` `removed`), and `clear-metadata` (one
+entry, `name` `*`, `message` `cleared`) — so a `watch`/`events` consumer observes
+the change no matter which verb made it. (Metadata supplied at `create` time
+arrives in the `watch` snapshot instead.) Each mutation also pushes the updated
+map to the live surface atomically, so the UI/filtering never observe a
+partially-applied change.
 
 **Persistence.** Metadata is scoped to the **session record's lifetime** in the
 registry. It survives `archive` and `restart` (a restart keeps the stable
