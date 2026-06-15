@@ -1721,6 +1721,121 @@ struct ControlSessionRegistryTests {
         #expect(response.ok)
         #expect(host.createdRequests.count == 1)
     }
+
+    // MARK: - Connector launch glue (MAX-14)
+
+    /// Policy decision (MAX-14): create-time metadata rides under `tabs:spawn`,
+    /// not `metadata:set`. It is part of the atomic spawn request — an explicit
+    /// caller declaration captured as the tab is created — not the post-create
+    /// agent-metadata write surface (`set-metadata`/`update`) that `metadata:set`
+    /// gates. So a webhook source that may spawn but not set metadata can still
+    /// attach connector provenance at create time.
+    @Test func createTimeMetadataRidesUnderTabsSpawnNotMetadataSet() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        // `trusted-automation` holds `tabs:spawn` but NOT `metadata:set`.
+        let response = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "claude",
+                metadata: [
+                    "connector": .string("linear"),
+                    "connector.event_id": .string("evt-1"),
+                ],
+                caller: "trusted-automation")),
+            host: host)
+        #expect(response.ok)
+        #expect(host.createdRequests.count == 1)
+        #expect(response.result?.session?.metadata["connector"] == .string("linear"))
+        // Surfaced for display from the start — a metadata-only post-create write
+        // by the same source would instead be denied (needs `metadata:set`).
+        let surfaceID = UUID(uuidString: response.result!.session!.surfaceID)!
+        #expect(host.surfaces[surfaceID]?.metadata?["connector"] == .string("linear"))
+    }
+
+    /// The contrast that proves the gate is real: the same `tabs:spawn`-only
+    /// source is denied a *post-create* metadata write, which requires
+    /// `metadata:set`. Create-time metadata and the metadata-write surface are
+    /// gated differently, on purpose.
+    @Test func postCreateMetadataWriteDeniedWithoutMetadataSet() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", caller: "trusted-automation")),
+            host: host)
+        let id = created.result!.session!.sessionID
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(
+                id: id, key: "connector", value: "linear", caller: "trusted-automation")),
+            host: host)
+        #expect(response.error?.code == "unauthorized")
+    }
+
+    /// A permitted caller (the trusted local source holds `groups:create`) creates
+    /// a connector-style grouped launch — provenance metadata plus a supervisor
+    /// group — and a supervisor watching the group observes BOTH Maxx-owned
+    /// lifecycle events: `created` and `group.joined`. Coordination rides on
+    /// explicit mechanical events, never inferred from output/branch/path/idle.
+    @Test func connectorGroupedLaunchIsObservableViaStreamWatch() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+
+        let response = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "claude",
+                metadata: [
+                    "connector": .string("linear"),
+                    "connector.event_id": .string("evt-9"),
+                ],
+                group: "release-MAX-14")),
+            host: host)
+        #expect(response.ok)
+        let id = response.result!.session!.sessionID
+        #expect(response.result?.session?.group == "release-MAX-14")
+        #expect(response.result?.session?.metadata["connector"] == .string("linear"))
+
+        let (_, messages) = try registry.beginStreamWatch(
+            .init(since: 0, group: "release-MAX-14"), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.contains {
+            $0.name == "created" && $0.sourceKind == "maxx"
+                && $0.sessionID == id && $0.group == "release-MAX-14"
+        })
+        #expect(events.contains {
+            $0.name == "group.joined" && $0.sourceKind == "maxx"
+                && $0.sessionID == id && $0.group == "release-MAX-14"
+        })
+        // Create-time metadata is stored and shown but emits NO stream event: a
+        // create surfaces only the mechanical `created`/`group.joined`. A
+        // supervisor must read the provenance from the snapshot/get/list, never
+        // wait on a `kind: metadata` event that a create never produces.
+        #expect(!events.contains { $0.kind == "metadata" })
+    }
+
+    /// A caller without `groups:create` cannot create a grouped connector launch:
+    /// the secondary group check runs before the surface is spawned, so there is
+    /// no tab AND nothing on the event stream — the denied launch leaves no trace.
+    @Test func connectorGroupedLaunchDeniedLeavesNoTabAndNoStreamEvent() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let response = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "claude",
+                metadata: ["connector": .string("linear")],
+                group: "release-MAX-14",
+                caller: "trusted-automation")),
+            host: host)
+        #expect(response.error?.code == "unauthorized")
+        #expect(host.createdRequests.isEmpty)
+
+        // Nothing reached the bus: a group watch from cursor 0 sees no event.
+        let (_, messages) = try registry.beginStreamWatch(
+            .init(since: 0, group: "release-MAX-14"), host: host)
+        #expect(messages.compactMap { $0.event }.isEmpty)
+    }
 }
 
 @MainActor

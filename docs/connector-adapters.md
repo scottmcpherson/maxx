@@ -99,13 +99,15 @@ The normalized event. Every field is an explicit value copied from the payload:
 A `LaunchTemplate` is the configuration half of a connector — how to turn a
 `TriggerEvent` into a visible tab:
 
-| Field             | Meaning                                                            |
-| ----------------- | ------------------------------------------------------------------ |
-| `command`         | Command to run (required, templated).                              |
-| `cwd`             | Working directory (optional, templated; only when explicitly set). |
-| `title`           | Tab title (optional, templated; defaults to the event title).      |
-| `env`             | Extra `KEY=VALUE` entries (values templated).                      |
-| `prompt_delivery` | `env` (default), `stdin`, or `file`.                               |
+| Field             | Meaning                                                                           |
+| ----------------- | --------------------------------------------------------------------------------- |
+| `command`         | Command to run (required, templated).                                             |
+| `cwd`             | Working directory (optional, templated; only when explicitly set).                |
+| `title`           | Tab title (optional, templated; defaults to the event title).                     |
+| `env`             | Extra `KEY=VALUE` entries (values templated).                                     |
+| `prompt_delivery` | `env` (default), `stdin`, or `file`.                                              |
+| `caller`          | Policy source identity, emitted as `params.caller` (optional, **not** templated). |
+| `group`           | Supervisor group label, emitted as `params.group` (optional, templated).          |
 
 ### Placeholders
 
@@ -126,6 +128,37 @@ The resolved `prompt` reaches the launched command per `prompt_delivery`:
 - `file` — written to a temp file by the runner; its path is passed via
   `MAXX_CONNECTOR_PROMPT_FILE`.
 
+### Caller and group
+
+Two optional fields make a resolved launch complete for an autonomous
+webhook-runner flow, so the runner injects **only** the per-call capability
+token and never has to splice fields into the JSON:
+
+- **`caller`** — the [capability-policy](./control-api.md#capability-policy)
+  source the launch is attributed to (e.g. `trusted-automation`), emitted as
+  `params.caller`. Without it, a connector launch runs as the trusted
+  first-party local source — usually wrong for a webhook origin, which should
+  carry its own narrower identity. The caller is **not templated**: a policy
+  source is a fixed deployment decision, never derived from the (potentially
+  untrusted) event payload, so a webhook can't choose the identity it runs as.
+- **`group`** — a supervisor group label, emitted as `params.group`, so the new
+  tab joins a coordination group at create time (no separate `set-group` call,
+  no JSON surgery). It **is templated** from explicit event fields — a group is
+  an opaque coordination token, so `--group issue-${issue.identifier}` is the
+  intended use. A `sessions.create` that sets `group` is gated by the control
+  server on **both** `tabs:spawn` and `groups:create`; the group is checked
+  before the surface is spawned, so a denied group never leaves a stray tab. A
+  group that templates to empty is omitted (matching the server's "empty group
+  means no group" rule).
+
+  Mind the interaction between `caller` and `group`: the built-in
+  `trusted-automation` source has only `tabs:spawn` and `state:set`, so a
+  `--group` launch sent `--as trusted-automation` is **rejected**
+  (`unauthorized`, no tab spawned). A grouped webhook launch therefore needs a
+  configured policy source granted **both** `tabs:spawn` and `groups:create`
+  (the default first-party local source already holds both). See the
+  [Control API capability policy](./control-api.md#capability-policy).
+
 ## Resolution and provenance
 
 `connector.resolve(alloc, template, event, opts)` substitutes placeholders and
@@ -140,11 +173,14 @@ reserved, explicit keys shown on the launched tab:
 - `connector.launched_at` — launch timestamp, when the caller supplies one.
 
 `LaunchRequest.writeControlRequest` emits the Control API's
-`{ token?, method, params }` request envelope for `sessions.create`. The
+`{ token?, method, params }` request envelope for `sessions.create`, including
+`params.caller` and `params.group` when those were configured. The
 **token is supplied by the runner** (the per-call capability token it reads from
 the control directory); `resolve` runs offline and omits it, and the control
 server rejects a tokenless request — so `launch` becomes sendable only once the
-runner injects the token.
+runner injects the token. Caller and group, by contrast, are resolved offline
+and baked into `params` here, so the runner never edits the JSON to attribute or
+group the launch.
 
 For `.env` delivery the prompt rides in `params.env` (`MAXX_CONNECTOR_PROMPT`).
 For `.stdin`/`.file` delivery the prompt is **not** in the control request — the
@@ -159,6 +195,18 @@ maxx +connector list
 maxx +connector resolve --source linear --command claude \
     --cwd /repo --title '${issue.identifier}: ${title}' \
     --env KEY='${source}' --payload event.json
+
+# Attribute the launch to a webhook policy source (ungrouped).
+maxx +connector resolve --source linear --command claude \
+    --as trusted-automation --payload event.json
+
+# Group the launch for supervisor coordination. A grouped create needs both
+# tabs:spawn AND groups:create; the default local source has both. The built-in
+# `trusted-automation` has only tabs:spawn/state:set, so pairing --as
+# trusted-automation with --group would be rejected — a grouped webhook launch
+# needs a configured source granted both capabilities (see below).
+maxx +connector resolve --source linear --command claude \
+    --group 'issue-${issue.identifier}' --payload event.json
 ```
 
 `resolve` reads a payload (from `--payload <file>`, or stdin when omitted/`-`),
@@ -176,5 +224,6 @@ kept separate so the resolution logic stays pure and exhaustively testable —
 owns: injecting the per-call capability token into the control request, sending
 `sessions.create` to a running Maxx, delivering the prompt for `stdin`/`file`
 modes, receiving webhooks, and fetching payloads over the network (with the
-associated auth). The `resolve` envelope is the complete input the runner needs;
-the runner adds only the token and the act of sending.
+associated auth). The `resolve` envelope is the complete input the runner needs:
+the policy `caller` and supervisor `group` are already resolved into `params`, so
+the runner adds only the capability token and the act of sending.
