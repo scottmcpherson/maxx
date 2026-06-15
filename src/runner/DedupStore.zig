@@ -359,7 +359,15 @@ pub fn save(self: *DedupStore) SaveError!void {
     if (!self.writable) return error.ReadOnly;
     if (!self.dirty) return;
 
-    const a = self.arena.allocator();
+    // Serialize through a transient scratch arena freed on return, NOT the
+    // store's long-lived arena (which also owns the entries). A one-shot caller
+    // (the runner) would not notice, but a long-lived caller that saves after
+    // every event (the webhook listener) would otherwise retain a serialized
+    // copy of the whole state per save until it exits — unbounded growth.
+    var scratch = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+
     const bytes = try self.serialize(a);
 
     // Never persist a file the next run would reject as oversized. The per-field
@@ -438,6 +446,37 @@ test "markSeen/seen are idempotent and persist across reopen" {
         try testing.expect(!store.seen("other", "linear", "MAX-1"));
         try testing.expect(!store.seen("t", "github", "MAX-1"));
     }
+}
+
+test "repeated saves in one process stay correct (transient scratch)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "repeat.json");
+
+    // A long-lived caller (the webhook listener) marks-and-saves repeatedly. Each
+    // save serializes through a transient scratch arena, so the store's own arena
+    // does not accumulate per-save copies; the on-disk result stays correct.
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        for (0..50) |i| {
+            const key = try std.fmt.allocPrint(arena, "d{d}", .{i});
+            try store.markSeen("webhook", "linear", key, "2026-06-15T00:00:00Z");
+            try store.save();
+        }
+        try testing.expectEqual(@as(usize, 50), store.count());
+    }
+
+    // Everything persisted across the repeated saves is readable on reopen.
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+    try testing.expectEqual(@as(usize, 50), store.count());
+    try testing.expect(store.seen("webhook", "linear", "d0"));
+    try testing.expect(store.seen("webhook", "linear", "d49"));
 }
 
 test "count bound drops oldest records" {
