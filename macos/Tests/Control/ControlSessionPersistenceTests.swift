@@ -543,4 +543,24 @@ struct ControlSessionPersistenceTests {
         #expect(again?.lifecycle == "archived")
         #expect(again?.updatedAt == archivedUpdatedAt)
     }
+
+    @Test func redundantCancelDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+        let canceled = registry.handle(
+            request(.sessionsAction, .init(id: sid, action: "cancel")), host: host).result?.session
+        #expect(canceled?.lifecycle == "closed")
+        let canceledUpdatedAt = canceled?.updatedAt
+
+        // A second cancel of an already-canceled session is an idempotent no-op:
+        // it must not bump updated_at (which would refresh the terminal record's
+        // retention recency on every retry from a cleanup loop).
+        clock.now = clock.now.addingTimeInterval(120)
+        let again = registry.handle(
+            request(.sessionsAction, .init(id: sid, action: "cancel")), host: host).result?.session
+        #expect(again?.lifecycle == "closed")
+        #expect(again?.updatedAt == canceledUpdatedAt)
+    }
 }

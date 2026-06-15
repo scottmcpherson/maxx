@@ -1673,16 +1673,17 @@ final class ControlSessionRegistry {
     /// a success no-op so callers can retry safely.
     private func cancel(_ input: ControlSession, host: ControlSessionHost) -> ControlResponse {
         var session = input
+        let wasCanceled = session.canceled
         // A terminal mechanical event was already recorded if the session was
         // canceled/archived, or reconciliation already observed the surface
         // vanish. Keying off the observed lifecycle (not just `canceled`) is what
         // keeps `closed` exactly-once even when the user closes the tab first and
         // reconcile records it before an API cancel/close arrives.
-        let alreadyTerminal = session.canceled
+        let alreadyTerminal = wasCanceled
             || session.archived
             || session.lastObservedLifecycle == ControlLifecycle.closed.rawValue
             || session.lastObservedLifecycle == ControlLifecycle.archived.rawValue
-        if !session.canceled, let handle = host.surface(for: session.surfaceID) {
+        if !wasCanceled, let handle = host.surface(for: session.surfaceID) {
             handle.close()
         }
         session.canceled = true
@@ -1690,7 +1691,13 @@ final class ControlSessionRegistry {
             session.lastObservedLifecycle = ControlLifecycle.closed.rawValue
             recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
         }
-        store(&session)
+        // Re-canceling an already-canceled session changes nothing on the record
+        // (the `canceled` flip and the one-shot `closed` event both only happen on
+        // the first cancel): skip store() so an idempotent cancel retry never bumps
+        // updatedAt or refreshes the terminal record's retention recency.
+        if !wasCanceled {
+            store(&session)
+        }
         return .success(.init(session: view(of: session, host: host), canceled: true))
     }
 
