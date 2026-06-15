@@ -25,6 +25,7 @@ const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
 const control = @import("control.zig");
 const connector = @import("connector.zig");
 const runner = @import("runner.zig");
+const webhook = @import("webhook.zig");
 
 /// Special commands that can be invoked via CLI flags. These are all
 /// invoked by using `+<action>` as a CLI flag. The only exception is
@@ -95,6 +96,10 @@ pub const Action = enum {
     // Automation trigger runner: receive a trigger event (poll, local script,
     // or webhook relay) and launch a visible Maxx tab via the Control API.
     runner,
+
+    // Webhook ingestion: a local HTTP listener that maps configured routes to
+    // visible Maxx tab launches via the Control API.
+    webhook,
 
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
@@ -180,6 +185,7 @@ pub const Action = enum {
             .control => try control.run(alloc),
             .connector => try connector.run(alloc),
             .runner => try runner.run(alloc),
+            .webhook => try webhook.run(alloc),
         };
     }
 
@@ -225,6 +231,7 @@ pub const Action = enum {
                 .control => control.Options,
                 .connector => connector.Options,
                 .runner => runner.Options,
+                .webhook => webhook.Options,
             };
         }
     }
