@@ -234,6 +234,21 @@ the current declared state is left unchanged. `set-summary` is independent of
 `set-state`, so an agent can update the displayed text without changing status.
 Both record an audit entry and are surfaced in `get` / `list` / `watch`.
 
+### Agent type and parent (persisted)
+
+An agent declares its type explicitly; Maxx stores it verbatim and persists it
+across restarts (MAX-5). A session can also be created under an explicit parent.
+
+```bash
+maxx +control sessions set-agent-type <session_id> --agent-type claude-code
+maxx +control sessions create --command "zig build test" --agent-type codex
+maxx +control sessions create --command "zig build" --parent <parent_session_id>
+```
+
+`--agent-type` is validated as an opaque token (Maxx never derives meaning from
+its text) and recorded with a source and timestamp. `--parent` must reference a
+known `session_id`; the persisted edge is mechanical, never inferred.
+
 ### Structured event stream (`stream` / `event`)
 
 A **cross-resource, cursor-addressed event bus** for supervisor agents. Where
@@ -347,6 +362,7 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.clear-metadata`  | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
 | `sessions.set-state`       | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
 | `sessions.set-summary`     | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-agent-type`  | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
 | `sessions.set-group`       | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
 | `stream.watch`             | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
 | `stream.wait`              | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
@@ -545,6 +561,105 @@ stale metadata is ever restored from a previous run.
   a specific signal (`SIGINT`/`SIGTERM`/`SIGKILL`/`SIGHUP`/`SIGQUIT`) to the
   foreground process via the explicit process-control path — never by
   synthesizing terminal input.
+
+## The persistent session registry (MAX-5)
+
+The session registry is durable: it survives an app restart so Maxx keeps a
+mechanical view of sessions and the facts agents declared on them. This persists
+the registry; it does **not** persist or revive the terminal processes, which die
+with the app.
+
+**What is persisted.** Each record stores its stable `session_id` and
+`surface_id`, the optional `parent_id` (a persisted parent association), `group`,
+the declared `agent_type`, `title`, `command`, `cwd`, caller-owned `status`, the
+agent-reported `metadata`, the agent-declared `workflow_state` / `summary` (with
+their sources/timestamps), the mechanical lifecycle flags (`archived`,
+`restart_count`, last-observed lifecycle), the audit log, and the
+`created_at` / `updated_at` / `last_seen_at` timestamps. `updated_at` is bumped on
+any change; `last_seen_at` is the last time Maxx mechanically observed the
+surface still existing (used for retention). The create-time `env` map is
+deliberately **not** persisted: it can carry secrets (API tokens passed only to
+the spawned agent), so it lives only in memory for the current run and never gets a
+plaintext at-rest copy. (A restored session's `restart` therefore re-spawns with
+the ambient environment, not the original `--env` overrides.)
+
+**Where.** A single versioned JSON document, `registry.json`, in the same
+per-user control directory as the socket and token (honoring `MAXX_CONTROL_DIR`),
+written `0600` inside the `0700` directory — the registry can carry
+agent-declared metadata, so it gets the same private-to-the-user hardening. It
+survives an app restart and is cleared on reboot along with the rest of the
+runtime directory (no live session survives a reboot either). Writes are atomic
+(temp file + rename) and happen on every mutation, plus a flush on app
+termination.
+
+**Read safety.** The control directory lives in world-writable `/tmp`, so the
+registry is read **only after** the server validates that directory as ours, a
+real directory (not a symlink), and `0700` with no group/other access — the same
+check that gates the token and socket. The registry is loaded after that check,
+never in a constructor that runs before it, so a file another local user planted
+in an insecure directory is never decoded. The read is also size-capped (16 MiB,
+far above any retention-bounded registry) so a corrupt or oversized file is not
+slurped whole at launch. An oversized file is **preserved, not overwritten**: its
+schema `version` sorts after the large `sessions` array so it cannot be read
+cheaply, and this build never writes an oversized file (saves trim to fit), so an
+oversized file may be a newer build's — a downgrade run must not clobber it.
+Writes are gated symmetrically: the
+registry persists nothing until that post-validation load has run, so a flush on
+a startup that refused the directory (an insecure/symlinked `MAXX_CONTROL_DIR`)
+cannot write a snapshot into — or clobber a registry in — the refused directory.
+
+**Restart rehydration.** On launch the registry loads its records. A restored
+record is **detached** from any live surface: it reads as `closed` with no `pid`
+and is flagged `restored: true` (a mechanical fact about this run, not an
+inference about the work). The detachment is a safety boundary — with macOS
+window restoration a freshly rebuilt, user-owned surface can reuse a persisted
+`surface_id`, and the control API must never adopt, observe, signal, or close a
+surface it did not create this run — so a restored record resolves no surface and
+its actions return `already_ended` until it is restarted. A restored record is
+fully listable/readable via `get` / `list` / `events`, and — because its
+`command` is persisted — is `restart`-able: a restart spawns a fresh surface,
+revives the record (`restored`
+clears, lifecycle returns to `running`), and increments `restart_count`.
+
+**Declared fields.** `agent_type` is an explicit agent self-declaration
+(`set-agent-type`, or `--agent-type` at `create`), stored verbatim like all
+declared facts and never inferred from the command, process name, branch, path, or
+title. Either path records the declaration in the session audit log (`events` /
+`watch`) with its source, so the create-time declaration is as visible and durable
+as a later `set-agent-type` — a supervisor never has to wait for a second request
+to learn it. `parent` is supplied at `create` time as a known `session_id`; the edge is
+verified (`not_found` for an unknown id, `invalid_request` for a non-UUID) and
+persisted, but never inferred from naming or spawn order. Both `set-agent-type`
+and a `--group`/`--parent` association are gated by the same capabilities as the
+other declaration/group verbs (`state:set` and `groups:create`). The
+`groups:create` check runs **before** the parent id is resolved, so a caller that
+lacks it gets `unauthorized` whether or not the id exists — the parent lookup
+never becomes a session-existence oracle.
+
+**Retention.** Deterministic and bounded so the file cannot grow without limit.
+The age cutoff retires only records observed **terminal** (closed or archived):
+a record older than 14 days (by `max(updated_at, last_seen_at)`) is dropped, but
+a record that may still be live (last-observed lifecycle `running`/`exited`) is
+never aged out, since its `last_seen_at` can lag during a long idle stretch and
+dropping it would lose a still-existing tab's record. A count cap (newest 500) is
+a hard backstop applied to everything, and each record's persisted audit log is
+bounded to its most recent events (newest 1000) so one chatty session cannot grow
+the file past the read cap. The same policy runs on save and on load. Because many
+chatty sessions could still collectively exceed the byte budget, a save whose
+encoded snapshot would exceed the read cap keeps trimming audit events (newest
+kept) until it fits — so persistence never stalls; only the oldest audit history
+of the busiest sessions is dropped. Only if it still cannot fit with every audit
+event removed is the write skipped and the last readable file preserved (logged;
+never a silent unreadable write or data loss). The trimming also bounds the events
+fed to the first encode up front (count-based), so even a registry that would
+encode to gigabytes never materializes that blob in memory on the save path. The
+live in-memory audit log is never trimmed; only the on-disk copy is bounded.
+
+**No inference on load.** Rehydration replays exactly what was stored and nothing
+more. A record whose mechanical fields (command, cwd, title) happen to read like
+completion signals never comes back with a guessed `workflow_state`, `summary`, or
+`agent_type` — only explicitly declared facts survive, verbatim. See
+[`no-inference.md`](no-inference.md).
 
 ## The structured event stream contract (MAX-7)
 

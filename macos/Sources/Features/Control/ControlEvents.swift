@@ -64,7 +64,10 @@ enum ControlEventOwner: String, Codable {
 /// Each entry is fully auditable: it records the source, a per-session monotonic
 /// sequence number, a timestamp, and the tab (surface) and process ids that were
 /// current when it was recorded.
-struct ControlEvent {
+///
+/// `Codable` so the persistent session registry (MAX-5) can round-trip a
+/// session's audit log across app restarts.
+struct ControlEvent: Codable {
     /// Per-session monotonically increasing sequence number, starting at 0.
     let seq: Int
     let kind: ControlEventKind
@@ -82,6 +85,15 @@ struct ControlEvent {
     let surfaceID: UUID
     /// Foreground process id at record time, where Maxx could observe one.
     let pid: Int?
+
+    /// Snake-cased keys so a persisted event matches the rest of the on-disk
+    /// registry schema (the events array is nested inside each session record).
+    enum CodingKeys: String, CodingKey {
+        case seq, kind, name, source, message, payload
+        case createdAt = "created_at"
+        case surfaceID = "surface_id"
+        case pid
+    }
 }
 
 /// The wire view of a ``ControlEvent``.

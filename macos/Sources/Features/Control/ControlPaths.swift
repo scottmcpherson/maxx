@@ -36,4 +36,20 @@ enum ControlPaths {
     static var token: URL {
         directory.appendingPathComponent("token", isDirectory: false)
     }
+
+    /// The persistent session-registry file (MAX-5). A single versioned JSON
+    /// document, written `0600` inside this same `0700` directory, so the
+    /// registry that can carry agent-declared metadata gets the same
+    /// private-to-the-user hardening as the socket and token.
+    ///
+    /// It lives in the control runtime directory (not `~/Library/Application
+    /// Support`) on purpose: `MAXX_CONTROL_DIR` then isolates a dev/test instance
+    /// completely — its own socket, token, and registry — and the registry is
+    /// recreated/re-secured by the server alongside them. It survives an app
+    /// restart (the documented requirement) and is cleared on reboot together
+    /// with the rest of the runtime directory, which is acceptable because no
+    /// live terminal session survives a reboot either.
+    static var registryFile: URL {
+        directory.appendingPathComponent("registry.json", isDirectory: false)
+    }
 }

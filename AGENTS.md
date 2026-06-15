@@ -48,6 +48,38 @@ A file for [guiding coding agents](https://agents.md/).
   a status, document the gap rather than infer it. See
   [`docs/no-inference.md`](docs/no-inference.md).
 
+## Review Guidelines
+
+- Codex GitHub review should focus on concrete correctness, security, privacy,
+  data-loss, authorization, persistence, and regression risks. Avoid style or
+  cleanup comments unless they would cause a real user-visible failure.
+- Prefer invariant-level review over line-by-line drip feedback. When a finding
+  reveals a bug pattern, audit sibling paths in the same pass and mention the
+  whole class: for example all idempotent mutators that can refresh retention
+  recency, read-side limits that need write-side limits, create-time declarations
+  that must match post-create declarations, or authorization checks that must run
+  before identifier lookups.
+- For persistent control/session state, review every new durable field through
+  creation, mutation, no-op retry, archive/cancel/restart, app relaunch,
+  downgrade/newer-schema handling, corrupt-file recovery, retention, shutdown
+  flush, and permission/validation failure. The read path, write path, and
+  recovery path must be symmetric.
+- Persistent registry changes must explicitly consider file-size bounds before
+  reading and before writing, bounded audit/history retention, preservation of
+  the last readable file on write failure, unsupported newer-schema files, and
+  whether sensitive data such as environment variables or tokens are being
+  written to disk.
+- Control API changes must enforce capabilities before revealing object
+  existence or doing side effects. Denied requests must not spawn tabs, resolve
+  unauthorized session ids, write registry state, or leak whether a target exists.
+- Restored sessions from a previous app run must never be rebound to a live
+  surface by matching a persisted surface id. Only an explicit restart may attach
+  a restored record to a new live surface.
+- When addressing review feedback, do not patch only the exact commented line.
+  Identify the violated invariant, audit adjacent methods for the same pattern,
+  add focused regression tests for the class, and summarize the sweep in the PR
+  response before requesting another review.
+
 ## Git Workflow
 
 - Follow `WORKFLOW.md` for branch, feature, and release workflow.

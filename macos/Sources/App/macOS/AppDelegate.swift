@@ -256,8 +256,12 @@ class AppDelegate: NSObject,
         // Start the external Maxx Control API server. This exposes a local,
         // token-authenticated Unix-socket surface so trusted scripts and
         // webhook runners outside Maxx can create and manage tabs/sessions.
+        // The registry persists its sessions to a file in the same per-user
+        // control directory (MAX-5), so the last known session graph and declared
+        // state survive an app restart.
         let controlServer = ControlServer(
-            registry: ControlSessionRegistry(),
+            registry: ControlSessionRegistry(
+                store: ControlSessionStore(fileURL: ControlPaths.registryFile)),
             host: TerminalControlHost(ghostty: ghostty))
         controlServer.start()
         self.controlServer = controlServer
@@ -461,6 +465,11 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Flush the control session registry so the last reconciled state is
+        // durable for the next launch (MAX-5). The registry already persists on
+        // every mutation; this captures the latest mechanical observations.
+        controlServer?.flush()
+
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.

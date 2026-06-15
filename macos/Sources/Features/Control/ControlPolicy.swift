@@ -511,7 +511,10 @@ enum ControlPolicyMapping {
             case "cancel", "close": return .tabsClose
             default: return nil
             }
-        case .sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary:
+        case .sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary,
+             .sessionsSetAgentType:
+            // Declaring the agent type (MAX-5) is an agent self-declaration, gated
+            // like the other declared-fact verbs by `state:set`.
             return .stateSet
         case .sessionsUpdate:
             // `update` writes caller-owned `status` and/or `metadata`. A `status`

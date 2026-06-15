@@ -62,8 +62,29 @@ final class ControlServer {
         unlink(ControlPaths.socket.path)
     }
 
+    /// Flush the registry's persistent state to disk (MAX-5). Called on app
+    /// termination so the latest reconciled `last_seen_at` is captured; the
+    /// registry already persists on every mutation, so this is a best-effort
+    /// final write. Must be called on the main thread (the registry is main-actor
+    /// isolated), which app termination handlers are.
+    ///
+    /// Safe to call even if `start()` failed: the registry only persists once
+    /// ``ControlSessionRegistry/rehydrate`` has run, which `startThrowing()` does
+    /// only after `prepareDirectory()` validates the control directory. So a flush
+    /// after a refused/insecure directory writes nothing.
+    func flush() {
+        MainActor.assumeIsolated { registry.flush() }
+    }
+
     private func startThrowing() throws {
         try prepareDirectory()
+        // The control directory is now validated as ours and private (0700, a real
+        // directory, not a symlink planted by another local user). Only now is it
+        // safe to read the persisted registry from it: rehydrating earlier (e.g. in
+        // the registry initializer) would decode an attacker-planted file in an
+        // insecure /tmp directory before this check runs (MAX-5). start() always
+        // runs on the main thread, where the registry is isolated.
+        MainActor.assumeIsolated { registry.rehydrate() }
         try writeToken()
 
         let fd = try makeListeningSocket(at: ControlPaths.socket.path)

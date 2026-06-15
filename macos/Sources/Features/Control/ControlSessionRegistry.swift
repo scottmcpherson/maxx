@@ -10,7 +10,7 @@ struct ControlCreateRequest {
     var location: ControlLocation
 }
 
-enum ControlLocation: String {
+enum ControlLocation: String, Codable {
     case tab
     case window
 }
@@ -76,6 +76,30 @@ final class ControlSessionRegistry {
     private let now: () -> Date
     private let makeID: () -> UUID
 
+    // MARK: Persistence (MAX-5)
+
+    /// Durable backing store, or nil for a purely in-memory registry. When set,
+    /// the registry is rehydrated from it by its owner after the control directory
+    /// is validated, and writes the full session set back on every mutation (and an
+    /// explicit ``flush``). Injected so tests can point it at a temp file (or omit
+    /// it entirely).
+    private let store: ControlSessionStore?
+
+    /// Whether writing to the store is permitted yet. The store lives in the
+    /// world-writable control directory, which the owner (``ControlServer``) must
+    /// validate before the registry touches it. Reads are gated by ``rehydrate``
+    /// being the sole reader; writes are gated by this flag, set when ``rehydrate``
+    /// runs (i.e. after `prepareDirectory()` secured the directory). Until then
+    /// ``persist`` is a no-op, so a ``flush`` on a startup that never validated the
+    /// directory cannot write a snapshot into — or clobber a registry in — an
+    /// unvalidated directory.
+    private var persistenceEnabled = false
+
+    /// True once a write would clobber an existing registry file written by a
+    /// newer build (an unsupported schema version). Set at rehydrate; while set,
+    /// ``persist`` is a no-op so a downgrade run never destroys the newer file.
+    private var persistenceSuspended = false
+
     // MARK: Structured event stream (MAX-7)
 
     /// Append-only, bounded global event bus: the cross-resource view of
@@ -123,12 +147,92 @@ final class ControlSessionRegistry {
         now: @escaping () -> Date = Date.init,
         makeID: @escaping () -> UUID = UUID.init,
         maxBusEvents: Int = 10_000,
-        policy: ControlPolicy = .default
+        policy: ControlPolicy = .default,
+        store: ControlSessionStore? = nil
     ) {
         self.now = now
         self.makeID = makeID
         self.maxBusEvents = max(1, maxBusEvents)
         self.policy = policy
+        self.store = store
+        // NB: rehydration is intentionally NOT done here. The store reads a file
+        // from the world-writable control directory (`/tmp/maxx-control-<uid>`),
+        // which must be validated as ours and private before it is trusted. The
+        // owner (``ControlServer``) calls ``rehydrate()`` only after
+        // `prepareDirectory()` has secured that directory; rehydrating in this
+        // initializer would decode an attacker-planted file first.
+    }
+
+    /// Load persisted records into the in-memory registry on launch (MAX-5).
+    ///
+    /// Must be called only after the control directory has been validated as ours
+    /// and `0700` (``ControlServer`` does this in `prepareDirectory()` before
+    /// invoking this), so a file planted by another local user in an insecure
+    /// `/tmp` directory is never read or decoded. Tests that simulate a restart
+    /// call this directly to stand in for that post-validation step.
+    ///
+    /// Restored records are marked so the UI can tell a record from a previous
+    /// run apart from a live one, and their `lastObservedLifecycle` is baselined
+    /// to the lifecycle they will compute with no live surface — `archived` for an
+    /// archived record, otherwise `closed`. This matches `lifecycle(of:)` exactly,
+    /// so the first reconcile after launch sees no transition and does NOT stamp a
+    /// fresh `updatedAt` (which would otherwise refresh retention recency on every
+    /// restart and keep archived records from ever aging out). No event bus entries
+    /// are replayed — the cross-resource cursor is per-run by design. Nothing here
+    /// infers anything: each field is the verbatim persisted value.
+    func rehydrate() {
+        guard let store else { return }
+        // The owner validated the control directory before calling us, so the store
+        // is now safe to write as well as read.
+        persistenceEnabled = true
+        let result = store.loadResult(now: now())
+        // A newer build's file must not be overwritten by this (older) run.
+        persistenceSuspended = result.preserveExistingFile
+        for var session in result.sessions {
+            session.restoredFromPreviousRun = true
+            session.lastObservedLifecycle = session.archived
+                ? ControlLifecycle.archived.rawValue
+                : ControlLifecycle.closed.rawValue
+            sessions[session.id] = session
+        }
+    }
+
+    /// Persist the current session set, if a store is configured. Called from the
+    /// single mutation choke point (``store(_:)``), on observed lifecycle
+    /// transitions, and from ``flush``. A no-op without a store, before
+    /// ``rehydrate`` has enabled persistence (the directory is not yet validated),
+    /// or while persistence is suspended to preserve a newer build's registry file.
+    private func persist() {
+        guard persistenceEnabled, !persistenceSuspended else { return }
+        store?.save(Array(sessions.values), now: now())
+    }
+
+    /// Commit a mutated session back to the in-memory map and persist it. The one
+    /// choke point for record mutations: it stamps `updatedAt` (a real change
+    /// just happened) and writes through to disk, so no handler has to remember
+    /// to do either. Pass `touch: false` for a write that should not count as a
+    /// content change (`create`, which keeps `updatedAt == createdAt`).
+    ///
+    /// `inout` so the caller's `session` carries the bumped `updatedAt` back out —
+    /// the handler then returns a `view(of:)` that reflects the new timestamp
+    /// rather than a stale one. Only call this when something actually changed; a
+    /// no-op caller must skip it so a redundant request can't bump `updatedAt`,
+    /// refresh retention recency, or rewrite the file.
+    private func store(_ session: inout ControlSession, touch: Bool = true) {
+        if touch { session.updatedAt = now() }
+        sessions[session.id] = session
+        persist()
+    }
+
+    /// Flush the current state to disk (e.g. on app termination), capturing the
+    /// latest `lastSeenAt` values reconciliation has observed in memory. Safe to
+    /// call repeatedly; a no-op without a store, and — crucially — a no-op until
+    /// ``rehydrate`` has run. So a flush on app termination after a startup that
+    /// failed to validate the control directory (``ControlServer/start`` swallows
+    /// that failure, yet the app still retains the server) cannot write a snapshot
+    /// into, or clobber a registry in, the directory startup refused.
+    func flush() {
+        persist()
     }
 
     /// Number of tracked sessions (including ended ones). Exposed for tests.
@@ -179,6 +283,8 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setState(request.params, host: host)))
             case .sessionsSetSummary:
                 return .success(.init(session: try setSummary(request.params, host: host)))
+            case .sessionsSetAgentType:
+                return .success(.init(session: try setAgentType(request.params, host: host)))
             case .sessionsEvents:
                 return .success(.init(events: try events(request.params, host: host)))
             case .sessionsSetGroup:
@@ -350,14 +456,42 @@ final class ControlSessionRegistry {
         let metadata = try ControlValidation.validateMetadata(params?.metadata)
         let status = try ControlValidation.validateStatus(params?.status) ?? "created"
         let group = try ControlValidation.validateGroup(params?.group)
-        // Spawning is gated by `tabs:spawn` in `handle`; assigning a group on
-        // create additionally requires `groups:create`. Enforce it before the
-        // surface is spawned so a denied group never leaves a stray tab behind.
-        if group != nil {
+        let agentType = try ControlValidation.validateAgentType(params?.agentType)
+        // A create-time agent-type is the same explicit declared fact as the
+        // standalone `set-agent-type`, and carries a source. Validate the source up
+        // front (before spawning) so an invalid one can't leave a stray tab behind.
+        let agentTypeSource = try agentType.map { _ in
+            try ControlValidation.validateSource(params?.source)
+        }
+        // A parent association (MAX-5) is an explicit, caller-supplied edge to a
+        // session this registry already knows. We never infer a parent from
+        // naming, paths, or spawn order. Whether an edge is *requested* is read
+        // from the raw params, not from a resolved id, so the capability check
+        // below can run before any session lookup.
+        let parentRequested = !(params?.parent ?? "").isEmpty
+        // Spawning is gated by `tabs:spawn` in `handle`; assigning a group or a
+        // parent on create additionally requires `groups:create` (both are
+        // association edges between sessions), and declaring an agent type at
+        // create requires `state:set` (the same gate as the standalone
+        // `set-agent-type` verb — otherwise create would be a way to declare it
+        // without the capability). Enforce these BEFORE resolving the parent id and
+        // before the surface is spawned: a caller without `groups:create` must not
+        // be able to tell an unknown parent id (`not_found`) from an existing one
+        // (`unauthorized`) — that differential would be a session-existence oracle —
+        // and a denied request must never leave a stray tab behind.
+        if group != nil || parentRequested {
             try enforceCapability(
                 .groupsCreate, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
         }
+        if agentType != nil {
+            try enforceCapability(
+                .stateSet, caller: params?.caller, confirm: params?.confirm,
+                target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
+        }
+        // Authorized to create the association now; resolve the parent edge (which
+        // may throw `not_found` / `invalid_request`) before spawning the surface.
+        let parentID = try resolveParent(params?.parent)
 
         let location: ControlLocation
         if let raw = params?.location {
@@ -376,6 +510,7 @@ final class ControlSessionRegistry {
             env: env,
             location: location))
 
+        let createdAt = now()
         var session = ControlSession(
             id: makeID(),
             surfaceID: surfaceID,
@@ -387,14 +522,20 @@ final class ControlSessionRegistry {
             status: status,
             metadata: metadata,
             group: group,
-            createdAt: now(),
+            parentID: parentID,
+            agentType: agentType,
+            createdAt: createdAt,
+            // At creation the record has just been written and just been seen.
+            updatedAt: createdAt,
+            lastSeenAt: createdAt,
             canceled: false)
         // Baseline the observed lifecycle so reconciliation later emits exactly
         // one `exited`/`closed` event on the kernel-reported transition.
         session.lastObservedLifecycle = ControlLifecycle.running.rawValue
-        sessions[session.id] = session
+        // `touch: false` keeps updatedAt == createdAt for a brand-new record.
+        store(&session, touch: false)
 
-        let pid = host.surface(for: session.surfaceID)?.pid
+        let pid = liveSurface(of: session, host: host)?.pid
         recordMechanical(
             session, name: "created", group: session.group,
             createdAt: session.createdAt, pid: pid)
@@ -403,10 +544,21 @@ final class ControlSessionRegistry {
                 session, name: "group.joined", message: group, group: group,
                 createdAt: session.createdAt, pid: pid)
         }
+        // A create-time agent-type declaration is an explicit declared fact,
+        // identical to `set-agent-type`: record it in the audit log (events /
+        // watch) with its source so supervisors see it and it persists, rather than
+        // it being only an initialized field. `touch: false` keeps
+        // `updatedAt == createdAt` for the brand-new record.
+        if let agentType, let agentTypeSource {
+            record(
+                &session, kind: .metadata, name: "agent_type", source: agentTypeSource,
+                message: agentType, createdAt: session.createdAt, pid: pid)
+            store(&session, touch: false)
+        }
         // Surface any metadata supplied at create time so the UI shows it from
         // the start (an explicit caller declaration, never inferred).
         if !metadata.isEmpty {
-            pushMetadata(session, to: host.surface(for: session.surfaceID))
+            pushMetadata(session, to: liveSurface(of: session, host: host))
         }
         return view(of: session, host: host)
     }
@@ -469,8 +621,15 @@ final class ControlSessionRegistry {
                 "only 'status' and 'metadata' may be updated")
         }
 
-        if let status = try ControlValidation.validateStatus(params?.status) {
+        var changed = false
+        // Setting status to the value it already holds is a no-op: don't mark the
+        // record changed (which would bump updated_at and refresh retention recency
+        // for a closed/restored record). Validation still runs, rejecting a bad
+        // status regardless.
+        if let status = try ControlValidation.validateStatus(params?.status),
+            status != session.status {
             session.status = status
+            changed = true
         }
 
         var metadataChanged = false
@@ -478,28 +637,45 @@ final class ControlSessionRegistry {
             // Merge (append) semantics: provided keys overwrite/add to existing
             // metadata. The combined map is re-validated against the limits.
             let validated = try ControlValidation.validateMetadata(metadata)
+            // Validate the source up front — before the no-op check — so an invalid
+            // source (empty/overlong) is rejected even when the merge changes
+            // nothing, matching the other metadata mutators.
+            let source = try ControlValidation.validateSource(params?.source)
             var merged = session.metadata
             merged.merge(validated) { _, new in new }
-            session.metadata = try ControlValidation.validateMetadata(merged)
-            metadataChanged = true
+            let normalized = try ControlValidation.validateMetadata(merged)
+            // Only a real change counts. An empty (`metadata: {}`) or value-identical
+            // merge changes nothing, so it must not bump `updated_at`, rewrite the
+            // registry, re-push the map, or emit audit events — that would refresh
+            // retention recency for a closed/restored record and break the no-op
+            // invariant. Treat it like an update carrying no metadata at all.
+            if normalized != session.metadata {
+                session.metadata = normalized
+                metadataChanged = true
+                changed = true
 
-            // Audit each provided key the same way `set-metadata` does, so a
-            // `watch`/`events` consumer observes update-driven metadata changes.
-            // `update` is a documented metadata-merge path; it must not be a
-            // silent, unobservable mutation.
-            let source = try ControlValidation.validateSource(params?.source)
-            let at = now()
-            let pid = host.surface(for: session.surfaceID)?.pid
-            for key in validated.keys.sorted() {
-                record(
-                    &session,
-                    kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+                // Audit each provided key the same way `set-metadata` does, so a
+                // `watch`/`events` consumer observes update-driven metadata changes.
+                // `update` is a documented metadata-merge path; it must not be a
+                // silent, unobservable mutation.
+                let at = now()
+                let pid = liveSurface(of: session, host: host)?.pid
+                for key in validated.keys.sorted() {
+                    record(
+                        &session,
+                        kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+                }
             }
         }
 
-        sessions[session.id] = session
+        // An update carrying neither status nor metadata is a no-op (and is
+        // ungated by policy precisely because it changes nothing): don't bump
+        // updatedAt, rewrite the registry, or re-push an unchanged map.
+        if changed {
+            store(&session)
+        }
         if metadataChanged {
-            pushMetadata(session, to: host.surface(for: session.surfaceID))
+            pushMetadata(session, to: liveSurface(of: session, host: host))
         }
         return view(of: session, host: host)
     }
@@ -569,8 +745,8 @@ final class ControlSessionRegistry {
             source: source,
             message: message,
             createdAt: now(),
-            pid: host.surface(for: session.surfaceID)?.pid)
-        sessions[session.id] = session
+            pid: liveSurface(of: session, host: host)?.pid)
+        store(&session)
         return view(of: session, host: host)
     }
 
@@ -591,8 +767,8 @@ final class ControlSessionRegistry {
             source: source,
             payload: payload,
             createdAt: now(),
-            pid: host.surface(for: session.surfaceID)?.pid)
-        sessions[session.id] = session
+            pid: liveSurface(of: session, host: host)?.pid)
+        store(&session)
         // `record` always appends, so `last` is the entry we just recorded.
         let recorded = eventView(session.events[session.events.count - 1], sessionID: session.id)
         return (view(of: session, host: host), recorded)
@@ -623,8 +799,16 @@ final class ControlSessionRegistry {
 
         var merged = session.metadata
         merged[key] = value
-        session.metadata = try ControlValidation.validateMetadata(merged)
-        let handle = host.surface(for: session.surfaceID)
+        let normalized = try ControlValidation.validateMetadata(merged)
+        // Setting a key to the value it already holds changes nothing: don't bump
+        // updatedAt, rewrite the registry, append an audit event, or re-push the
+        // unchanged map (matches update / remove-metadata / clear-metadata).
+        // Validation runs first so an invalid value is still rejected, not no-op'd.
+        guard normalized != session.metadata else {
+            return view(of: session, host: host)
+        }
+        session.metadata = normalized
+        let handle = liveSurface(of: session, host: host)
         record(
             &session,
             kind: .metadata,
@@ -632,7 +816,7 @@ final class ControlSessionRegistry {
             source: source,
             createdAt: now(),
             pid: handle?.pid)
-        sessions[session.id] = session
+        store(&session)
         pushMetadata(session, to: handle)
         return view(of: session, host: host)
     }
@@ -655,8 +839,9 @@ final class ControlSessionRegistry {
             throw ControlError(.invalidRequest, "remove-metadata requires 'key' or 'keys'")
         }
 
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
         let at = now()
+        var changed = false
         for key in targets where session.metadata[key] != nil {
             session.metadata[key] = nil
             record(
@@ -667,9 +852,14 @@ final class ControlSessionRegistry {
                 message: "removed",
                 createdAt: at,
                 pid: handle?.pid)
+            changed = true
         }
-        sessions[session.id] = session
-        pushMetadata(session, to: handle)
+        // A remove of only already-absent keys is an idempotent no-op: don't
+        // store/persist or bump `updatedAt`, and don't re-push an unchanged map.
+        if changed {
+            store(&session)
+            pushMetadata(session, to: handle)
+        }
         return view(of: session, host: host)
     }
 
@@ -681,10 +871,11 @@ final class ControlSessionRegistry {
     ) throws -> ControlSessionView {
         var session = try requireSession(params?.id)
         let source = try ControlValidation.validateSource(params?.source)
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
-        // Only record an audit entry when there was something to clear, so a
-        // redundant clear stays a clean no-op.
+        // Only record/store when there was something to clear, so a redundant
+        // clear stays a true no-op: no audit entry, no `updatedAt` bump, no
+        // retention-recency refresh, no file write, no surface re-push.
         if !session.metadata.isEmpty {
             session.metadata = [:]
             record(
@@ -695,9 +886,9 @@ final class ControlSessionRegistry {
                 message: "cleared",
                 createdAt: now(),
                 pid: handle?.pid)
+            store(&session)
+            pushMetadata(session, to: handle)
         }
-        sessions[session.id] = session
-        pushMetadata(session, to: handle)
         return view(of: session, host: host)
     }
 
@@ -717,7 +908,7 @@ final class ControlSessionRegistry {
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
         // Resolve the surface once: used for the audit pid and the UI push.
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
         session.workflowState = state
         session.workflowStateAt = at
@@ -729,7 +920,7 @@ final class ControlSessionRegistry {
             source: source,
             createdAt: at,
             pid: handle?.pid)
-        sessions[session.id] = session
+        store(&session)
         pushDeclaration(session, to: handle)
         Self.logger.info(
             "declared state \(state.rawValue, privacy: .public) for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
@@ -749,7 +940,7 @@ final class ControlSessionRegistry {
         let source = try ControlValidation.validateSource(params?.source)
         let at = now()
         // Resolve the surface once: used for the audit pid and the UI push.
-        let handle = host.surface(for: session.surfaceID)
+        let handle = liveSurface(of: session, host: host)
 
         session.summary = summary
         session.summaryAt = at
@@ -762,10 +953,42 @@ final class ControlSessionRegistry {
             message: summary,
             createdAt: at,
             pid: handle?.pid)
-        sessions[session.id] = session
+        store(&session)
         pushDeclaration(session, to: handle)
         Self.logger.info(
             "declared summary for session \(session.id.uuidString, privacy: .public) from \(source, privacy: .public)")
+        return view(of: session, host: host)
+    }
+
+    /// Declare the session's agent type (`set-agent-type`, MAX-5), e.g.
+    /// `claude-code`. An explicit agent self-declaration recorded with its source
+    /// and timestamp and persisted, so a restored session keeps its declared
+    /// type. Maxx never derives the type from the command, process name, branch,
+    /// path, or title — an undeclared session has no agent type rather than a
+    /// guessed one. An invalid value is rejected before any field is touched.
+    private func setAgentType(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        guard let raw = params?.agentType, !raw.isEmpty else {
+            throw ControlError(.invalidRequest, "set-agent-type requires 'agent_type'")
+        }
+        let agentType = try ControlValidation.validateAgentType(raw)
+        let source = try ControlValidation.validateSource(params?.source)
+        let at = now()
+        let pid = liveSurface(of: session, host: host)?.pid
+
+        session.agentType = agentType
+        record(
+            &session,
+            kind: .metadata,
+            name: "agent_type",
+            source: source,
+            message: agentType,
+            createdAt: at,
+            pid: pid)
+        store(&session)
         return view(of: session, host: host)
     }
 
@@ -800,7 +1023,7 @@ final class ControlSessionRegistry {
         let reason = try ControlValidation.validateReason(params?.reason)
 
         if !session.archived {
-            if !session.canceled, let handle = host.surface(for: session.surfaceID) {
+            if !session.canceled, let handle = liveSurface(of: session, host: host) {
                 handle.close()
             }
             let date = now()
@@ -816,8 +1039,11 @@ final class ControlSessionRegistry {
                 message: reason,
                 createdAt: date,
                 pid: nil)
+            store(&session)
         }
-        sessions[session.id] = session
+        // Re-archiving an already-archived session is an idempotent no-op: don't
+        // store/bump updatedAt, which would refresh the retention recency of a
+        // terminal record on every redundant archive from a cleanup loop.
         return view(of: session, host: host)
     }
 
@@ -838,7 +1064,7 @@ final class ControlSessionRegistry {
                 "session has no restartable command; pass a command to restart it")
         }
 
-        if !session.canceled, !session.archived, let handle = host.surface(for: session.surfaceID) {
+        if !session.canceled, !session.archived, let handle = liveSurface(of: session, host: host) {
             handle.close()
         }
 
@@ -855,6 +1081,11 @@ final class ControlSessionRegistry {
         session.archivedAt = nil
         session.archiveReason = nil
         session.restartCount += 1
+        // Restarting a record rehydrated from a previous run spawns a fresh,
+        // live surface this run — it is no longer a restored-but-dead record,
+        // and we just observed its new surface alive.
+        session.restoredFromPreviousRun = false
+        session.lastSeenAt = now()
         // A restart begins a fresh run, so the agent-declared workflow state and
         // summary from the previous run no longer apply — clear them rather than
         // leave a stale `complete`/`failed` badge on the newly-running surface.
@@ -878,7 +1109,7 @@ final class ControlSessionRegistry {
             message: override != nil ? "command override" : nil,
             createdAt: now(),
             pid: host.surface(for: newSurface)?.pid)
-        sessions[session.id] = session
+        store(&session)
         // Metadata is scoped to the session record, so it survives the restart;
         // re-push it to the fresh surface so the chip persists (the new surface
         // starts with an empty map). The declared workflow-state badge, by
@@ -1130,28 +1361,51 @@ final class ControlSessionRegistry {
     /// terminal output: a transition is only ever the kernel-reported process
     /// exit or the surface ceasing to exist.
     private func reconcile(host: ControlSessionHost) {
+        var transitioned = false
         for id in Array(sessions.keys) {
             guard var session = sessions[id] else { continue }
             let current = lifecycle(of: session, host: host).rawValue
             let last = session.lastObservedLifecycle ?? ControlLifecycle.running.rawValue
-            guard current != last else { continue }
-            switch current {
-            case ControlLifecycle.exited.rawValue:
-                recordMechanical(
-                    session, name: "exited", group: session.group, createdAt: now(),
-                    pid: host.surface(for: session.surfaceID)?.pid)
-            case ControlLifecycle.closed.rawValue:
-                // Surface vanished without an API cancel/archive (e.g. the user
-                // closed the tab). cancel()/archive()/restart() set
-                // lastObservedLifecycle themselves, so this fires only for the
-                // un-instrumented case.
-                recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
-            default:
-                break
+            var changed = false
+
+            // Mechanical liveness observation (MAX-5): while the surface still
+            // exists (running or exited), stamp that we just saw it. A pure
+            // kernel/runtime fact used only for stale-record retention — never
+            // output inference. Kept in memory each poll; only flushed to disk on
+            // a real transition (below) so the 150ms reconcile poll doesn't churn.
+            if current == ControlLifecycle.running.rawValue
+                || current == ControlLifecycle.exited.rawValue {
+                session.lastSeenAt = now()
+                changed = true
             }
-            session.lastObservedLifecycle = current
-            sessions[id] = session
+
+            if current != last {
+                switch current {
+                case ControlLifecycle.exited.rawValue:
+                    recordMechanical(
+                        session, name: "exited", group: session.group, createdAt: now(),
+                        pid: liveSurface(of: session, host: host)?.pid)
+                case ControlLifecycle.closed.rawValue:
+                    // Surface vanished without an API cancel/archive (e.g. the user
+                    // closed the tab). cancel()/archive()/restart() set
+                    // lastObservedLifecycle themselves, so this fires only for the
+                    // un-instrumented case.
+                    recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
+                default:
+                    break
+                }
+                session.lastObservedLifecycle = current
+                session.updatedAt = now()
+                transitioned = true
+                changed = true
+            }
+
+            if changed { sessions[id] = session }
         }
+        // Persist only when a lifecycle actually transitioned; pure lastSeenAt
+        // bumps ride along on the next mutation or `flush()` to avoid writing the
+        // file on every poll.
+        if transitioned { persist() }
     }
 
     /// Set or clear a session's group membership, recording the Maxx-owned
@@ -1167,9 +1421,9 @@ final class ControlSessionRegistry {
         guard old != newGroup else { return view(of: session, host: host) }
 
         let at = now()
-        let pid = host.surface(for: session.surfaceID)?.pid
+        let pid = liveSurface(of: session, host: host)?.pid
         session.group = newGroup
-        sessions[session.id] = session
+        store(&session)
         if let old {
             recordMechanical(session, name: "group.left", message: old, group: old, createdAt: at, pid: pid)
         }
@@ -1460,6 +1714,21 @@ final class ControlSessionRegistry {
         return message
     }
 
+    /// Resolve an explicit parent session id supplied at create time (MAX-5).
+    /// Absent/empty → no parent. A non-UUID string is `invalid_request`; a UUID
+    /// that names no known session is `not_found`. The edge is always a
+    /// caller-supplied id we can verify — never inferred from naming or order.
+    private func resolveParent(_ idString: String?) throws -> UUID? {
+        guard let idString, !idString.isEmpty else { return nil }
+        guard let id = UUID(uuidString: idString) else {
+            throw ControlError(.invalidRequest, "parent is not a valid UUID")
+        }
+        guard sessions[id] != nil else {
+            throw ControlError(.notFound, "no parent session with id \(idString)")
+        }
+        return id
+    }
+
     private func requireSession(_ idString: String?) throws -> ControlSession {
         guard let idString, !idString.isEmpty else {
             throw ControlError(.invalidRequest, "session id is required")
@@ -1481,7 +1750,7 @@ final class ControlSessionRegistry {
         if session.canceled {
             throw ControlError(.alreadyEnded, "session \(session.id.uuidString) has already ended")
         }
-        guard let handle = host.surface(for: session.surfaceID) else {
+        guard let handle = liveSurface(of: session, host: host) else {
             throw ControlError(
                 .alreadyEnded,
                 "session \(session.id.uuidString) surface no longer exists")
@@ -1493,25 +1762,53 @@ final class ControlSessionRegistry {
     /// a success no-op so callers can retry safely.
     private func cancel(_ input: ControlSession, host: ControlSessionHost) -> ControlResponse {
         var session = input
+        let wasCanceled = session.canceled
         // A terminal mechanical event was already recorded if the session was
         // canceled/archived, or reconciliation already observed the surface
         // vanish. Keying off the observed lifecycle (not just `canceled`) is what
         // keeps `closed` exactly-once even when the user closes the tab first and
         // reconcile records it before an API cancel/close arrives.
-        let alreadyTerminal = session.canceled
+        let alreadyTerminal = wasCanceled
             || session.archived
             || session.lastObservedLifecycle == ControlLifecycle.closed.rawValue
             || session.lastObservedLifecycle == ControlLifecycle.archived.rawValue
-        if !session.canceled, let handle = host.surface(for: session.surfaceID) {
+        if !wasCanceled, let handle = liveSurface(of: session, host: host) {
             handle.close()
         }
         session.canceled = true
+        // Only the first transition into a terminal state mutates the record (the
+        // one-shot `closed` event + lifecycle) and is worth persisting. Canceling a
+        // session that is ALREADY terminal — already canceled, archived, or
+        // observed closed — changes nothing observable (its lifecycle is unchanged),
+        // so record nothing and skip store(): an idempotent cancel retry, including
+        // one against an already-archived session, never bumps updatedAt or
+        // refreshes the terminal record's retention recency.
         if !alreadyTerminal {
             session.lastObservedLifecycle = ControlLifecycle.closed.rawValue
             recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
+            store(&session)
         }
-        sessions[session.id] = session
         return .success(.init(session: view(of: session, host: host), canceled: true))
+    }
+
+    /// The live surface backing a session *this run*, or nil.
+    ///
+    /// A record rehydrated from a previous run (`restoredFromPreviousRun`) is
+    /// intentionally detached: its persisted `surfaceID` names a surface from the
+    /// prior run, and with macOS window restoration a *different*, user-owned
+    /// surface can be rebuilt this run reusing that same UUID. The control API only
+    /// ever owns surfaces it created this run, so it must never adopt, observe,
+    /// signal, or close such a coincidental match. A restored record therefore
+    /// resolves no surface — its lifecycle stays `closed` and actions error as
+    /// `already_ended` — until `restart` spawns a fresh surface this run (which
+    /// clears the flag and rebinds `surfaceID`). This is the MAX-1 ownership
+    /// boundary preserved across a restart, not output inference.
+    private func liveSurface(
+        of session: ControlSession,
+        host: ControlSessionHost
+    ) -> ControlSurfaceHandle? {
+        guard !session.restoredFromPreviousRun else { return nil }
+        return host.surface(for: session.surfaceID)
     }
 
     /// Compute the Maxx-owned lifecycle from explicit state only: the archive/
@@ -1520,7 +1817,7 @@ final class ControlSessionRegistry {
     private func lifecycle(of session: ControlSession, host: ControlSessionHost) -> ControlLifecycle {
         if session.archived { return .archived }
         if session.canceled { return .closed }
-        guard let handle = host.surface(for: session.surfaceID) else { return .closed }
+        guard let handle = liveSurface(of: session, host: host) else { return .closed }
         return handle.isProcessAlive ? .running : .exited
     }
 
@@ -1529,11 +1826,12 @@ final class ControlSessionRegistry {
         let lifecycle = lifecycle(of: session, host: host)
         // Expose the pid whenever a surface still exists (running or exited), to
         // match the MAX-1 behavior; a closed/archived session has none.
-        let pid: Int? = lifecycle.isTerminal ? nil : host.surface(for: session.surfaceID)?.pid
+        let pid: Int? = lifecycle.isTerminal ? nil : liveSurface(of: session, host: host)?.pid
 
         return ControlSessionView(
             sessionID: session.id.uuidString,
             surfaceID: session.surfaceID.uuidString,
+            parentID: session.parentID?.uuidString,
             title: session.title,
             command: session.command,
             cwd: session.cwd,
@@ -1541,7 +1839,11 @@ final class ControlSessionRegistry {
             lifecycle: lifecycle.rawValue,
             metadata: session.metadata,
             group: session.group,
+            agentType: session.agentType,
             createdAt: Self.iso8601.string(from: session.createdAt),
+            updatedAt: Self.iso8601.string(from: session.updatedAt),
+            lastSeenAt: session.lastSeenAt.map(Self.iso8601.string(from:)),
+            restored: session.restoredFromPreviousRun ? true : nil,
             pid: pid,
             archivedAt: session.archivedAt.map(Self.iso8601.string(from:)),
             archiveReason: session.archiveReason,

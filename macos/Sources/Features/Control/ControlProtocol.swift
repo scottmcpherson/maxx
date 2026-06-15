@@ -78,6 +78,12 @@ enum ControlMethod: String, Codable {
     /// Set the short human-readable summary shown alongside the workflow state.
     case sessionsSetSummary = "sessions.set-summary"
 
+    // MARK: Persistent session registry (MAX-5)
+
+    /// Declare the session's agent type (e.g. `claude-code`, `codex`), persisted
+    /// across restarts. An explicit agent self-declaration, never inferred.
+    case sessionsSetAgentType = "sessions.set-agent-type"
+
     // MARK: Structured event stream (MAX-7)
 
     /// Set (or clear) a session's group membership, recorded as a Maxx-owned
@@ -200,6 +206,15 @@ struct ControlRequest: Codable {
         /// the `state` field above, validated against the workflow vocabulary.)
         var summary: String?
 
+        // MARK: Persistent session registry (MAX-5)
+
+        /// Agent type to declare (`set-agent-type`) or attach at `create` time,
+        /// e.g. `claude-code`. An explicit agent self-declaration, never inferred.
+        var agentType: String?
+        /// Parent session id (UUID) to associate at `create` time. The id must
+        /// reference a known session; the edge is persisted but never inferred.
+        var parent: String?
+
         // MARK: Structured event stream (MAX-7)
 
         /// Group label: set membership (`set-group`/`create`) or filter a
@@ -239,6 +254,8 @@ struct ControlRequest: Codable {
             case timeoutMs = "timeout_ms"
             case since
             case summary
+            case agentType = "agent_type"
+            case parent
             case group, tab, all
             case caller, confirm, capability
         }
@@ -262,6 +279,9 @@ struct ControlRequest: Codable {
 struct ControlSessionView: Codable, Equatable {
     var sessionID: String
     var surfaceID: String
+    /// Parent session id (MAX-5), if this session was created under one. A
+    /// persisted mechanical association edge; omitted when there is no parent.
+    var parentID: String?
     var title: String?
     var command: String?
     var cwd: String?
@@ -277,7 +297,19 @@ struct ControlSessionView: Codable, Equatable {
     /// Group membership for supervisor coordination (MAX-7); omitted when the
     /// session is not in a group. Explicitly set, never inferred.
     var group: String?
+    /// Agent-declared agent type (MAX-5), e.g. `claude-code`; omitted until
+    /// declared via `create`/`set-agent-type`. Stored verbatim, never inferred.
+    var agentType: String?
     var createdAt: String
+    /// When this record last changed (any field), ISO-8601 (MAX-5).
+    var updatedAt: String
+    /// When Maxx last mechanically observed the surface alive (MAX-5), ISO-8601;
+    /// omitted if never observed. A runtime fact, not output inference.
+    var lastSeenAt: String?
+    /// True when this record was rehydrated from a previous run (MAX-5); omitted
+    /// for live records. A mechanical fact about this run, not an inference about
+    /// the work. A restored record's surface is gone, so its lifecycle is `closed`.
+    var restored: Bool?
     var pid: Int?
     /// When the session was archived, if it has been.
     var archivedAt: String?
@@ -307,8 +339,13 @@ struct ControlSessionView: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
         case surfaceID = "surface_id"
+        case parentID = "parent_id"
         case title, command, cwd, status, lifecycle, metadata, group
+        case agentType = "agent_type"
         case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case lastSeenAt = "last_seen_at"
+        case restored
         case pid
         case archivedAt = "archived_at"
         case archiveReason = "archive_reason"
