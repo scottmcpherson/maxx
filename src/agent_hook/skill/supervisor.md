@@ -105,9 +105,15 @@ child=$(maxx +control sessions create \
 
 # Deliver the task prompt as literal input once the agent is up (give it a
 # moment to start its prompt). Safe for variable/untrusted text — no shell parses it.
+# --action input sends the bytes verbatim and does NOT press Enter, so end the
+# text with a newline ($'…\n') to actually submit it.
 maxx +control sessions action "$child" --action input \
-  --input 'Fix the JSON parser overflow in src/parse.zig; run the parser tests.'
+  --input $'Fix the JSON parser overflow in src/parse.zig; run the parser tests.\n'
 ```
+
+`--action input` is the literal-input channel used throughout this skill (task
+delivery, follow-ups, answering `needsInput`); it never synthesizes Enter, so
+always include the trailing `\n` when the agent should act on the line.
 
 (A short, fixed prompt you author yourself _can_ be embedded directly in
 `--command` — single-quote the whole command and keep `$`, backticks, and quotes
@@ -310,13 +316,14 @@ maxx +control sessions cancel  "$child"                          # cancel/close 
 ## Permission modes for child workers
 
 A child stalls forever if it hits an approval prompt you are not watching.
-Choose a non-stalling mode for managed workers, and surface it explicitly:
+Choose a non-stalling mode for managed workers, and surface it explicitly. These
+are the **launcher** `--command` values (no task text — deliver the prompt with
+`--action input`, per _spawn_ above):
 
-- **Claude Code:** `claude --permission-mode acceptEdits "<prompt>"` (also
-  `default`, `plan`, `dontAsk`).
-- **Codex:** `codex --full-auto "<prompt>"` (workspace-write + approval on
-  failure), or `codex --sandbox workspace-write --ask-for-approval never
-"<prompt>"`.
+- **Claude Code:** `claude --permission-mode acceptEdits` (also `default`,
+  `plan`, `dontAsk`).
+- **Codex:** `codex --full-auto` (workspace-write + approval on failure), or
+  `codex --sandbox workspace-write --ask-for-approval never`.
 
 **Never** pass a bypass/danger mode (`claude --permission-mode
 bypassPermissions`, `codex --dangerously-bypass-approvals-and-sandbox`) unless
