@@ -143,8 +143,10 @@ final class ControlSessionRegistry {
         do {
             // Capability policy is the first gate: a denied caller never reaches
             // a handler, and a confirmation-required action returns before any
-            // side effect. `policy.check` and metadata-write methods are ungated
-            // here (see ``ControlPolicyMapping``).
+            // side effect. Metadata writes are gated by `metadata:set` (MAX-4);
+            // the only ungated methods are `policy.check`, a no-op
+            // `sessions.update`, and `sessions.action` with an unknown action
+            // name (see ``ControlPolicyMapping``).
             try enforce(request.method, request.params)
 
             switch request.method {
@@ -202,9 +204,10 @@ final class ControlSessionRegistry {
     /// Enforce the capability policy for a request before any side effect runs.
     /// Throws `unauthorized` on a deny and `confirmation_required` on a confirm
     /// that the caller has not acknowledged; returns normally when the action may
-    /// proceed. Ungated methods (metadata writes, `policy.check`, and unknown
-    /// `action` names) return without a decision so their existing handler/error
-    /// semantics are preserved.
+    /// proceed. Ungated methods (`policy.check`, a no-op `sessions.update`, and
+    /// unknown `action` names) return without a decision so their existing
+    /// handler/error semantics are preserved; metadata writes are *not* ungated —
+    /// they require `metadata:set` (MAX-4).
     ///
     /// The decision depends only on the explicit caller, capability, and target —
     /// never on terminal output or any ambient signal — and every outcome is

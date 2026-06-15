@@ -177,3 +177,60 @@ test "no-inference: adapters surface only explicit fields" {
         "labels",        "assignees",           "default_branch",
     });
 }
+
+// Cross-feature glue (MAX-14): a connector-resolved `sessions.create` carries
+// provenance metadata *and* an explicit policy caller *and* an optional group,
+// all in one request a webhook runner can send verbatim (it injects only the
+// token). The group is templated from an explicit event field; the caller is a
+// fixed policy identity. Neither path may smuggle an inferred/bait field.
+test "connector launch wires provenance, caller, and group together" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A Linear payload stuffed with bait fields the adapter does not copy.
+    const payload =
+        \\{
+        \\  "action": "update",
+        \\  "type": "Issue",
+        \\  "data": {
+        \\    "id": "id-1", "identifier": "MAX-14", "title": "Safe Title",
+        \\    "url": "https://linear.app/x/MAX-14",
+        \\    "branch": "feature/LEAK_BRANCH",
+        \\    "state": "LEAK_STATE"
+        \\  }
+        \\}
+    ;
+    const adapter = adapterByName("linear").?;
+    const event = try adapter.parse(alloc, payload);
+
+    const req = try resolve(alloc, .{
+        .command = "claude",
+        // Group templated from an explicit event field; caller is fixed config.
+        .group = "issue-${issue.identifier}",
+        .caller = "trusted-automation",
+    }, event, .{ .launched_at = "2026-06-15T00:00:00Z" });
+
+    try testing.expectEqualStrings("trusted-automation", req.caller.?);
+    try testing.expectEqualStrings("issue-MAX-14", req.group.?);
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try req.writeControlRequest(alloc, &json, .{ .token = "cap-token" });
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+
+    // The runner can send this as-is: token + caller + group + provenance.
+    try testing.expectEqualStrings("cap-token", parsed.object.get("token").?.string);
+    const params = parsed.object.get("params").?.object;
+    try testing.expectEqualStrings("trusted-automation", params.get("caller").?.string);
+    try testing.expectEqualStrings("issue-MAX-14", params.get("group").?.string);
+    const meta = params.get("metadata").?.object;
+    try testing.expectEqualStrings("linear", meta.get("connector").?.string);
+    try testing.expectEqualStrings("id-1", meta.get("connector.event_id").?.string);
+
+    // No bait field rode along through the caller/group/metadata wiring.
+    for ([_][]const u8{ "LEAK_BRANCH", "LEAK_STATE", "branch", "state" }) |needle| {
+        try testing.expect(std.mem.indexOf(u8, out.written(), needle) == null);
+    }
+}

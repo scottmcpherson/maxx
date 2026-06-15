@@ -54,6 +54,24 @@ pub const LaunchTemplate = struct {
     env: []const EnvEntry = &.{},
     /// Where the prompt/context is delivered. Defaults to `.env`.
     prompt_delivery: PromptDelivery = .env,
+    /// Policy caller/source identity emitted as `params.caller` (e.g.
+    /// `trusted-automation`), so the runner's `sessions.create` is attributed to
+    /// an explicit policy source instead of silently defaulting to the trusted
+    /// first-party local source. Optional — null leaves the field off.
+    ///
+    /// Deliberately *not* templated: a policy source is a fixed deployment
+    /// decision, never derived from the (potentially untrusted) event payload, so
+    /// a webhook cannot choose the identity it runs as. Group labels are opaque
+    /// coordination tokens and *are* templated; the caller is a trust boundary
+    /// and is not.
+    caller: ?[]const u8 = null,
+    /// Group label emitted as `params.group` for supervisor coordination
+    /// (templated). Optional. When set, the generated `sessions.create` joins the
+    /// new tab to this group, which the control server gates on *both*
+    /// `tabs:spawn` and `groups:create`. Unlike `caller`, a group is just an
+    /// opaque coordination token, so templating it from explicit event fields
+    /// (e.g. `${issue.identifier}`) is the intended use.
+    group: ?[]const u8 = null,
 };
 
 /// A KEY/VALUE pair with both sides already resolved.
@@ -77,6 +95,15 @@ pub const LaunchRequest = struct {
     /// Connector provenance shown on the launched tab (connector name, event id,
     /// event type, url, launch timestamp). These keys are reserved.
     metadata: []const Pair,
+    /// Policy caller/source identity, emitted as `params.caller` when set. Null
+    /// leaves the field off, so the control server attributes the request to the
+    /// trusted first-party local source. Resolved offline — unlike the per-call
+    /// capability token, it is baked into the request here, not runner-injected.
+    caller: ?[]const u8,
+    /// Group label, emitted as `params.group` when set. Null leaves the field
+    /// off. Resolved (templated) offline so the runner needs no JSON surgery to
+    /// place a connector launch into a supervisor group.
+    group: ?[]const u8,
 
     /// Options for serializing the control request.
     pub const ControlRequestOptions = struct {
@@ -91,8 +118,12 @@ pub const LaunchRequest = struct {
     /// Render the `sessions.create` control request this launch corresponds to,
     /// in the same `{ token?, method, params }` envelope the Control API expects
     /// (mirrors `cli/control.zig` `buildRequest`). Emitting it rather than
-    /// sending it is what `+connector resolve` does; the runner adds the token.
-    /// `alloc` is used only for transient formatting buffers.
+    /// sending it is what `+connector resolve` does; the runner adds only the
+    /// per-call capability token. The explicit policy `caller` and the supervisor
+    /// `group` are resolved offline and emitted here (`params.caller` /
+    /// `params.group`), so a webhook/connector runner never has to splice them
+    /// into the JSON before sending. `alloc` is used only for transient
+    /// formatting buffers.
     ///
     /// Note: `params` conveys the prompt only for `.env` delivery (via the env
     /// array). For `.stdin`/`.file` delivery the prompt is NOT in the control
@@ -125,6 +156,19 @@ pub const LaunchRequest = struct {
         }
         try json.objectField("location");
         try json.write("tab");
+
+        // Group joins the new tab to a supervisor group at create time; the
+        // control server gates it on `groups:create` in addition to `tabs:spawn`.
+        if (self.group) |g| {
+            try json.objectField("group");
+            try json.write(g);
+        }
+        // Explicit policy source so the request is attributed to it rather than
+        // the default trusted-local source.
+        if (self.caller) |c| {
+            try json.objectField("caller");
+            try json.write(c);
+        }
 
         if (self.env.len > 0) {
             try json.objectField("env");
@@ -192,6 +236,21 @@ pub fn resolve(
     else
         try alloc.dupe(u8, event.title);
 
+    // Group is templated from explicit event fields only. A group that
+    // substitutes to empty (e.g. an optional `${field?}` with no value) is
+    // omitted, matching the control server's "empty group means no group" rule.
+    const group: ?[]const u8 = if (template.group) |g| blk: {
+        const resolved = try substitute(alloc, g, event, opts);
+        break :blk if (resolved.len == 0) null else resolved;
+    } else null;
+
+    // Caller is copied verbatim — a policy source is a fixed configuration
+    // decision, never derived from the event payload.
+    const caller: ?[]const u8 = if (template.caller) |c|
+        try alloc.dupe(u8, c)
+    else
+        null;
+
     // Resolve configured env entries, then append the prompt entry for `.env`.
     var env: std.ArrayList(Pair) = .empty;
     errdefer env.deinit(alloc);
@@ -231,6 +290,8 @@ pub fn resolve(
         .prompt = if (event.prompt) |p| try alloc.dupe(u8, p) else null,
         .prompt_delivery = template.prompt_delivery,
         .metadata = try metadata.toOwnedSlice(alloc),
+        .caller = caller,
+        .group = group,
     };
 }
 
@@ -449,6 +510,110 @@ test "writeControlRequest emits a sessions.create request" {
         try testing.expectEqualStrings("cap-token-123", parsed.object.get("token").?.string);
         try testing.expectEqualStrings("sessions.create", parsed.object.get("method").?.string);
     }
+
+    // With no caller/group configured, those params are omitted entirely (the
+    // server then attributes the request to the trusted local source, ungrouped).
+    {
+        var out: std.io.Writer.Allocating = .init(alloc);
+        var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try req.writeControlRequest(alloc, &json, .{});
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+        const params = parsed.object.get("params").?.object;
+        try testing.expect(params.get("caller") == null);
+        try testing.expect(params.get("group") == null);
+    }
+}
+
+test "resolve carries caller and templated group" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ev: TriggerEvent = .{
+        .source = "linear",
+        .id = "evt-1",
+        .type = "Issue",
+        .title = "Implement adapter layer",
+        .prompt = "Work on MAX-10",
+    };
+    try ev.putField(alloc, "issue.identifier", "MAX-10");
+
+    const req = try resolve(alloc, .{
+        .command = "claude",
+        // The policy source is fixed config; the group is templated from an
+        // explicit event field.
+        .caller = "trusted-automation",
+        .group = "issue-${issue.identifier}",
+    }, ev, .{});
+
+    try testing.expectEqualStrings("trusted-automation", req.caller.?);
+    try testing.expectEqualStrings("issue-MAX-10", req.group.?);
+}
+
+test "writeControlRequest emits caller and group in params" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ev: TriggerEvent = .{
+        .source = "github",
+        .id = "n-7",
+        .type = "issue",
+        .title = "Triage",
+    };
+    try ev.putField(alloc, "repo.full_name", "org/repo");
+
+    const req = try resolve(alloc, .{
+        .command = "codex",
+        .caller = "trusted-automation",
+        .group = "${repo.full_name}",
+    }, ev, .{});
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try req.writeControlRequest(alloc, &json, .{ .token = "tok" });
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+    const params = parsed.object.get("params").?.object;
+    // A runner can send this verbatim: caller + group ride in params, no surgery.
+    try testing.expectEqualStrings("trusted-automation", params.get("caller").?.string);
+    try testing.expectEqualStrings("org/repo", params.get("group").?.string);
+}
+
+test "resolve omits an empty optional templated group" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ev: TriggerEvent = .{ .source = "s", .id = "i", .type = "t", .title = "T" };
+    // The optional `${missing?}` yields an empty string; an empty group is
+    // omitted (matches the server's "empty group means no group" rule).
+    const req = try resolve(alloc, .{ .command = "ls", .group = "${missing?}" }, ev, .{});
+    try testing.expect(req.group == null);
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try req.writeControlRequest(alloc, &json, .{});
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\"group\"") == null);
+}
+
+test "templated group requires an explicit field" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ev: TriggerEvent = .{ .source = "s", .id = "i", .type = "t", .title = "T" };
+    var diag: Diagnostic = .{};
+    // A required `${...}` group field that the event does not provide is an
+    // error naming the field — never silently inferred from anything else.
+    try testing.expectError(
+        error.MissingField,
+        resolve(alloc, .{ .command = "ls", .group = "${issue.identifier}" }, ev, .{ .diag = &diag }),
+    );
+    try testing.expectEqualStrings("issue.identifier", diag.field);
 }
 
 test "stdin delivery keeps the prompt off the control request" {

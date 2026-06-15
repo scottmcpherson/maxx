@@ -159,8 +159,11 @@ struct ControlBusEvent {
 ///
 /// A deliberate superset of ``ControlEventView`` so supervisors get a stable,
 /// correlatable record with a global cursor and an explicit ownership tag. New
-/// fields are additive and optional; metadata-specific event fields are
-/// intentionally deferred to MAX-4 so this envelope stays workflow-neutral.
+/// fields are additive and optional. Agent-reported metadata writes (MAX-4) flow
+/// onto the stream as `kind: metadata` events that carry the affected key in
+/// `name` and reuse the generic `message`/`payload` fields; the envelope adds no
+/// metadata-value-specific fields, so it stays uniform and workflow-neutral (a
+/// supervisor reads the full map via `get`/`list`/`watch`, not off the stream).
 struct ControlStreamEventView: Codable, Equatable {
     /// Envelope schema version. Bumped only on an incompatible change so a
     /// supervisor can pin the contract it understands.

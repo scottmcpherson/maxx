@@ -136,6 +136,16 @@ gated by `state:set` instead (status is the same state field `declare-state`
 writes and `wait --state` matches; it is the stronger gate when both are
 present), so neither field is a way around the other's capability.
 
+**Create-time metadata is the deliberate exception.** A `metadata` object passed
+to `sessions.create` rides under `tabs:spawn`, **not** `metadata:set`. It is part
+of the atomic spawn request — an explicit caller declaration captured as the tab
+is created (e.g. a connector attaching `connector.*` provenance) — not the
+post-create agent-metadata write surface that `metadata:set` gates. So a webhook
+source allowed to `tabs:spawn` but not `metadata:set` can still stamp provenance
+at create time, yet cannot mutate metadata afterward. The metadata is still
+validated and stored verbatim; it arrives in the `watch` snapshot rather than as
+a separate audit entry.
+
 ## CLI
 
 The `ghostty`/`maxx` binary ships a `+control` action that handles the token and
@@ -599,9 +609,12 @@ a schema-versioned envelope:
 - `group` — the group this event pertains to (the session's current group, or the
   affected group for `group.joined`/`group.left`); omitted when none.
 
-Metadata-specific event fields are intentionally **not** part of this envelope
-yet; agent-reported metadata is owned by a separate change (MAX-4) and the
-envelope stays workflow-neutral until then.
+Agent-reported metadata writes (set/remove/clear; the merge in `update`; and the
+`metadata` object supplied at `create`) flow onto this stream as `kind: metadata`
+events that carry the affected key in `name` and reuse the generic
+`message`/`payload` fields. The envelope adds no metadata-value-specific fields,
+so it stays uniform and workflow-neutral: a supervisor learns _which_ key changed
+from the stream and reads the full map verbatim via `get` / `list` / `watch`.
 
 ### Events Maxx owns (`source_kind: maxx`, `kind: lifecycle`)
 

@@ -47,6 +47,10 @@ const Command = struct {
     cwd: ?[]const u8 = null,
     title: ?[]const u8 = null,
     launched_at: ?[]const u8 = null,
+    /// Policy caller/source identity (`--as`), emitted as `params.caller`.
+    caller: ?[]const u8 = null,
+    /// Supervisor group label (`--group`, templated), emitted as `params.group`.
+    group: ?[]const u8 = null,
     prompt_delivery: Template.PromptDelivery = .env,
     json: bool = false,
     env: std.ArrayList(Template.EnvEntry) = .empty,
@@ -74,7 +78,16 @@ const Command = struct {
 ///     / omitted to read stdin), `--command <cmd>` (required; supports
 ///     `${field}` placeholders), `--cwd <path>`, `--title <text>`, repeatable
 ///     `--env KEY=VALUE` (values support `${field}`), `--prompt-delivery
-///     env|stdin|file`, `--launched-at <iso8601>`, and `--json`.
+///     env|stdin|file`, `--as <source>` (the policy caller, emitted as
+///     `params.caller`), `--group <label>` (a supervisor group, templated,
+///     emitted as `params.group`), `--launched-at <iso8601>`, and `--json`.
+///
+///     `--as`/`--group` make the emitted `sessions.create` complete for an
+///     autonomous webhook runner: it injects only the per-call capability token.
+///     A grouped launch (`--group`) is gated by the control server on *both*
+///     `tabs:spawn` and `groups:create`. The caller (`--as`) is a fixed policy
+///     identity copied verbatim; the group is templated from explicit event
+///     fields only, so neither is inferred from terminal/process state.
 ///
 ///   * `list`: list the available connector source adapters. Flags: `--json`.
 ///
@@ -215,6 +228,8 @@ fn runResolve(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
         .title = cmd.title,
         .env = cmd.env.items,
         .prompt_delivery = cmd.prompt_delivery,
+        .caller = cmd.caller,
+        .group = cmd.group,
     };
 
     var diag: Template.Diagnostic = .{};
@@ -308,6 +323,10 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.title = v;
         } else if (try flagValue(alloc, arg, iter, "--launched-at")) |v| {
             cmd.launched_at = v;
+        } else if (try flagValue(alloc, arg, iter, "--as")) |v| {
+            cmd.caller = v;
+        } else if (try flagValue(alloc, arg, iter, "--group")) |v| {
+            cmd.group = v;
         } else if (try flagValue(alloc, arg, iter, "--prompt-delivery")) |v| {
             cmd.prompt_delivery = std.meta.stringToEnum(Template.PromptDelivery, v) orelse
                 return error.InvalidPromptDelivery;
@@ -365,6 +384,23 @@ test "parseCommand resolve with flags" {
     try testing.expectEqualStrings("A", cmd.env.items[0].key);
     try testing.expectEqualStrings("B", cmd.env.items[0].value);
     try testing.expect(cmd.prompt_delivery == .stdin);
+}
+
+test "parseCommand resolve with caller and group" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "connector resolve --source linear --command claude --as trusted-automation --group issue-${issue.identifier}",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expectEqualStrings("trusted-automation", cmd.caller.?);
+    try testing.expectEqualStrings("issue-${issue.identifier}", cmd.group.?);
 }
 
 test "parseCommand rejects unknown verb and bad prompt delivery" {
