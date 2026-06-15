@@ -62,6 +62,11 @@ protocol ControlSurfaceHandle {
     /// (`create`/`update`/`set-metadata`/`remove-metadata`/`clear-metadata`) —
     /// never inferred from terminal output.
     func applyMetadata(_ metadata: [String: ControlJSONValue])
+    /// Push the session's explicit parent/group relationship (MAX-6) to the
+    /// surface so the tab UI can show grouping. Called only in response to an
+    /// explicit `create`/`set-group`/`set-parent` (or a `restart` re-push) —
+    /// never inferred from terminal output, process names, paths, or idle time.
+    func applyRelationship(_ relationship: ControlRelationship)
 }
 
 /// The in-memory registry of API-created sessions plus the request dispatcher.
@@ -259,7 +264,7 @@ final class ControlSessionRegistry {
             case .sessionsGet:
                 return .success(.init(session: try get(request.params, host: host)))
             case .sessionsList:
-                return .success(.init(sessions: list(request.params, host: host)))
+                return .success(.init(sessions: try list(request.params, host: host)))
             case .sessionsUpdate:
                 return .success(.init(session: try update(request.params, host: host)))
             case .sessionsAction:
@@ -285,6 +290,8 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setSummary(request.params, host: host)))
             case .sessionsSetAgentType:
                 return .success(.init(session: try setAgentType(request.params, host: host)))
+            case .sessionsSetParent:
+                return .success(.init(session: try setParent(request.params, host: host)))
             case .sessionsEvents:
                 return .success(.init(events: try events(request.params, host: host)))
             case .sessionsSetGroup:
@@ -560,6 +567,12 @@ final class ControlSessionRegistry {
         if !metadata.isEmpty {
             pushMetadata(session, to: liveSurface(of: session, host: host))
         }
+        // Likewise surface a create-time group/parent relationship (MAX-6) so a
+        // tab created under a parent or in a group shows its grouping from the
+        // start. A plain ungrouped tab has nothing to push, so its UI is unchanged.
+        if !relationship(of: session).isEmpty {
+            pushRelationship(session, to: liveSurface(of: session, host: host))
+        }
         return view(of: session, host: host)
     }
 
@@ -577,11 +590,29 @@ final class ControlSessionRegistry {
     private func list(
         _ params: ControlRequest.Params?,
         host: ControlSessionHost
-    ) -> [ControlSessionView] {
+    ) throws -> [ControlSessionView] {
         reconcile(host: host)
-        let filters = params?.metadataFilter ?? []
+        let metadataFilters = params?.metadataFilter ?? []
+        // Group-aware query filters (MAX-6), composed (AND) with the metadata
+        // filters and with each other. Both are explicit equality checks over the
+        // stored relationship metadata — a `group` filter returns a group's
+        // members; a `parent` filter returns a tab's children. Mechanical, never
+        // inferred. A supervisor finds a tab's siblings by listing the children of
+        // its parent (`parent_id` from `get`, then `list --parent <thatParent>`).
+        //
+        // The `parent` filter is parsed (shape only) but its id is deliberately
+        // NOT required to name a known session: the `tabs:list` read capability
+        // already enumerates every session, so an unknown/closed parent id is not
+        // an existence oracle — it simply matches no children. This is also what
+        // keeps a child of a *closed* parent listed by `list --parent <closed>`,
+        // carrying its own lifecycle, so "active visible children" is a
+        // client-side lifecycle filter over a mechanically-preserved edge.
+        let groupFilter = try ControlValidation.validateGroup(params?.group)
+        let parentFilter = try parseParentID(params?.parent)
         return sessions.values
-            .filter { Self.matchesMetadataFilter($0.metadata, filters) }
+            .filter { Self.matchesMetadataFilter($0.metadata, metadataFilters) }
+            .filter { groupFilter == nil || $0.group == groupFilter }
+            .filter { parentFilter == nil || $0.parentID == parentFilter }
             .sorted { $0.createdAt < $1.createdAt }
             .map { view(of: $0, host: host) }
     }
@@ -992,6 +1023,125 @@ final class ControlSessionRegistry {
         return view(of: session, host: host)
     }
 
+    // MARK: - Parent-child tab groups (MAX-6)
+
+    /// Set or clear a session's parent edge after creation (`set-parent`), the
+    /// update counterpart to `create --parent`. Records the Maxx-owned
+    /// `parent.set`/`parent.cleared` mechanical events (mirroring
+    /// `group.joined`/`group.left`) and re-pushes the relationship to the live
+    /// surface so the tab UI reflects it.
+    ///
+    /// The edge is explicit caller-supplied metadata, never inferred. Validation
+    /// keeps the graph sound: an empty/absent `parent` clears the edge; otherwise
+    /// the parent must be a valid UUID (`invalid_request`) naming a known session
+    /// (`not_found`), must not be the session itself (`invalid_request`), and must
+    /// not introduce a cycle (`invalid_request`). Setting the parent to the value
+    /// it already holds is an idempotent no-op: nothing is recorded, `updated_at`
+    /// is not bumped, and a closed/restored record's retention recency is not
+    /// refreshed (matching `set-group` / the metadata mutators).
+    private func setParent(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        // Parse the requested edge (shape only) and compare BEFORE validating, so
+        // re-setting the parent a session already has is a true no-op: it must not
+        // bump `updated_at`, refresh a closed/restored record's retention recency,
+        // emit an event, or re-run existence/cycle validation (which — on a
+        // corrupt/restored graph that already contains a cycle — would wrongly
+        // reject a harmless redundant call). Matches `set-group`, which compares
+        // the new value first and only does work on a real change.
+        let candidate = try parseParentID(params?.parent)
+        guard session.parentID != candidate else { return view(of: session, host: host) }
+        // The edge is actually changing: fully validate the new parent before
+        // applying it (existence / self / cycle).
+        if let candidate {
+            try validateParentEdge(candidate, for: session.id)
+        }
+
+        let at = now()
+        let pid = liveSurface(of: session, host: host)?.pid
+        let old = session.parentID
+        session.parentID = candidate
+        store(&session)
+        // A single-valued edge: `parent.set` (with the new parent id) fully
+        // describes a set OR a re-parent; `parent.cleared` is recorded only when
+        // the edge is actually removed (it would be false to claim "cleared" on a
+        // P1→P2 change, where the new state still has a parent).
+        if let candidate {
+            recordMechanical(
+                session, name: "parent.set", message: candidate.uuidString,
+                group: session.group, createdAt: at, pid: pid)
+        } else if old != nil {
+            recordMechanical(
+                session, name: "parent.cleared", group: session.group, createdAt: at, pid: pid)
+        }
+        pushRelationship(session, to: liveSurface(of: session, host: host))
+        return view(of: session, host: host)
+    }
+
+    /// Parse a `set-parent` / `list --parent` parent id, shape only: absent/empty
+    /// → nil (clear, or "no filter"); a non-UUID value is `invalid_request`.
+    /// Existence, self, and cycle are validated separately (``validateParentEdge``)
+    /// and only when an edge actually changes, so a redundant re-set or a filter by
+    /// an unknown id never triggers them.
+    private func parseParentID(_ idString: String?) throws -> UUID? {
+        guard let idString, !idString.isEmpty else { return nil }
+        guard let id = UUID(uuidString: idString) else {
+            throw ControlError(.invalidRequest, "parent is not a valid UUID")
+        }
+        return id
+    }
+
+    /// Validate a *new* parent edge for `childID`: the parent must name a known
+    /// session (`not_found`), must not be the child itself, and must not introduce
+    /// a cycle (all `invalid_request`). Only called when the edge actually changes,
+    /// never on a no-op re-set.
+    private func validateParentEdge(_ parentID: UUID, for childID: UUID) throws {
+        guard sessions[parentID] != nil else {
+            throw ControlError(.notFound, "no parent session with id \(parentID.uuidString)")
+        }
+        guard parentID != childID else {
+            throw ControlError(.invalidRequest, "a session cannot be its own parent")
+        }
+        guard !wouldFormCycle(child: childID, proposedParent: parentID) else {
+            throw ControlError(.invalidRequest, "parent edge would create a cycle")
+        }
+    }
+
+    /// Whether making `childID` a child of `proposedParent` would form a cycle,
+    /// i.e. `childID` already appears on `proposedParent`'s ancestry chain. Walks
+    /// parent edges via the persisted `parentID` pointers only — a purely
+    /// mechanical graph traversal, never output inference. The hop guard is
+    /// defensive against a pre-existing cycle (which set-parent's validation
+    /// prevents creating in the first place).
+    private func wouldFormCycle(child childID: UUID, proposedParent: UUID) -> Bool {
+        var cursor: UUID? = proposedParent
+        var hops = 0
+        while let id = cursor {
+            if id == childID { return true }
+            hops += 1
+            if hops > sessions.count + 1 { return true }
+            cursor = sessions[id]?.parentID
+        }
+        return false
+    }
+
+    /// A snapshot of the session's explicit parent/group relationship for the UI.
+    private func relationship(of session: ControlSession) -> ControlRelationship {
+        ControlRelationship(group: session.group, isChild: session.parentID != nil)
+    }
+
+    /// Push the session's current parent/group relationship to its live surface so
+    /// the tab UI reflects it. A no-op if the surface is gone. Like
+    /// ``pushMetadata`` this is the only path from a relationship declaration to
+    /// the UI; it carries explicit, caller-set values only — never anything Maxx
+    /// inferred. The full snapshot is sent every time so the badge swaps (or
+    /// clears) atomically.
+    private func pushRelationship(_ session: ControlSession, to handle: ControlSurfaceHandle?) {
+        handle?.applyRelationship(relationship(of: session))
+    }
+
     /// Push the session's current declared workflow state + summary to its live
     /// surface so the UI badge reflects it. A no-op if the surface is gone. This
     /// is the only path from a declaration to the UI; it carries explicit
@@ -1116,6 +1266,12 @@ final class ControlSessionRegistry {
         // contrast, was cleared above because it is per-run.
         if !session.metadata.isEmpty {
             pushMetadata(session, to: host.surface(for: newSurface))
+        }
+        // The group/parent relationship (MAX-6) is likewise scoped to the record
+        // and survives the restart; re-push it so the fresh surface shows the
+        // grouping. (A plain ungrouped session has nothing to push.)
+        if !relationship(of: session).isEmpty {
+            pushRelationship(session, to: host.surface(for: newSurface))
         }
         return view(of: session, host: host)
     }
@@ -1430,6 +1586,9 @@ final class ControlSessionRegistry {
         if let newGroup {
             recordMechanical(session, name: "group.joined", message: newGroup, group: newGroup, createdAt: at, pid: pid)
         }
+        // Re-push the relationship (MAX-6) so the tab's group chip updates — or
+        // clears, when the session just left its group.
+        pushRelationship(session, to: liveSurface(of: session, host: host))
         return view(of: session, host: host)
     }
 
@@ -1718,13 +1877,12 @@ final class ControlSessionRegistry {
     /// Absent/empty → no parent. A non-UUID string is `invalid_request`; a UUID
     /// that names no known session is `not_found`. The edge is always a
     /// caller-supplied id we can verify — never inferred from naming or order.
+    /// (Self/cycle checks are not needed at create: the new session's id does not
+    /// exist yet, so it can neither be its own parent nor be on any chain.)
     private func resolveParent(_ idString: String?) throws -> UUID? {
-        guard let idString, !idString.isEmpty else { return nil }
-        guard let id = UUID(uuidString: idString) else {
-            throw ControlError(.invalidRequest, "parent is not a valid UUID")
-        }
+        guard let id = try parseParentID(idString) else { return nil }
         guard sessions[id] != nil else {
-            throw ControlError(.notFound, "no parent session with id \(idString)")
+            throw ControlError(.notFound, "no parent session with id \(id.uuidString)")
         }
         return id
     }

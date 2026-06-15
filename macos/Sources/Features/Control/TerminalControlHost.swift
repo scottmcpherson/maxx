@@ -168,4 +168,11 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         // map verbatim and never derives anything from terminal output.
         view.applyAgentMetadata(metadata)
     }
+
+    func applyRelationship(_ relationship: ControlRelationship) {
+        // An explicit caller-set parent/group edge only (MAX-6) — the surface
+        // stores and displays it verbatim and never derives a relationship from
+        // terminal output, process names, paths, or idle time.
+        view.applyAgentRelationship(relationship)
+    }
 }

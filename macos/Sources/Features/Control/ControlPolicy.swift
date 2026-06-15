@@ -494,10 +494,13 @@ enum ControlPolicyMapping {
             return .tabsList
         case .sessionsCreate:
             return .tabsSpawn
-        case .sessionsSetGroup:
-            // Assigning/clearing group membership is the group-mutation
-            // capability (implemented as of MAX-7). `create --group` enforces it
-            // as a secondary check on top of `tabs:spawn`.
+        case .sessionsSetGroup, .sessionsSetParent:
+            // Assigning/clearing group membership (`set-group`, MAX-7) or a parent
+            // edge (`set-parent`, MAX-6) is the group-mutation capability: both are
+            // explicit association edges between sessions. `create --group` /
+            // `create --parent` enforce it as a secondary check on top of
+            // `tabs:spawn`. Enforced before any session/parent lookup, so a denied
+            // caller cannot use it as a session-existence oracle.
             return .groupsCreate
         case .sessionsRestart:
             return .tabsRestart

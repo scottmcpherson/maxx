@@ -260,6 +260,26 @@ struct ControlDeclaredState: Equatable {
     var updatedAt: Date
 }
 
+/// A snapshot of a session's explicit parent/group relationship (MAX-6), pushed
+/// to the live surface so the tab UI can show grouping at a glance.
+///
+/// A pure value carrier across the control-plane → UI boundary, mirroring
+/// ``ControlDeclaredState``: both fields are set only by an explicit
+/// `create` / `set-group` / `set-parent` call. Maxx never derives the group or
+/// the parent edge from terminal output, process names, branch names, paths, or
+/// idle time — an ungrouped tab with no parent simply has nothing to show.
+struct ControlRelationship: Equatable {
+    /// Explicit group label, or nil when the session belongs to no group.
+    var group: String?
+    /// True when the session has an explicit parent edge (`parentID != nil`). A
+    /// mechanical fact about a caller-supplied association — not about the work.
+    var isChild: Bool
+
+    /// Ungrouped and not a child: there is nothing to surface, so the UI shows
+    /// no relationship badge and behaves exactly as it does for any plain tab.
+    var isEmpty: Bool { group == nil && !isChild }
+}
+
 /// Validation for caller-supplied inputs. Pure and side-effect free so it can be
 /// unit tested without a running app. Each failure maps to `invalid_request`.
 enum ControlValidation {

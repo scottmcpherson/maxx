@@ -157,6 +157,60 @@ struct NoInferenceGuardrailsTests {
         #expect(host.surfaces[surface]?.declaredState == nil)
     }
 
+    // MARK: Parent/group relationships are explicit only (MAX-6)
+
+    @Test func parentAndGroupAreNeverInferredFromIncidentalSignals() {
+        // A child tab's parent/group edges are explicit caller metadata. Tempting
+        // signals — a "parent"-looking cwd, branch/worktree-style metadata, a
+        // command that reads like a supervisor — must never auto-populate the
+        // relationship: an undeclared session stays ungrouped with no parent, and
+        // pushes no relationship badge to its surface.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(
+            registry, host,
+            command: "supervisor --children 3",
+            cwd: "/Users/dev/.worktrees/release-group",
+            metadata: ["group": "release", "parent": UUID().uuidString])
+
+        let session = get(registry, host, id)
+        // The `group`/`parent` *relationship* fields stay empty (the lookalike
+        // values live only in the verbatim metadata map, not as edges).
+        #expect(session.group == nil)
+        #expect(session.parentID == nil)
+        #expect(host.surfaces[surface]?.relationship == nil)
+    }
+
+    @Test func explicitRelationshipRendersButGroupMetadataKeyDoesNot() {
+        // The flip side: an explicit `create --group` / `set-parent` edge IS
+        // surfaced, while a metadata key that merely happens to be named "group"
+        // is never read as group membership.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let parentSurface = UUID()
+        host.nextCreateID = parentSurface
+        let parent = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", group: "release")), host: host)
+            .result!.session!.sessionID
+        // The explicit group edge is surfaced to the parent's tab.
+        #expect(host.surfaces[parentSurface]?.relationship?.group == "release")
+
+        let childSurface = UUID()
+        host.nextCreateID = childSurface
+        let child = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "ls", metadata: ["group": .string("not-a-real-group")])),
+            host: host)
+            .result!.session!.sessionID
+        // A metadata key named "group" is not membership: no relationship badge.
+        #expect(host.surfaces[childSurface]?.relationship == nil)
+        #expect(get(registry, host, child).group == nil)
+
+        // Declaring the edge explicitly is what surfaces it.
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        #expect(host.surfaces[childSurface]?.relationship?.isChild == true)
+    }
+
     // MARK: Positive controls — declared facts DO render
 
     @Test func explicitDeclarationStillRendersWorkflowState() {
