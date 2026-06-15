@@ -59,6 +59,17 @@ extension Ghostty {
         /// declaration arrives, so terminal behavior is unchanged otherwise.
         @Published private(set) var declaredAgentState: ControlDeclaredState?
 
+        /// Agent-reported structured metadata for display, set ONLY by an explicit
+        /// Control API metadata call (`create`/`update`/`set-metadata`/
+        /// `remove-metadata`/`clear-metadata`; see MAX-4).
+        ///
+        /// Like `declaredAgentState`, every entry here is recorded exactly as an
+        /// agent reports it and is never inferred from terminal output, process
+        /// names, branch names, paths, or idle time. Maxx displays it as
+        /// agent-provided metadata and never treats any key as workflow state.
+        /// Empty until metadata arrives, so terminal behavior is unchanged.
+        @Published private(set) var agentMetadata: [String: ControlJSONValue] = [:]
+
         /// Stable hook identity for this surface.
         let agentSurfaceID: String
 
@@ -1039,6 +1050,14 @@ extension Ghostty {
         /// `set-state` / `set-summary` request — never from output inference.
         func applyDeclaredAgentState(_ declared: ControlDeclaredState) {
             declaredAgentState = declared
+        }
+
+        /// Apply explicit agent-reported metadata for display (MAX-4). Called only
+        /// from the Control API host in response to an explicit metadata request —
+        /// never from output inference. The whole map is replaced at once so the
+        /// UI never renders a partially-applied change.
+        func applyAgentMetadata(_ metadata: [String: ControlJSONValue]) {
+            agentMetadata = metadata
         }
 
         private func interruptRunningAgentActivity() {

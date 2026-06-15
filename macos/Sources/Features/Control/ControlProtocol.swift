@@ -57,8 +57,14 @@ enum ControlMethod: String, Codable {
     /// Emit a named agent event with an optional structured payload.
     case sessionsEmitEvent = "sessions.emit-event"
 
-    /// Set a single caller-owned metadata key.
+    /// Set (merge) one agent-reported metadata key with a string or JSON value.
     case sessionsSetMetadata = "sessions.set-metadata"
+
+    /// Remove one or more agent-reported metadata keys.
+    case sessionsRemoveMetadata = "sessions.remove-metadata"
+
+    /// Clear all agent-reported metadata for a session.
+    case sessionsClearMetadata = "sessions.clear-metadata"
 
     /// Return a session's audit log (declared states/events + lifecycle actions).
     case sessionsEvents = "sessions.events"
@@ -142,8 +148,9 @@ struct ControlRequest: Codable {
         var command: String?
         /// Environment overrides in `KEY=VALUE` form.
         var env: [String]?
-        /// Caller-owned metadata (string → string).
-        var metadata: [String: String]?
+        /// Agent-reported metadata (MAX-4): namespaced key → arbitrary JSON
+        /// value. Used by `create`/`update` (merge) and echoed verbatim.
+        var metadata: [String: ControlJSONValue]?
         /// Caller-owned status string (e.g. `waiting_for_review`).
         var status: String?
         /// `tab` (default) or `window`.
@@ -169,8 +176,15 @@ struct ControlRequest: Codable {
         var payloadJson: String?
         /// Metadata key for `set-metadata`.
         var key: String?
-        /// Metadata value for `set-metadata`.
+        /// Metadata value for `set-metadata` (a plain string value).
         var value: String?
+        /// Metadata value for `set-metadata` as a raw JSON string, parsed into a
+        /// structured value. Takes precedence over `value` when both are present.
+        var valueJson: String?
+        /// Metadata keys to drop for `remove-metadata`.
+        var keys: [String]?
+        /// Metadata key/value constraints for `list` (all must match — AND).
+        var metadataFilter: [MetadataFilter]?
         /// Optional reason recorded by `archive`.
         var reason: String?
         /// Signal name for the `interrupt` action (default: send Ctrl-C via tty).
@@ -217,13 +231,25 @@ struct ControlRequest: Codable {
             case id, title, cwd, command, env, metadata, status, location
             case action, input, state, event, lifecycle, message, source
             case payloadJson = "payload_json"
-            case key, value, reason, signal
+            case key, value
+            case valueJson = "value_json"
+            case keys
+            case metadataFilter = "metadata_filter"
+            case reason, signal
             case timeoutMs = "timeout_ms"
             case since
             case summary
             case group, tab, all
             case caller, confirm, capability
         }
+    }
+
+    /// A single `list` metadata constraint. `key` alone requires the key to be
+    /// present; `key` + `value` additionally requires the value (compared as a
+    /// string via ``ControlJSONValue/displayString``) to match.
+    struct MetadataFilter: Codable {
+        var key: String
+        var value: String?
     }
 }
 
@@ -245,7 +271,9 @@ struct ControlSessionView: Codable, Equatable {
     /// explicit session state (surface existence + kernel-reported process
     /// liveness), never from terminal output.
     var lifecycle: String
-    var metadata: [String: String]
+    /// Agent-reported structured metadata (MAX-4): namespaced key → arbitrary
+    /// JSON value, surfaced verbatim. Maxx never interprets it as workflow state.
+    var metadata: [String: ControlJSONValue]
     /// Group membership for supervisor coordination (MAX-7); omitted when the
     /// session is not in a group. Explicitly set, never inferred.
     var group: String?

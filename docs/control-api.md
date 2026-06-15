@@ -20,7 +20,8 @@ bearing design constraint:
   `maxxctl`-style operations.
 - **Agent declarations (workflow semantics).** Verbs an agent or orchestrator
   uses to **declare** workflow-relevant facts Maxx then stores and replays
-  verbatim: `declare-state`, `emit-event`, and `set-metadata`. These are
+  verbatim: `declare-state`, `emit-event`, and the agent-reported metadata verbs
+  (`set-metadata`, `remove-metadata`, `clear-metadata`). These are
   `maxx-agent-hook`-style operations.
 
 Maxx never originates or interprets the semantic facts; it only records the ones
@@ -128,12 +129,12 @@ Every allow/deny/confirm decision (including `policy check`) is written to the
 unified log under the `ControlPolicy` category with the source, capability,
 target, and reason — never the request params.
 
-> Metadata-write enforcement is intentionally deferred until the metadata API
-> rework (MAX-4): a metadata-only `sessions.update` and `sessions.set-metadata`
-> are currently ungated by the capability policy. A `sessions.update` that sets
-> `status` **is** gated by `state:set` (status is the same state field
-> `declare-state` writes and `wait --state` matches), so that path is not a way
-> around `state:set`.
+Metadata writes are gated by `metadata:set`: `sessions.set-metadata`,
+`sessions.remove-metadata`, `sessions.clear-metadata`, and a metadata-only
+`sessions.update` all require it. A `sessions.update` that also sets `status` is
+gated by `state:set` instead (status is the same state field `declare-state`
+writes and `wait --state` matches; it is the stronger gate when both are
+present), so neither field is a way around the other's capability.
 
 ## CLI
 
@@ -175,7 +176,30 @@ maxx +control sessions events <session_id> --since 0
 ```bash
 maxx +control sessions declare-state <session_id> --state tests:passed --message "all green" --source ci-agent
 maxx +control sessions emit-event <session_id> --event pr.opened --payload-json '{"pr":123}'
-maxx +control sessions set-metadata <session_id> --key reviewer --value alice
+```
+
+### Agent-reported metadata
+
+Namespaced key → arbitrary JSON value an agent attaches to a session. Maxx
+stores, displays (a metadata chip on the tab), and filters it verbatim, and
+never interprets a key as workflow state.
+
+```bash
+# Set/merge one key (string value, or a structured value via --value-json).
+maxx +control sessions set-metadata <session_id> --key linear.issue --value MAX-4
+maxx +control sessions set-metadata <session_id> --key pr.url --value https://github.com/org/repo/pull/456
+maxx +control sessions set-metadata <session_id> --key cleanup.command --value 'git worktree remove ../wt'
+maxx +control sessions set-metadata <session_id> --key run --value-json '{"id":"run_abc","attempts":[1,2]}'
+
+# Merge several string keys at once via create/update.
+maxx +control sessions update <session_id> --metadata repo=org/repo --metadata branch=codex/agent-metadata-api
+
+# Remove one or more keys, or clear them all.
+maxx +control sessions remove-metadata <session_id> --key branch --key run
+maxx +control sessions clear-metadata <session_id>
+
+# List only sessions whose metadata matches every filter (key present, or key=value).
+maxx +control sessions list --filter repo=org/repo --filter linear.issue
 ```
 
 ### Agent-declared workflow state (displayed)
@@ -294,35 +318,41 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                   | REST equivalent                                | Purpose                                                                             |
-| ------------------------ | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
-| `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
-| `sessions.list`          | `GET /control/v1/sessions`                     | List API-created sessions.                                                          |
-| `sessions.update`        | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only.                                       |
-| `sessions.action`        | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
-| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
-| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
-| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
-| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
-| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
-| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
-| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
-| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                                           |
-| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
-| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
-| `sessions.set-group`     | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
-| `stream.watch`           | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
-| `stream.wait`            | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
-| `policy.check`           | `GET /control/v1/policy/check`                 | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
+| Method                     | REST equivalent                                | Purpose                                                                             |
+| -------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `sessions.create`          | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
+| `sessions.get`             | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
+| `sessions.list`            | `GET /control/v1/sessions`                     | List API-created sessions; optional `metadata_filter`.                              |
+| `sessions.update`          | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only (metadata merges).                     |
+| `sessions.action`          | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
+| `sessions.wait`            | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
+| `sessions.watch`           | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
+| `sessions.archive`         | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
+| `sessions.restart`         | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
+| `sessions.events`          | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
+| `sessions.declare-state`   | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
+| `sessions.emit-event`      | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
+| `sessions.set-metadata`    | `PUT /control/v1/sessions/{id}/meta`           | Agent sets/merges one metadata key (`value` or `value_json`).                       |
+| `sessions.remove-metadata` | `DELETE /control/v1/sessions/{id}/meta`        | Agent removes one or more metadata keys (`key`/`keys`).                             |
+| `sessions.clear-metadata`  | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
+| `sessions.set-state`       | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
+| `sessions.set-summary`     | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-group`       | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
+| `stream.watch`             | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
+| `stream.wait`              | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
+| `policy.check`             | `GET /control/v1/policy/check`                 | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
 
 ### Audit entries
 
-`declare-state`, `emit-event`, `set-metadata`, `set-state`, and `set-summary`
-append to a per-session, append-only audit log. Each entry is fully auditable and
+`declare-state`, `emit-event`, the metadata mutations (`set-metadata` /
+`remove-metadata` / `clear-metadata`, and the metadata merge in `update`),
+`set-state`, and `set-summary` append to a
+per-session, append-only audit log. Each entry is fully auditable and
 carries a monotonic `seq`, a `kind` (`state` / `event` / `metadata` /
 `workflow-state` / `summary`, plus `lifecycle` for the `archive` / `restart`
-actions Maxx records itself), the declared `name`, the
+actions Maxx records itself), the declared `name` (the affected metadata key, or
+`*` for a clear; a metadata removal/clear also carries `message`
+`removed`/`cleared`), the
 `source` (agent-supplied, or `maxx` for runtime entries), the `created_at`
 timestamp, the `session_id` and `surface_id`, and the foreground `pid` observed
 at record time. `wait`, `watch`, and `events` all read from this one log — never
@@ -394,7 +424,10 @@ Errors are predictable and documented:
   UUID, the UI title, the PID, the working directory, the branch, or the command
   text. Use it for all later operations.
 - `surface_id` is the underlying terminal surface; exposed for correlation only.
-- `status` and `metadata` are **caller-owned**. `lifecycle` is **Maxx-owned**.
+- `status` and `metadata` are **caller/agent-owned**. `lifecycle` is **Maxx-owned**.
+  `metadata` is an **agent-reported** map of namespaced keys → arbitrary JSON
+  values (see [Agent-reported metadata](#agent-reported-metadata)); Maxx stores,
+  displays, and filters it verbatim and never reads a key as workflow state.
 - `workflow_state` and `summary` are **agent-declared for display** (`set-state` /
   `set-summary`): Maxx records and shows them verbatim and never infers them.
   They are intentionally separate from the free-form `status`, and from the
@@ -412,8 +445,12 @@ Errors are predictable and documented:
 ### Limits
 
 - `title` ≤ 256 chars, `status` ≤ 128 chars, `command` ≤ 4096 chars.
-- `metadata`: ≤ 32 keys; keys match `[A-Za-z0-9_.-]` and ≤ 64 chars; values ≤
-  1024 chars.
+- `metadata`: ≤ 32 keys; keys match `[A-Za-z0-9_.-]` and ≤ 64 chars; each value's
+  serialized (compact JSON) size ≤ 2048 bytes and the whole map ≤ 16384 bytes.
+  Values may be any JSON (string, number, bool, null, array, object). JSON
+  integers are preserved exactly across the full `Int64` range (so external ids,
+  timestamps, and run numbers never lose precision); fractional numbers use
+  IEEE-754 double precision.
 - `env`: ≤ 256 `KEY=VALUE` entries; keys match `[A-Za-z0-9_]`.
 - `summary` (`set-summary`) ≤ 1024 chars; `set-state` accepts only the fixed
   workflow vocabulary above.
@@ -422,6 +459,52 @@ Errors are predictable and documented:
 or add) and only accepts `status`/`metadata` — any attempt to set server-owned
 fields is rejected with `invalid_request`. `sessions.action cancel`/`close` is
 **idempotent**.
+
+## Agent-reported metadata
+
+`metadata` is a generic, agent-owned store: a map of **namespaced keys** to
+**arbitrary JSON values** an agent or orchestrator attaches to a session so Maxx
+can store, display, and filter it — without inferring any of it. Maxx does not
+scrape terminal output, parse process names, or read branch names/paths/idle
+time to populate it; every entry comes from an explicit API call. No key is
+treated as authoritative workflow state, and unknown keys round-trip verbatim
+with no normalization, so new keys need no app change to appear in `get` / `list`
+/ `watch` and in the metadata chip on the tab.
+
+Representative keys: `linear.issue`, `pr.url`, `repo`, `branch`, `run.id`,
+`cleanup.command` — but any `[A-Za-z0-9_.-]` key is accepted.
+
+Operations:
+
+- **Set / merge** — `set-metadata` sets one key (`value` for a plain string, or
+  `value_json` for a structured value); `create` / `update` accept a whole
+  `metadata` object and merge it (provided keys overwrite or add).
+- **Remove** — `remove-metadata` drops the keys named by `key` and/or `keys`
+  (absent keys are ignored; at least one key must be named).
+- **Clear** — `clear-metadata` removes the entire map in one atomic step.
+- **Read** — `get` / `list` / `watch` echo the full map verbatim.
+- **Filter** — `list` accepts `metadata_filter`, an array of `{key, value?}`
+  constraints that all must hold (AND). A `key`-only constraint requires the key
+  to be present; a `key` + `value` constraint requires the value to equal it,
+  compared as a string (a bare string compares as itself; other values as their
+  compact JSON, e.g. `3`, `true`, `[1,2]`).
+
+Every post-create metadata mutation records a `metadata`-kind audit entry per
+affected key — `set-metadata`, the per-key merges from `update`,
+`remove-metadata` (each carries `message` `removed`), and `clear-metadata` (one
+entry, `name` `*`, `message` `cleared`) — so a `watch`/`events` consumer observes
+the change no matter which verb made it. (Metadata supplied at `create` time
+arrives in the `watch` snapshot instead.) Each mutation also pushes the updated
+map to the live surface atomically, so the UI/filtering never observe a
+partially-applied change.
+
+**Persistence.** Metadata is scoped to the **session record's lifetime** in the
+registry. It survives `archive` and `restart` (a restart keeps the stable
+`session_id`, so the reported metadata stays attached — unlike the per-run
+`workflow_state` / `summary` badge, which a restart clears). It is removed only
+by an explicit `remove-metadata` / `clear-metadata`, or when the session record
+itself is gone. There is no separate session export/restore mechanism, so no
+stale metadata is ever restored from a previous run.
 
 ## Lifecycle, wait, watch, archive, restart
 

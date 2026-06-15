@@ -234,6 +234,11 @@ struct ControlStreamFeedMessage: Codable {
 enum ControlJSONValue: Codable, Equatable {
     case null
     case bool(Bool)
+    /// A JSON integer that fits in `Int64`. Kept distinct from `number` so large
+    /// integers (external IDs, timestamps, run numbers) round-trip exactly — a
+    /// `Double` silently corrupts integers past 2^53, which would violate the
+    /// "metadata is stored/displayed/filtered verbatim" contract.
+    case integer(Int64)
     case number(Double)
     case string(String)
     case array([ControlJSONValue])
@@ -244,7 +249,13 @@ enum ControlJSONValue: Codable, Equatable {
         if container.decodeNil() {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
+            // Bool first: a JSON `true`/`false` is a `__NSCFBoolean` that would
+            // otherwise also decode as Int64(1)/Int64(0).
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            // Int64 before Double so integer literals keep full precision; a
+            // fractional or out-of-Int64-range number falls through to Double.
+            self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -265,6 +276,7 @@ enum ControlJSONValue: Codable, Equatable {
         switch self {
         case .null: try container.encodeNil()
         case let .bool(value): try container.encode(value)
+        case let .integer(value): try container.encode(value)
         case let .number(value): try container.encode(value)
         case let .string(value): try container.encode(value)
         case let .array(value): try container.encode(value)
@@ -284,6 +296,40 @@ enum ControlJSONValue: Codable, Equatable {
             return try JSONDecoder().decode(ControlJSONValue.self, from: Data(raw.utf8))
         } catch {
             throw ControlError(.invalidRequest, "payload is not valid JSON")
+        }
+    }
+
+    /// Compact JSON serialization of this value, used both to bound metadata size
+    /// and to render/compare values without interpreting them. Scalars are
+    /// wrapped in an array before encoding because `JSONEncoder` rejects a
+    /// top-level fragment; the surrounding brackets are stripped back off.
+    ///
+    /// Keys are sorted so an object value renders deterministically: otherwise
+    /// `Dictionary` iteration order would make the displayed text — and the
+    /// `displayString` used for `list` filtering — vary from run to run.
+    var serializedJSON: String {
+        let wrapped = ControlJSONValue.array([self])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(wrapped),
+              let string = String(data: data, encoding: .utf8),
+              string.count >= 2 else {
+            return ""
+        }
+        return String(string.dropFirst().dropLast())
+    }
+
+    /// Serialized (compact JSON) byte count, used to enforce metadata size limits.
+    var serializedByteCount: Int { serializedJSON.utf8.count }
+
+    /// A human-facing rendering for display and basic filtering. A bare string
+    /// shows as itself (no surrounding quotes); every other value shows as its
+    /// compact JSON. This is a presentation/comparison affordance only — Maxx
+    /// still stores the value verbatim and never reinterprets it.
+    var displayString: String {
+        switch self {
+        case let .string(value): return value
+        default: return serializedJSON
         }
     }
 }
