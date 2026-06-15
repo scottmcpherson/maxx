@@ -274,11 +274,12 @@ struct ControlSessionPersistenceTests {
         #expect(restored?.nextSeq == 10)
     }
 
-    @Test func saveSkipsWritingAFileTheNextLaunchWouldReject() {
-        // The save-side guard mirrors the read-side cap: if the encoded snapshot
-        // would exceed maxFileBytes, the existing readable file is preserved rather
-        // than replaced with one load() would reject (which would lose every
-        // record). A tiny injected cap exercises this without allocating 16 MiB.
+    @Test func saveSkipsWritingWhenItCannotFitEvenWithoutEvents() {
+        // The save-side guard mirrors the read-side cap. When the snapshot cannot
+        // fit even after dropping every audit event (here: records with no events
+        // and an absurdly small cap), the existing readable file is preserved rather
+        // than replaced with one load() would reject. A tiny injected cap exercises
+        // this without allocating 16 MiB.
         let url = tempStoreURL()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -288,12 +289,40 @@ struct ControlSessionPersistenceTests {
         #expect(good.load(now: now).count == 1)
 
         // Now a store with an absurdly small cap tries to overwrite with a snapshot
-        // that encodes well beyond it.
+        // that encodes well beyond it even with zero events (the sessions have none).
         let tiny = ControlSessionStore(fileURL: url, maxFileBytes: 50)
         tiny.save([makeSession(at: now), makeSession(at: now)], now: now)
 
         // The previous good file is intact — not clobbered by an unreadable write.
         #expect(good.load(now: now).count == 1)
+    }
+
+    @Test func saveTrimsAuditEventsToFitTheFileBudget() {
+        // When the snapshot would exceed the byte budget but trimming audit events
+        // can bring it under, the store writes a readable (trimmed) file rather than
+        // stalling persistence. Otherwise a few chatty sessions would block every
+        // later mutation from ever being written.
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // Room for the record plus several events, but not all 200.
+        let store = ControlSessionStore(fileURL: url, maxFileBytes: 8192)
+
+        var session = makeSession(at: now)
+        for i in 0..<200 {
+            session.appendEvent(
+                kind: .event, name: "emit", source: "agent",
+                message: "event-number-\(i)-with-some-padding-to-take-up-space",
+                payload: nil, createdAt: now, pid: nil)
+        }
+        store.save([session], now: now)
+
+        // A readable file was written (not skipped): the session round-trips with a
+        // trimmed, newest-kept audit log that fit the budget.
+        let restored = store.load(now: now).first
+        let events = restored?.events ?? []
+        #expect(events.count >= 1)
+        #expect(events.count < 200)
+        #expect(events.last?.message == "event-number-199-with-some-padding-to-take-up-space")
     }
 
     // MARK: - Registry rehydration (simulated restart)

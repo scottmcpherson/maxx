@@ -118,24 +118,29 @@ struct ControlRetentionPolicy {
     /// each record's persisted audit log bounded to the most recent events.
     func apply(to sessions: [ControlSession], now: Date) -> [ControlSession] {
         let cutoff = now.addingTimeInterval(-maxAge)
-        return sessions
+        let retained = sessions
             // Age out only terminal records; keep potentially-live ones regardless
             // of how stale their timestamps look.
             .filter { !isTerminal($0) || recency($0) >= cutoff }
             .sorted { recency($0) > recency($1) }
             .prefix(maxRecords)
-            .map { trimmingEvents($0) }
+            .map { $0 }
+        return cappingEvents(retained, to: maxEventsPerSession)
     }
 
-    /// Keep only the most recent `maxEventsPerSession` audit events on the persisted
-    /// copy of a record. `suffix` keeps the newest, so `nextSeq` / `lastSeq` stay
-    /// consistent and sequencing continues monotonically after a restart. Returns
-    /// the record unchanged when it is already within the cap.
-    private func trimmingEvents(_ session: ControlSession) -> ControlSession {
-        guard session.events.count > maxEventsPerSession else { return session }
-        var copy = session
-        copy.events = Array(session.events.suffix(maxEventsPerSession))
-        return copy
+    /// Return `sessions` with each record's audit log capped at its most recent
+    /// `limit` events. `suffix` keeps the newest, so `nextSeq` / `lastSeq` stay
+    /// consistent and sequencing continues monotonically after a restart. Used by
+    /// ``apply`` for the steady-state per-session cap, and by the store to shrink a
+    /// snapshot toward the file-size budget. Records already within `limit` are
+    /// returned unchanged.
+    func cappingEvents(_ sessions: [ControlSession], to limit: Int) -> [ControlSession] {
+        sessions.map { session in
+            guard session.events.count > limit else { return session }
+            var copy = session
+            copy.events = Array(session.events.suffix(limit))
+            return copy
+        }
     }
 }
 
@@ -264,21 +269,16 @@ struct ControlSessionStore {
     /// Atomically write the given sessions (retention applied). Logs and returns
     /// on any error — a persistence failure never propagates to a control call.
     func save(_ sessions: [ControlSession], now: Date) {
-        let snapshot = ControlRegistrySnapshot(
-            version: ControlRegistrySnapshot.currentVersion,
-            sessions: retention.apply(to: sessions, now: now))
         do {
             try ensureDirectory()
-            let data = try Self.makeEncoder().encode(snapshot)
-            // Never write a file the next launch would refuse: `loadResult` rejects
-            // anything over `maxFileBytes`, so overwriting with an oversized blob
-            // would silently lose every persisted record. Per-session event capping
-            // keeps the common case far below this; if a pathological payload still
-            // blows the budget, preserve the last readable file rather than replace
-            // it with an unreadable one (a logged persistence stall, not data loss).
-            guard data.count <= maxFileBytes else {
+            // `loadResult` rejects any file over `maxFileBytes`, so we must never
+            // write one the next launch would refuse. Encode the retained snapshot,
+            // trimming audit events until it fits (below); only if it cannot fit
+            // even with every event dropped do we preserve the previous readable
+            // file rather than replace it with an unreadable one.
+            guard let data = try encodedSnapshotFitting(sessions, now: now) else {
                 Self.logger.error(
-                    "session registry encodes to \(data.count) bytes (> \(maxFileBytes)); preserving the previous file instead of writing one the next launch would reject")
+                    "session registry exceeds \(maxFileBytes) bytes even with all audit events dropped; preserving the previous file at \(fileURL.path, privacy: .public)")
                 return
             }
             try data.write(to: fileURL, options: [.atomic])
@@ -290,6 +290,34 @@ struct ControlSessionStore {
             Self.logger.error(
                 "failed to persist session registry to \(fileURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Encode the retained snapshot, progressively trimming per-session audit events
+    /// (newest kept) until it fits `maxFileBytes`. The read side rejects anything
+    /// over that budget, so this keeps save and load symmetric *and* keeps
+    /// persistence from stalling: when a few very chatty sessions would blow the
+    /// budget, the oldest audit history is dropped rather than every later mutation
+    /// silently failing to persist. Returns nil only if the snapshot cannot fit even
+    /// with all audit events removed (pathological — every record field is itself
+    /// length-capped), so the caller preserves the last readable file.
+    private func encodedSnapshotFitting(_ sessions: [ControlSession], now: Date) throws -> Data? {
+        let encoder = Self.makeEncoder()
+        let retained = retention.apply(to: sessions, now: now)
+        func encoded(_ records: [ControlSession]) throws -> Data {
+            try encoder.encode(ControlRegistrySnapshot(
+                version: ControlRegistrySnapshot.currentVersion, sessions: records))
+        }
+        var data = try encoded(retained)
+        if data.count <= maxFileBytes { return data }
+        // Over budget: halve the per-session audit cap toward zero, re-encoding,
+        // until it fits or no events remain.
+        var cap = retention.maxEventsPerSession
+        while cap > 0 {
+            cap /= 2
+            data = try encoded(retention.cappingEvents(retained, to: cap))
+            if data.count <= maxFileBytes { return data }
+        }
+        return nil
     }
 
     /// Create the containing directory `0700` if it does not already exist. The
