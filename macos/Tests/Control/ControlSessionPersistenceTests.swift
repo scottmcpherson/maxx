@@ -173,17 +173,35 @@ struct ControlSessionPersistenceTests {
 
     // MARK: - Retention
 
-    @Test func retentionDropsRecordsBeyondMaxAge() {
+    @Test func retentionDropsStaleTerminalRecordsBeyondMaxAge() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let policy = ControlRetentionPolicy(maxRecords: 100, maxAge: 1000)
         var fresh = makeSession(at: now.addingTimeInterval(-100))
         fresh.updatedAt = now.addingTimeInterval(-100)
-        var stale = makeSession(at: now.addingTimeInterval(-5000))
-        stale.updatedAt = now.addingTimeInterval(-5000)
+        var staleTerminal = makeSession(at: now.addingTimeInterval(-5000))
+        staleTerminal.updatedAt = now.addingTimeInterval(-5000)
+        staleTerminal.canceled = true  // observed terminal → eligible for the age cutoff
 
-        let kept = policy.apply(to: [fresh, stale], now: now)
+        let kept = policy.apply(to: [fresh, staleTerminal], now: now)
         #expect(kept.count == 1)
         #expect(kept.first?.id == fresh.id)
+    }
+
+    @Test func retentionKeepsStaleButPotentiallyLiveRecords() {
+        // A record whose last-observed lifecycle is still `running` must survive
+        // the age cutoff no matter how stale its timestamps look — its surface may
+        // still exist (no reconcile has refreshed `lastSeenAt` during a long idle
+        // stretch), and dropping it would lose a live tab's record across restart.
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let policy = ControlRetentionPolicy(maxRecords: 100, maxAge: 1000)
+        var liveButStale = makeSession(at: now.addingTimeInterval(-5000))
+        liveButStale.updatedAt = now.addingTimeInterval(-5000)
+        liveButStale.lastSeenAt = now.addingTimeInterval(-5000)
+        liveButStale.lastObservedLifecycle = "running"
+
+        let kept = policy.apply(to: [liveButStale], now: now)
+        #expect(kept.count == 1)
+        #expect(kept.first?.id == liveButStale.id)
     }
 
     @Test func retentionKeepsNewestUpToMaxRecords() {

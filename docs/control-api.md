@@ -605,10 +605,13 @@ persisted, but never inferred from naming or spawn order. Both `set-agent-type`
 and a `--group`/`--parent` association are gated by the same capabilities as the
 other declaration/group verbs (`state:set` and `groups:create`).
 
-**Retention.** Deterministic and bounded so the file cannot grow without limit:
-records older than 14 days (by `max(updated_at, last_seen_at)`) are dropped, and
-if more than 500 remain, the newest are kept. The same policy is applied on save
-and on load.
+**Retention.** Deterministic and bounded so the file cannot grow without limit.
+The age cutoff retires only records observed **terminal** (closed or archived):
+a record older than 14 days (by `max(updated_at, last_seen_at)`) is dropped, but
+a record that may still be live (last-observed lifecycle `running`/`exited`) is
+never aged out, since its `last_seen_at` can lag during a long idle stretch and
+dropping it would lose a still-existing tab's record. A count cap (newest 500) is
+a hard backstop applied to everything. The same policy runs on save and on load.
 
 **No inference on load.** Rehydration replays exactly what was stored and nothing
 more. A record whose mechanical fields (command, cwd, title) happen to read like

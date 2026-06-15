@@ -67,11 +67,14 @@ private struct FailableDecodable<T: Decodable>: Decodable {
 /// Deterministic retention for persisted records, so the on-disk registry cannot
 /// grow without bound and stale records are retired predictably.
 ///
-/// A record's recency is `max(updatedAt, lastSeenAt)`. Records older than
-/// ``maxAge`` are dropped; if more than ``maxRecords`` remain, the newest are
-/// kept and the rest dropped. Applied identically on save (bounding what is
-/// written) and on load (defending against a file written without the bound),
-/// so the policy is the single source of truth.
+/// A record's recency is `max(updatedAt, lastSeenAt)`. The **age** cutoff retires
+/// only records observed *terminal* (closed or archived) — a record that may
+/// still be live (its last-observed lifecycle is `running`/`exited`, or unknown)
+/// is never aged out, because its `lastSeenAt` can lag arbitrarily during a long
+/// idle stretch with no `reconcile`, and dropping it would lose a still-existing
+/// tab's record across a restart. The **count** cap (`maxRecords`) is a hard
+/// backstop applied to everything, newest-first. Applied identically on save and
+/// on load, so the policy is the single source of truth.
 struct ControlRetentionPolicy {
     var maxRecords: Int
     var maxAge: TimeInterval
@@ -85,11 +88,28 @@ struct ControlRetentionPolicy {
         max(session.updatedAt, session.lastSeenAt ?? session.updatedAt)
     }
 
+    /// Whether a record is observed terminal and therefore eligible for the age
+    /// cutoff. Explicit cancel/archive flags, or a last-observed lifecycle of
+    /// `closed`/`archived` (the surface is gone or the record is archived). A
+    /// `running`/`exited`/unknown record is treated as potentially live and kept
+    /// regardless of age. This is a mechanical liveness fact, not inference.
+    private func isTerminal(_ session: ControlSession) -> Bool {
+        if session.canceled || session.archived { return true }
+        switch session.lastObservedLifecycle {
+        case ControlLifecycle.closed.rawValue, ControlLifecycle.archived.rawValue:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Apply the policy, returning the retained records sorted newest-first.
     func apply(to sessions: [ControlSession], now: Date) -> [ControlSession] {
         let cutoff = now.addingTimeInterval(-maxAge)
         return sessions
-            .filter { recency($0) >= cutoff }
+            // Age out only terminal records; keep potentially-live ones regardless
+            // of how stale their timestamps look.
+            .filter { !isTerminal($0) || recency($0) >= cutoff }
             .sorted { recency($0) > recency($1) }
             .prefix(maxRecords)
             .map { $0 }
