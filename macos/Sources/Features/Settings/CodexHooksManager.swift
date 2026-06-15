@@ -138,32 +138,48 @@ enum CodexHooksManager {
         return exists && isDirectory.boolValue
     }
 
-    /// Path of the tab-control skill installed for Claude Code.
-    static func claudeSkillURL() -> URL {
-        claudeConfigURL()
-            .appendingPathComponent("skills", isDirectory: true)
-            .appendingPathComponent("maxx-tabs", isDirectory: true)
-            .appendingPathComponent("SKILL.md", isDirectory: false)
+    /// The bundled agent skills the helper installs, by directory name. Mirrors
+    /// the `skills` array in `src/agent_hook/skills.zig`; keep the two in sync.
+    /// The installed-status checks below require *every* entry, so an upgrade
+    /// that adds a skill re-offers the (idempotent) install instead of silently
+    /// skipping the new skill for users who already have an older bundle.
+    static let bundledSkillDirNames = ["maxx-tabs", "maxx-supervisor-workflows"]
+
+    /// The Claude Code skills root (`$CLAUDE_CONFIG_DIR/skills`, else
+    /// `~/.claude/skills`). Mirrors `claudeSkillsRoot` in `skills.zig`.
+    static func claudeSkillsRoot() -> URL {
+        claudeConfigURL().appendingPathComponent("skills", isDirectory: true)
     }
 
-    /// Path of the tab-control skill installed for Codex. Codex discovers
-    /// user skills in `~/.agents/skills`, the cross-agent standard location.
-    static func codexSkillURL() -> URL {
+    /// The Codex skills root (`~/.agents/skills`, the cross-agent location Codex
+    /// reads). Mirrors `agentsSkillsRoot` in `skills.zig`.
+    static func codexSkillsRoot() -> URL {
         URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent(".agents", isDirectory: true)
             .appendingPathComponent("skills", isDirectory: true)
-            .appendingPathComponent("maxx-tabs", isDirectory: true)
+    }
+
+    /// Path of one bundled skill's `SKILL.md` under a skills root.
+    private static func skillURL(root: URL, dirName: String) -> URL {
+        root.appendingPathComponent(dirName, isDirectory: true)
             .appendingPathComponent("SKILL.md", isDirectory: false)
     }
 
-    /// Whether the tab-control skill is installed for Claude Code.
+    /// Whether *every* bundled skill is installed (and ours) for Claude Code.
     static func claudeSkillInstalled() -> Bool {
-        skillInstalled(at: claudeSkillURL())
+        allBundledSkillsInstalled(root: claudeSkillsRoot())
     }
 
-    /// Whether the tab-control skill is installed for Codex.
+    /// Whether *every* bundled skill is installed (and ours) for Codex.
     static func codexSkillInstalled() -> Bool {
-        skillInstalled(at: codexSkillURL())
+        allBundledSkillsInstalled(root: codexSkillsRoot())
+    }
+
+    /// True only when every bundled skill is present and helper-owned under
+    /// `root`. A missing or foreign entry reads as not-installed so the install
+    /// path runs and writes the full set.
+    private static func allBundledSkillsInstalled(root: URL) -> Bool {
+        bundledSkillDirNames.allSatisfy { skillInstalled(at: skillURL(root: root, dirName: $0)) }
     }
 
     /// Only files written by the helper count; a hand-written skill of the
