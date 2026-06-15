@@ -70,13 +70,13 @@ The rule is enforced by type boundaries, not just discipline: the surfaces that
 display status have no access to terminal output, so inference is impossible by
 construction rather than merely prohibited.
 
-| Surface                                      | Kind                        | Source of truth                                                                | File                                                                                                      |
-| -------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `lifecycle` (running/exited/closed/archived) | Mechanical                  | Surface existence + kernel-reported process exit                               | `macos/Sources/Features/Control/ControlSession.swift`, `ControlSessionRegistry.swift`                     |
-| Declared workflow-state badge + summary      | Agent-declared              | `sessions.set-state` / `sessions.set-summary` only                             | `ControlSession.swift` (`WorkflowState`, `ControlDeclaredState`), `SurfaceView.swift` (`AgentStateBadge`) |
-| Agent-reported metadata chip                 | Agent-declared              | `sessions.set-metadata` / `update` / `remove-metadata` / `clear-metadata` only | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
-| Audit log (`wait` / `watch` / `events`)      | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                        | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
-| Sidebar agent-activity indicator             | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent-hook`) + terminal bell/progress   | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
+| Surface                                      | Kind                        | Source of truth                                                                                 | File                                                                                                      |
+| -------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `lifecycle` (running/exited/closed/archived) | Mechanical                  | Surface existence + kernel-reported process exit                                                | `macos/Sources/Features/Control/ControlSession.swift`, `ControlSessionRegistry.swift`                     |
+| Declared workflow-state badge + summary      | Agent-declared              | `sessions.set-state` / `sessions.set-summary` only                                              | `ControlSession.swift` (`WorkflowState`, `ControlDeclaredState`), `SurfaceView.swift` (`AgentStateBadge`) |
+| Agent-reported metadata chip                 | Agent-declared              | `sessions.create` (at spawn) / `set-metadata` / `update` / `remove-metadata` / `clear-metadata` | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
+| Audit log (`wait` / `watch` / `events`)      | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                                         | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
+| Sidebar agent-activity indicator             | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent-hook`) + terminal bell/progress                    | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
 
 ### The control API (declared workflow state)
 

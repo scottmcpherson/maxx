@@ -151,6 +151,14 @@ token and never has to splice fields into the JSON:
   group that templates to empty is omitted (matching the server's "empty group
   means no group" rule).
 
+  Mind the interaction between `caller` and `group`: the built-in
+  `trusted-automation` source has only `tabs:spawn` and `state:set`, so a
+  `--group` launch sent `--as trusted-automation` is **rejected**
+  (`unauthorized`, no tab spawned). A grouped webhook launch therefore needs a
+  configured policy source granted **both** `tabs:spawn` and `groups:create`
+  (the default first-party local source already holds both). See the
+  [Control API capability policy](./control-api.md#capability-policy).
+
 ## Resolution and provenance
 
 `connector.resolve(alloc, template, event, opts)` substitutes placeholders and
@@ -187,8 +195,18 @@ maxx +connector list
 maxx +connector resolve --source linear --command claude \
     --cwd /repo --title '${issue.identifier}: ${title}' \
     --env KEY='${source}' --payload event.json
+
+# Attribute the launch to a webhook policy source (ungrouped).
 maxx +connector resolve --source linear --command claude \
-    --as trusted-automation --group 'issue-${issue.identifier}' --payload event.json
+    --as trusted-automation --payload event.json
+
+# Group the launch for supervisor coordination. A grouped create needs both
+# tabs:spawn AND groups:create; the default local source has both. The built-in
+# `trusted-automation` has only tabs:spawn/state:set, so pairing --as
+# trusted-automation with --group would be rejected — a grouped webhook launch
+# needs a configured source granted both capabilities (see below).
+maxx +connector resolve --source linear --command claude \
+    --group 'issue-${issue.identifier}' --payload event.json
 ```
 
 `resolve` reads a payload (from `--payload <file>`, or stdin when omitted/`-`),
