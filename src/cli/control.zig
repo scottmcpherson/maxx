@@ -3,23 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Action = @import("../cli.zig").ghostty.Action;
 const args = @import("args.zig");
-
-/// libc bits we need directly. In this Zig version the socket syscalls are not
-/// surfaced as `std.posix` wrappers, and the macOS CLI links libc, so we bind
-/// the handful of C functions we use.
-const c = struct {
-    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
-    extern "c" fn connect(fd: c_int, addr: *const anyopaque, len: u32) c_int;
-    extern "c" fn close(fd: c_int) c_int;
-    extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
-    extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
-    extern "c" fn shutdown(fd: c_int, how: c_int) c_int;
-    extern "c" fn getuid() u32;
-};
-
-const AF_UNIX = 1;
-const SOCK_STREAM = 1;
-const SHUT_WR = 1;
+const control_client = @import("control_client.zig");
 
 pub const Options = struct {
     pub fn deinit(self: Options) void {
@@ -396,14 +380,14 @@ pub fn run(alloc: Allocator) !u8 {
     };
 
     // Resolve the control directory, socket, and token paths.
-    const dir = controlDir(arena_alloc) catch |err| {
+    const dir = control_client.controlDir(arena_alloc) catch |err| {
         try stderr.print("error: could not resolve control directory: {}\n", .{err});
         return 1;
     };
-    const socket_path = try std.fmt.allocPrint(arena_alloc, "{s}/control.sock", .{dir});
-    const token_path = try std.fmt.allocPrint(arena_alloc, "{s}/token", .{dir});
+    const socket_path = try control_client.socketPath(arena_alloc, dir);
+    const token_path = try control_client.tokenPath(arena_alloc, dir);
 
-    const token = readToken(arena_alloc, token_path) catch {
+    const token = control_client.readToken(arena_alloc, token_path) catch {
         try stderr.print(
             "error: could not read control token at {s}\n" ++
                 "Is Maxx running? The control API is served by the running app.\n",
@@ -429,7 +413,7 @@ pub fn run(alloc: Allocator) !u8 {
     // `wait` keeps its write side open so the server can detect a caller that
     // gives up; other single-shot requests half-close after sending the request.
     const half_close = cmd.verb != .wait;
-    const response = sendRequest(arena_alloc, socket_path, request, half_close) catch |err| {
+    const response = control_client.sendRequest(arena_alloc, socket_path, request, half_close) catch |err| {
         try stderr.print(
             "error: could not reach Maxx control socket at {s}: {}\n",
             .{ socket_path, err },
@@ -514,21 +498,6 @@ fn exitCode(alloc: Allocator, response: []const u8, verb: Verb) u8 {
         }
     }
     return 1;
-}
-
-/// Resolve the control directory: `$MAXX_CONTROL_DIR` or `/tmp/maxx-control-<uid>`.
-fn controlDir(alloc: Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(alloc, "MAXX_CONTROL_DIR")) |dir| {
-        if (dir.len > 0) return dir;
-    } else |_| {}
-    return try std.fmt.allocPrint(alloc, "/tmp/maxx-control-{d}", .{c.getuid()});
-}
-
-fn readToken(alloc: Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const raw = try file.readToEndAlloc(alloc, 4096);
-    return std.mem.trim(u8, raw, &std.ascii.whitespace);
 }
 
 /// Parse the tokens after the action selector into a `Command`.
@@ -908,48 +877,6 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     return out.written();
 }
 
-/// Send `request` (followed by a newline) to the control socket and return the
-/// full response bytes. `half_close` shuts the write side after sending, which
-/// is correct for single-shot requests but must be false for `wait` (the server
-/// watches for an orderly client disconnect while it blocks).
-fn sendRequest(
-    alloc: Allocator,
-    socket_path: []const u8,
-    request: []const u8,
-    half_close: bool,
-) ![]u8 {
-    if (socket_path.len >= 104) return error.PathTooLong;
-
-    const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return error.SocketFailed;
-    defer _ = c.close(fd);
-
-    var addr: std.posix.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
-    @memset(&addr.path, 0);
-    @memcpy(addr.path[0..socket_path.len], socket_path);
-
-    if (c.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) != 0) {
-        return error.ConnectFailed;
-    }
-
-    try writeAll(fd, request);
-    try writeAll(fd, "\n");
-    if (half_close) _ = c.shutdown(fd, SHUT_WR);
-
-    var response: std.ArrayList(u8) = .empty;
-    errdefer response.deinit(alloc);
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = c.read(fd, &buf, buf.len);
-        if (n < 0) return error.ReadFailed;
-        if (n == 0) break;
-        try response.appendSlice(alloc, buf[0..@intCast(n)]);
-        if (response.items.len > 8 * 1024 * 1024) return error.ResponseTooLarge;
-    }
-
-    return response.toOwnedSlice(alloc);
-}
-
 /// Connect, send `request`, and stream the server's newline-delimited messages
 /// straight to stdout until the connection closes. Used by `watch`; the write
 /// side stays open so the server keeps the stream alive until the session ends
@@ -964,22 +891,11 @@ fn sendRequest(
 /// code as single-shot requests — so automation never reads a denied/bad watch
 /// as a clean start.
 fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !u8 {
-    if (socket_path.len >= 104) return error.PathTooLong;
+    const conn = try control_client.Conn.connect(socket_path);
+    defer conn.close();
 
-    const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return error.SocketFailed;
-    defer _ = c.close(fd);
-
-    var addr: std.posix.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
-    @memset(&addr.path, 0);
-    @memcpy(addr.path[0..socket_path.len], socket_path);
-
-    if (c.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) != 0) {
-        return error.ConnectFailed;
-    }
-
-    try writeAll(fd, request);
-    try writeAll(fd, "\n");
+    try conn.writeAll(request);
+    try conn.writeAll("\n");
 
     var out_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&out_buf);
@@ -993,10 +909,9 @@ fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = c.read(fd, &buf, buf.len);
-        if (n < 0) return error.ReadFailed;
+        const n = try conn.read(&buf);
         if (n == 0) break;
-        const chunk = buf[0..@intCast(n)];
+        const chunk = buf[0..n];
 
         if (checked) {
             try stdout.writeAll(chunk);
@@ -1039,15 +954,6 @@ fn firstLineIsError(alloc: Allocator, line: []const u8) bool {
     if (parsed.value != .object) return false;
     const ok = parsed.value.object.get("ok") orelse return false;
     return ok == .bool and !ok.bool;
-}
-
-fn writeAll(fd: c_int, bytes: []const u8) !void {
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const n = c.write(fd, bytes.ptr + written, bytes.len - written);
-        if (n <= 0) return error.WriteFailed;
-        written += @intCast(n);
-    }
 }
 
 /// Returns true if the JSON response has `"ok": true`.

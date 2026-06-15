@@ -217,13 +217,20 @@ consumes the whole envelope — it injects the capability token into `launch` an
 for `stdin`/`file` delivery, hands the `prompt` to the launched command out of
 band. `launch.params` alone is therefore not sufficient.
 
-## What is intentionally not here yet
+## The runner
 
-This layer **resolves** a launch; it does not **execute** one. The **runner** —
-kept separate so the resolution logic stays pure and exhaustively testable —
+This layer **resolves** a launch; it does not **execute** one. Execution is the
+[automation trigger runner](./automation-runner.md) (`maxx +runner`) — kept
+separate so the resolution logic stays pure and exhaustively testable. The runner
 owns: injecting the per-call capability token into the control request, sending
 `sessions.create` to a running Maxx, delivering the prompt for `stdin`/`file`
-modes, receiving webhooks, and fetching payloads over the network (with the
-associated auth). The `resolve` envelope is the complete input the runner needs:
-the policy `caller` and supervisor `group` are already resolved into `params`, so
-the runner adds only the capability token and the act of sending.
+modes, suppressing duplicates on the explicit event id, and receiving events from
+poll/script/webhook-relay triggers. The `resolve` envelope is the complete input
+the runner needs: the policy `caller` and supervisor `group` are already resolved
+into `params`, so the runner adds only the capability token and the act of
+sending.
+
+Fetching payloads over the network (with the associated auth) and the
+upstream-relay/webhook-listener transport remain outside both layers — the
+runner's contract is local and explicit: it consumes a structured payload, it
+does not reach out for one.
