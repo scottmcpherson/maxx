@@ -249,6 +249,49 @@ maxx +control sessions create --command "zig build" --parent <parent_session_id>
 its text) and recorded with a source and timestamp. `--parent` must reference a
 known `session_id`; the persisted edge is mechanical, never inferred.
 
+### Parent-child tab groups (MAX-6)
+
+Parent/child and group relationships are **explicit metadata** so supervisor
+agents can group visible tabs and answer relationship queries — Maxx tracks the
+edges and the display/query mechanics, never the workflow meaning. The edge is
+the persisted `parent_id` from MAX-5; MAX-6 adds the update path, validation,
+queries, and a tab badge.
+
+```bash
+# Attach a child under a parent after creation (the update counterpart to
+# `create --parent`). An empty --parent clears the edge.
+maxx +control sessions set-parent <child_session_id> --parent <parent_session_id>
+maxx +control sessions set-parent <child_session_id> --parent ""   # detach
+
+# Group-aware queries (composable with each other and --filter):
+maxx +control sessions list --parent <parent_session_id>   # a tab's children
+maxx +control sessions list --group release                # a group's members
+maxx +control sessions get <child_session_id> | jq .result.session.parent_id   # a tab's parent
+# Siblings = the children of a tab's own parent.
+```
+
+`set-parent` validates the edge so the graph stays sound: a missing parent is
+`not_found`, and the session itself or any edge that would form a cycle is
+`invalid_request`. Re-setting the same parent is a no-op (no event, no
+`updated_at` bump). The edge is gated by `groups:create` — an association edge,
+the same gate as `set-group` and `create --parent` — enforced **before** any
+session/parent lookup, so a denied caller cannot use it as a session-existence
+oracle. A `set-parent` change records a Maxx-owned `parent.set` / `parent.cleared`
+mechanical event on the structured stream (alongside `group.joined` /
+`group.left`).
+
+The `parent_id` edge is durable mechanical history: closing a parent does **not**
+rewrite its children. A child of a closed parent is still returned by
+`list --parent <closedParent>`, carrying its own `lifecycle`, so a supervisor
+gets "active visible children" by filtering the list on each child's lifecycle —
+Maxx never reacts to a lifecycle by mutating a relationship.
+
+In the UI, a grouped or child tab shows a small relationship badge (a group-label
+chip and/or a "child" indicator) on its surface, alongside the MAX-3 state badge
+and MAX-4 metadata chip. A plain ungrouped tab with no parent shows nothing and
+behaves exactly as any other tab — selection, close, reorder, and focus are
+untouched.
+
 ### Structured event stream (`stream` / `event`)
 
 A **cross-resource, cursor-addressed event bus** for supervisor agents. Where
@@ -347,7 +390,7 @@ The `method` field mirrors the proposed REST shape:
 | -------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `sessions.create`          | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
 | `sessions.get`             | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
-| `sessions.list`            | `GET /control/v1/sessions`                     | List API-created sessions; optional `metadata_filter`.                              |
+| `sessions.list`            | `GET /control/v1/sessions`                     | List API-created sessions; optional `metadata_filter`, `parent`/`group` filters.    |
 | `sessions.update`          | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only (metadata merges).                     |
 | `sessions.action`          | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
 | `sessions.wait`            | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
@@ -363,6 +406,7 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.set-state`       | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
 | `sessions.set-summary`     | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
 | `sessions.set-agent-type`  | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
+| `sessions.set-parent`      | `PUT /control/v1/sessions/{id}/parent`         | Set/clear the parent edge after creation; rejects self/missing/cycle (MAX-6).       |
 | `sessions.set-group`       | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
 | `stream.watch`             | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
 | `stream.wait`              | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
@@ -627,14 +671,15 @@ declared facts and never inferred from the command, process name, branch, path, 
 title. Either path records the declaration in the session audit log (`events` /
 `watch`) with its source, so the create-time declaration is as visible and durable
 as a later `set-agent-type` — a supervisor never has to wait for a second request
-to learn it. `parent` is supplied at `create` time as a known `session_id`; the edge is
-verified (`not_found` for an unknown id, `invalid_request` for a non-UUID) and
-persisted, but never inferred from naming or spawn order. Both `set-agent-type`
-and a `--group`/`--parent` association are gated by the same capabilities as the
-other declaration/group verbs (`state:set` and `groups:create`). The
-`groups:create` check runs **before** the parent id is resolved, so a caller that
-lacks it gets `unauthorized` whether or not the id exists — the parent lookup
-never becomes a session-existence oracle.
+to learn it. `parent` is supplied at `create` time — or updated later with
+`set-parent` (MAX-6) — as a known `session_id`; the edge is verified (`not_found`
+for an unknown id, `invalid_request` for a non-UUID, the session itself, or a
+cycle) and persisted, but never inferred from naming or spawn order. Both
+`set-agent-type` and a `--group`/`--parent` association are gated by the same
+capabilities as the other declaration/group verbs (`state:set` and
+`groups:create`). The `groups:create` check runs **before** the parent id is
+resolved, so a caller that lacks it gets `unauthorized` whether or not the id
+exists — the parent lookup never becomes a session-existence oracle.
 
 **Retention.** Deterministic and bounded so the file cannot grow without limit.
 The age cutoff retires only records observed **terminal** (closed or archived):
@@ -753,6 +798,8 @@ grouped connector launch is observed on the stream via `created` + `group.joined
 | `restarted`    | A session's command was restarted in a fresh surface.         |
 | `group.joined` | A session joined a group (`message`/`group` name the group).  |
 | `group.left`   | A session left a group.                                       |
+| `parent.set`   | A session's parent edge was set (`message` is the parent id). |
+| `parent.cleared` | A session's parent edge was cleared.                        |
 
 These derive only from explicit API actions and kernel-reported process/surface
 state — never from terminal output, process names, branch names, paths, tab

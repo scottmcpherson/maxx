@@ -65,6 +65,8 @@ const Verb = enum {
     @"set-summary",
     // MAX-5 persistent session registry verbs.
     @"set-agent-type",
+    // MAX-6 parent-child tab group verbs.
+    @"set-parent",
     // MAX-7 structured event stream verbs.
     @"set-group",
     emit,
@@ -150,6 +152,7 @@ const Command = struct {
                 .@"set-state" => "sessions.set-state",
                 .@"set-summary" => "sessions.set-summary",
                 .@"set-agent-type" => "sessions.set-agent-type",
+                .@"set-parent" => "sessions.set-parent",
                 .@"set-group" => "sessions.set-group",
                 .@"remove-metadata" => "sessions.remove-metadata",
                 .@"clear-metadata" => "sessions.clear-metadata",
@@ -254,6 +257,9 @@ const ParseError = error{
 ///   * `sessions clear-metadata <session_id>`: drop all metadata.
 ///   * `sessions list --filter <key>[=<value>] [--filter ...]`: list only
 ///     sessions whose metadata matches every filter (key present, or key=value).
+///   * `sessions list [--parent <session_id>] [--group <name>]`: group-aware
+///     query filters (MAX-6), composable with each other and `--filter`:
+///     `--parent` lists a tab's children; `--group` lists a group's members.
 ///   * `sessions create`/`update` also accept repeatable `--metadata key=value`
 ///     (string values).
 ///
@@ -272,6 +278,16 @@ const ParseError = error{
 ///     declares the agent type (e.g. `claude-code`), stored verbatim and never
 ///     inferred. `sessions create` also takes `--agent-type <name>` and
 ///     `--parent <session_id>` (a persisted parent association).
+///
+/// Parent-child tab groups (MAX-6 — explicit relationship metadata; never
+/// inferred from output, process/branch/path names, or idle time):
+///
+///   * `sessions set-parent <session_id> --parent <parent_session_id>`: set (or,
+///     with an empty `--parent`, clear) the tab's parent edge after creation —
+///     the update counterpart to `create --parent`. A missing parent, the tab
+///     itself, or an edge that would form a cycle is rejected. Query the
+///     relationships with `sessions list --parent`/`--group` and the `parent_id`
+///     on the session view.
 ///
 /// Structured event stream (MAX-7 — a cross-resource, cursor-addressed event
 /// bus for supervisor agents):
@@ -344,7 +360,7 @@ pub fn run(alloc: Allocator) !u8 {
                     "  sessions: create, get, list, update, cancel, action, wait, watch, " ++
                     "archive, restart, events, declare-state, emit-event, set-metadata, " ++
                     "remove-metadata, clear-metadata, set-state, set-summary, set-agent-type, " ++
-                    "set-group\n" ++
+                    "set-parent, set-group\n" ++
                     "  stream:   watch, wait\n" ++
                     "  event:    emit\n" ++
                     "  policy:   check\n",
@@ -666,7 +682,7 @@ fn sessionsVerb(s: []const u8) ?Verb {
         .restart,           .events,            .@"declare-state",
         .@"emit-event",     .@"set-metadata",   .@"set-state",
         .@"set-summary",    .@"set-group",      .@"remove-metadata",
-        .@"clear-metadata", .@"set-agent-type",
+        .@"clear-metadata", .@"set-agent-type", .@"set-parent",
     };
     inline for (candidates) |v| {
         if (std.mem.eql(u8, s, @tagName(v))) return v;
@@ -1540,6 +1556,70 @@ test "parseCommand set-group with group flag" {
     try testing.expectEqualStrings("ID-1", cmd.id.?);
     try testing.expectEqualStrings("release", cmd.group_name.?);
     try testing.expectEqualStrings("sessions.set-group", cmd.method());
+}
+
+test "parseCommand set-parent with parent flag (MAX-6)" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions set-parent CHILD-1 --parent PARENT-1",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .sessions);
+    try testing.expect(cmd.verb == .@"set-parent");
+    try testing.expectEqualStrings("CHILD-1", cmd.id.?);
+    try testing.expectEqualStrings("PARENT-1", cmd.parent.?);
+    try testing.expectEqualStrings("sessions.set-parent", cmd.method());
+}
+
+test "buildRequest set-parent emits id and parent (MAX-6)" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"set-parent",
+        .id = "CHILD-1",
+        .parent = "PARENT-1",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.set-parent", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("CHILD-1", params.get("id").?.string);
+    try testing.expectEqualStrings("PARENT-1", params.get("parent").?.string);
+}
+
+test "buildRequest list emits parent and group query filters (MAX-6)" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .list,
+        .parent = "PARENT-1",
+        .group_name = "release",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.list", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("PARENT-1", params.get("parent").?.string);
+    try testing.expectEqualStrings("release", params.get("group").?.string);
 }
 
 test "parseVerb rejects cross-group verbs" {

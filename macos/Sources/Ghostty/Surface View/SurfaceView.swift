@@ -128,16 +128,22 @@ extension Ghostty {
 
                 // Agent-provided overlays, pinned top-left and stacked vertically:
                 // the agent-declared workflow-state badge (Control API set-state/
-                // set-summary) and, beneath it, the agent-reported metadata chip
-                // (set-metadata etc.). Both are shown ONLY when an agent has
+                // set-summary), the parent/group relationship badge (MAX-6:
+                // create/set-group/set-parent), and the agent-reported metadata
+                // chip (set-metadata etc.). All are shown ONLY when an agent has
                 // explicitly declared/reported them — never inferred from terminal
                 // output — and the metadata chip is never treated as workflow
-                // state. Grouping them here keeps both clear of the top-right
+                // state. Grouping them here keeps them clear of the top-right
                 // read-only badge and the bottom URL-hover / child-exited bars.
-                if surfaceView.declaredAgentState != nil || !surfaceView.agentMetadata.isEmpty {
+                if surfaceView.declaredAgentState != nil
+                    || surfaceView.agentRelationship != nil
+                    || !surfaceView.agentMetadata.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         if let declared = surfaceView.declaredAgentState {
                             AgentStateBadge(declared: declared)
+                        }
+                        if let relationship = surfaceView.agentRelationship {
+                            AgentRelationshipBadge(relationship: relationship)
                         }
                         if !surfaceView.agentMetadata.isEmpty {
                             AgentMetadataBadge(metadata: surfaceView.agentMetadata)
@@ -1272,6 +1278,109 @@ extension Ghostty {
     /// infers any of it from terminal output and never treats a key as
     /// authoritative workflow state — the chip and popover are display
     /// affordances only.
+    /// A compact badge showing a tab's explicit parent/group relationship
+    /// (MAX-6): a group-label chip and/or a "child" indicator. Shown only when a
+    /// caller has explicitly placed the tab in a group or under a parent through
+    /// the Control API — Maxx never infers grouping from output, process names,
+    /// paths, or idle time. Purely a display affordance; it does not affect tab
+    /// selection, close, reorder, or focus.
+    struct AgentRelationshipBadge: View {
+        let relationship: ControlRelationship
+
+        @State private var showingPopover = false
+
+        var body: some View {
+            HStack {
+                Button {
+                    showingPopover.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        if relationship.isChild {
+                            Image(systemName: "arrow.turn.down.right")
+                                .font(.system(size: 11))
+                        }
+                        if let group = relationship.group {
+                            Image(systemName: "rectangle.3.group")
+                                .font(.system(size: 11))
+                            Text(group)
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                        } else if relationship.isChild {
+                            Text("Child tab")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .backport.pointerStyle(.link)
+                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                    AgentRelationshipPopoverView(relationship: relationship)
+                }
+
+                Spacer()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+        }
+
+        private var accessibilityLabel: String {
+            var parts: [String] = []
+            if let group = relationship.group { parts.append("in group \(group)") }
+            if relationship.isChild { parts.append("child of another tab") }
+            return "Tab relationship. " + parts.joined(separator: ". ")
+        }
+    }
+
+    /// Popover detailing a tab's explicit group/parent relationship, framed so the
+    /// user reads it as caller-declared, not Maxx-derived.
+    struct AgentRelationshipPopoverView: View {
+        let relationship: ControlRelationship
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.3.group")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 13))
+                    Text("Tab relationship")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if let group = relationship.group {
+                        labeled("Group", group)
+                    }
+                    if relationship.isChild {
+                        labeled("Parent", "Child of another tab")
+                    }
+                }
+
+                Text("Set by the agent/caller — not derived by Maxx.")
+                    .font(.system(size: 10).italic())
+                    .foregroundColor(.secondary)
+            }
+            .padding(16)
+            .frame(width: 260, alignment: .leading)
+        }
+
+        private func labeled(_ key: String, _ value: String) -> some View {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(key)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                Text(value)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     struct AgentMetadataBadge: View {
         let metadata: [String: ControlJSONValue]
 

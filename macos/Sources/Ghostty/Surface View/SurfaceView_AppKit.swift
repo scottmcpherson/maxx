@@ -70,6 +70,15 @@ extension Ghostty {
         /// Empty until metadata arrives, so terminal behavior is unchanged.
         @Published private(set) var agentMetadata: [String: ControlJSONValue] = [:]
 
+        /// The session's explicit parent/group relationship for display (MAX-6),
+        /// set ONLY by an explicit Control API `create`/`set-group`/`set-parent`
+        /// call (or a `restart` re-push). Nil when the tab is ungrouped and has no
+        /// parent, so an ordinary tab shows no relationship badge and behaves
+        /// exactly as before. Like `agentMetadata`, it is recorded verbatim and is
+        /// never inferred from terminal output, process names, branch names,
+        /// paths, or idle time.
+        @Published private(set) var agentRelationship: ControlRelationship?
+
         /// Stable hook identity for this surface.
         let agentSurfaceID: String
 
@@ -1058,6 +1067,18 @@ extension Ghostty {
         /// UI never renders a partially-applied change.
         func applyAgentMetadata(_ metadata: [String: ControlJSONValue]) {
             agentMetadata = metadata
+        }
+
+        /// Apply the explicit parent/group relationship for display (MAX-6).
+        /// Called only from the Control API host in response to an explicit
+        /// `create`/`set-group`/`set-parent` (or a `restart` re-push) — never from
+        /// output inference. An empty relationship (ungrouped, no parent) clears
+        /// the badge so the tab renders exactly as a plain tab does.
+        func applyAgentRelationship(_ relationship: ControlRelationship) {
+            let resolved: ControlRelationship? = relationship.isEmpty ? nil : relationship
+            guard resolved != agentRelationship else { return }
+            agentRelationship = resolved
+            notifySidebarMetadataChanged()
         }
 
         private func interruptRunningAgentActivity() {

@@ -84,6 +84,14 @@ enum ControlMethod: String, Codable {
     /// across restarts. An explicit agent self-declaration, never inferred.
     case sessionsSetAgentType = "sessions.set-agent-type"
 
+    // MARK: Parent-child tab groups (MAX-6)
+
+    /// Set (or clear) a session's parent edge after creation — the update
+    /// counterpart to `create --parent`. The parent must reference a known
+    /// session and may not be the session itself or form a cycle. Recorded as a
+    /// Maxx-owned mechanical event; the edge is explicit metadata, never inferred.
+    case sessionsSetParent = "sessions.set-parent"
+
     // MARK: Structured event stream (MAX-7)
 
     /// Set (or clear) a session's group membership, recorded as a Maxx-owned
@@ -211,15 +219,17 @@ struct ControlRequest: Codable {
         /// Agent type to declare (`set-agent-type`) or attach at `create` time,
         /// e.g. `claude-code`. An explicit agent self-declaration, never inferred.
         var agentType: String?
-        /// Parent session id (UUID) to associate at `create` time. The id must
-        /// reference a known session; the edge is persisted but never inferred.
+        /// Parent session id (UUID). Associates a parent at `create`/`set-parent`
+        /// time (the id must reference a known session; the edge is persisted but
+        /// never inferred), or, on `list`, filters to a parent's children. Empty
+        /// on `set-parent` clears the edge.
         var parent: String?
 
         // MARK: Structured event stream (MAX-7)
 
-        /// Group label: set membership (`set-group`/`create`) or filter a
-        /// `stream.watch`/`stream.wait` to a group. Empty/absent on `set-group`
-        /// means "leave the current group".
+        /// Group label: set membership (`set-group`/`create`), filter `list` to a
+        /// group's members, or filter a `stream.watch`/`stream.wait` to a group.
+        /// Empty/absent on `set-group` means "leave the current group".
         var group: String?
         /// Surface (tab) id to filter a `stream.watch`/`stream.wait` by.
         var tab: String?

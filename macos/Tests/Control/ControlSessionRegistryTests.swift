@@ -27,6 +27,9 @@ final class FakeControlSessionHost: ControlSessionHost {
         /// The most recent agent-reported metadata pushed to this surface for
         /// display (MAX-4). Nil until a metadata declaration is pushed.
         var metadata: [String: ControlJSONValue]?
+        /// The most recent parent/group relationship pushed to this surface for
+        /// display (MAX-6). Nil until a relationship is pushed.
+        var relationship: ControlRelationship?
     }
 
     var surfaces: [UUID: Surface] = [:]
@@ -84,6 +87,9 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     }
     func applyMetadata(_ metadata: [String: ControlJSONValue]) {
         surface.metadata = metadata
+    }
+    func applyRelationship(_ relationship: ControlRelationship) {
+        surface.relationship = relationship
     }
 }
 
@@ -1340,6 +1346,287 @@ struct ControlSessionRegistryTests {
             request(.sessionsAction, .init(id: id, action: "interrupt", signal: "SIGTERM")),
             host: host)
         #expect(response.error?.code == "unsupported")
+    }
+
+    // MARK: - Parent-child tab groups (MAX-6)
+
+    @Test func setParentEstablishesAndClearsEdge() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+
+        let set = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        #expect(set.ok)
+        #expect(set.result?.session?.parentID == parent)
+
+        // An empty parent clears the edge.
+        let cleared = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: "")), host: host)
+        #expect(cleared.ok)
+        #expect(cleared.result?.session?.parentID == nil)
+    }
+
+    @Test func setParentRecordsMechanicalStreamEvents() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: "")), host: host)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        // Maxx-owned mechanical facts (like group.joined/left), never agent-declared.
+        #expect(events.contains {
+            $0.name == "parent.set" && $0.message == parent && $0.sourceKind == "maxx"
+        })
+        #expect(events.contains { $0.name == "parent.cleared" && $0.sourceKind == "maxx" })
+    }
+
+    @Test func createWithParentEmitsParentSetStreamEvent() throws {
+        // A create-time parent edge must emit the same Maxx-owned `parent.set`
+        // mechanical event as `set-parent` (and as create-time `group.joined`), so
+        // a supervisor replaying `stream.watch --since 0` can reconstruct
+        // create-time parent edges from events rather than missing them until a
+        // later re-parent.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let child = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", parent: parent)), host: host)
+        #expect(child.result?.session?.parentID == parent)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.contains {
+            $0.name == "parent.set" && $0.message == parent && $0.sourceKind == "maxx"
+        })
+    }
+
+    @Test func reParentingEmitsSingleParentSetForTheNewParent() throws {
+        // A parent edge is single-valued, so re-parenting from P1 to P2 records one
+        // `parent.set` carrying the new parent id — not a `parent.cleared` (the new
+        // state still has a parent, so "cleared" would be a false claim).
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (p1, _) = makeSession(registry, host)
+        let (p2, _) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: p1)), host: host)
+        let reparented = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: p2)), host: host)
+        #expect(reparented.result?.session?.parentID == p2)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let parentEvents = messages.compactMap { $0.event }.filter { $0.name.hasPrefix("parent.") }
+        // Two sets (p1 then p2), no cleared on the change.
+        #expect(parentEvents.map(\.name) == ["parent.set", "parent.set"])
+        #expect(parentEvents.last?.message == p2)
+        #expect(!parentEvents.contains { $0.name == "parent.cleared" })
+    }
+
+    @Test func reSettingExistingParentIsNoOpEvenAfterParentArchived() {
+        // The no-op guard runs BEFORE existence/cycle validation, so re-setting the
+        // parent a child already has is a silent success regardless of the parent
+        // record's later state — it never re-validates an edge already in place.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+
+        // Archive the parent (its record is retained but terminal), then re-assert
+        // the same edge: still a no-op success, not a fresh validation pass.
+        _ = registry.handle(request(.sessionsArchive, .init(id: parent)), host: host)
+        let again = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        #expect(again.ok)
+        #expect(again.result?.session?.parentID == parent)
+    }
+
+    @Test func setParentRejectsSelfParenting() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (child, _) = makeSession(registry, host)
+
+        let response = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: child)), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func setParentRejectsMissingParent() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (child, _) = makeSession(registry, host)
+
+        let response = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: UUID().uuidString)), host: host)
+        #expect(response.error?.code == "not_found")
+    }
+
+    @Test func setParentRejectsNonUUIDParent() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (child, _) = makeSession(registry, host)
+
+        let response = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: "not-a-uuid")), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func setParentRejectsCycle() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (a, _) = makeSession(registry, host)
+        let (b, _) = makeSession(registry, host)
+
+        // a -> b (b is a's parent). Now making a the parent of b would close a cycle.
+        #expect(registry.handle(
+            request(.sessionsSetParent, .init(id: a, parent: b)), host: host).ok)
+        let response = registry.handle(
+            request(.sessionsSetParent, .init(id: b, parent: a)), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func setParentToUnchangedValueIsNoOp() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+
+        let first = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        let updatedAt = first.result?.session?.updatedAt
+
+        // Re-setting the same parent records nothing and does not bump updated_at
+        // (so it cannot refresh a closed/restored record's retention recency).
+        let again = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+        #expect(again.result?.session?.updatedAt == updatedAt)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let parentSetCount = messages.compactMap { $0.event }.filter { $0.name == "parent.set" }.count
+        #expect(parentSetCount == 1)
+    }
+
+    @Test func setParentDeniedForExternalSourceBeforeLookup() {
+        // `set-parent` needs `groups:create`; an external source without it is
+        // denied. Crucially the capability is checked BEFORE any session lookup,
+        // so an unknown child id returns the same `unauthorized`, never an
+        // existence-revealing `not_found`.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (child, _) = makeSession(registry, host)
+
+        let denied = registry.handle(
+            request(.sessionsSetParent, .init(
+                id: child, parent: UUID().uuidString, caller: "readonly-external")),
+            host: host)
+        #expect(denied.error?.code == "unauthorized")
+
+        let deniedUnknownChild = registry.handle(
+            request(.sessionsSetParent, .init(
+                id: UUID().uuidString, parent: UUID().uuidString, caller: "readonly-external")),
+            host: host)
+        #expect(deniedUnknownChild.error?.code == "unauthorized")
+    }
+
+    @Test func listFilterByParentReturnsChildrenAndSiblings() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let (childA, _) = makeSession(registry, host)
+        let (childB, _) = makeSession(registry, host)
+        let (loner, _) = makeSession(registry, host)
+
+        _ = registry.handle(request(.sessionsSetParent, .init(id: childA, parent: parent)), host: host)
+        _ = registry.handle(request(.sessionsSetParent, .init(id: childB, parent: parent)), host: host)
+
+        let response = registry.handle(request(.sessionsList, .init(parent: parent)), host: host)
+        let ids = Set((response.result?.sessions ?? []).map(\.sessionID))
+        // Children (and thus siblings of each other) are exactly childA + childB.
+        #expect(ids == [childA, childB])
+        #expect(!ids.contains(parent))
+        #expect(!ids.contains(loner))
+    }
+
+    @Test func listFilterByGroupReturnsMembersOnly() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let inGroup = makeGroupedSession(registry, host, group: "release")
+        let (ungrouped, _) = makeSession(registry, host)
+
+        let response = registry.handle(request(.sessionsList, .init(group: "release")), host: host)
+        let ids = (response.result?.sessions ?? []).map(\.sessionID)
+        #expect(ids == [inGroup.id])
+        #expect(!ids.contains(ungrouped))
+    }
+
+    @Test func listRejectsNonUUIDParentFilter() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        _ = makeSession(registry, host)
+
+        let response = registry.handle(request(.sessionsList, .init(parent: "nope")), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func childEdgeSurvivesParentClose() {
+        // Closing the parent is a mechanical lifecycle fact; it does NOT rewrite
+        // the child's edge. The child is still listed under the (now closed)
+        // parent, carrying its own lifecycle, so "active children" is a
+        // client-side lifecycle filter over a preserved edge — not inference.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, parentSurface) = makeSession(registry, host)
+        let (child, _) = makeSession(registry, host)
+        _ = registry.handle(request(.sessionsSetParent, .init(id: child, parent: parent)), host: host)
+
+        // User closes the parent tab out from under us.
+        host.surfaces[parentSurface]?.exists = false
+
+        let listed = registry.handle(request(.sessionsList, .init(parent: parent)), host: host)
+        let children = listed.result?.sessions ?? []
+        #expect(children.map(\.sessionID) == [child])
+        // The edge is still readable on the child, and the closed parent reports
+        // its terminal lifecycle.
+        let childView = registry.handle(request(.sessionsGet, .init(id: child)), host: host)
+        #expect(childView.result?.session?.parentID == parent)
+        let parentView = registry.handle(request(.sessionsGet, .init(id: parent)), host: host)
+        #expect(parentView.result?.session?.lifecycle == "closed")
+    }
+
+    @Test func relationshipPushedToSurfaceForGroupAndParent() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+
+        // create --group pushes the group chip to the surface from the start.
+        let grouped = makeGroupedSession(registry, host, group: "release")
+        #expect(host.surfaces[grouped.surface]?.relationship?.group == "release")
+        #expect(host.surfaces[grouped.surface]?.relationship?.isChild == false)
+
+        // set-parent pushes the child indicator to the child's surface.
+        let parent = makeSession(registry, host)
+        let childSurface = UUID()
+        host.nextCreateID = childSurface
+        let child = registry.handle(request(.sessionsCreate, params(command: "ls")), host: host)
+            .result!.session!.sessionID
+        _ = registry.handle(
+            request(.sessionsSetParent, .init(id: child, parent: parent.id)), host: host)
+        #expect(host.surfaces[childSurface]?.relationship?.isChild == true)
+    }
+
+    @Test func ungroupedTabPushesNoRelationship() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (_, surface) = makeSession(registry, host)
+        // A plain tab with no group and no parent surfaces no relationship badge,
+        // so its UI is unchanged from any ordinary tab.
+        #expect(host.surfaces[surface]?.relationship == nil)
     }
 
     // MARK: - Structured event stream (MAX-7)
