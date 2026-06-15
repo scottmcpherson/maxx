@@ -31,3 +31,7 @@ glad.zip
 vgcore.*
 *.profraw
 /FUTURE.md
+
+# Local Claude Code worktrees — transient, per-developer; never tracked (they
+# would otherwise be committed as orphaned gitlinks with no .gitmodules mapping).
+.claude/worktrees/
