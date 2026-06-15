@@ -70,13 +70,14 @@ The rule is enforced by type boundaries, not just discipline: the surfaces that
 display status have no access to terminal output, so inference is impossible by
 construction rather than merely prohibited.
 
-| Surface                                      | Kind                        | Source of truth                                                                                 | File                                                                                                      |
-| -------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `lifecycle` (running/exited/closed/archived) | Mechanical                  | Surface existence + kernel-reported process exit                                                | `macos/Sources/Features/Control/ControlSession.swift`, `ControlSessionRegistry.swift`                     |
-| Declared workflow-state badge + summary      | Agent-declared              | `sessions.set-state` / `sessions.set-summary` only                                              | `ControlSession.swift` (`WorkflowState`, `ControlDeclaredState`), `SurfaceView.swift` (`AgentStateBadge`) |
-| Agent-reported metadata chip                 | Agent-declared              | `sessions.create` (at spawn) / `set-metadata` / `update` / `remove-metadata` / `clear-metadata` | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
-| Audit log (`wait` / `watch` / `events`)      | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                                         | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
-| Sidebar agent-activity indicator             | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent-hook`) + terminal bell/progress                    | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
+| Surface                                        | Kind                        | Source of truth                                                                                                                    | File                                                                                                      |
+| ---------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `lifecycle` (running/exited/closed/archived)   | Mechanical                  | Surface existence + kernel-reported process exit                                                                                   | `macos/Sources/Features/Control/ControlSession.swift`, `ControlSessionRegistry.swift`                     |
+| Declared workflow-state badge + summary        | Agent-declared              | `sessions.set-state` / `sessions.set-summary` only                                                                                 | `ControlSession.swift` (`WorkflowState`, `ControlDeclaredState`), `SurfaceView.swift` (`AgentStateBadge`) |
+| Agent-reported metadata chip                   | Agent-declared              | `sessions.create` (at spawn) / `set-metadata` / `update` / `remove-metadata` / `clear-metadata`                                    | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
+| Audit log (`wait` / `watch` / `events`)        | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                                                                            | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
+| Persistent session registry (restored records) | Agent-declared + mechanical | `registry.json` — only stored identity, relationships, declared facts, and timestamps; replayed verbatim on load, never re-derived | `ControlSessionPersistence.swift`, `ControlSessionRegistry.swift` (`rehydrate`)                           |
+| Sidebar agent-activity indicator               | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent-hook`) + terminal bell/progress                                                       | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
 
 ### The control API (declared workflow state)
 
@@ -131,3 +132,9 @@ fields`) — connector payloads stuffed with bait (branch, head ref, labels,
   metadata, caller, group, or the emitted `sessions.create` request; only
   explicitly copied fields and templated group values from explicit event fields
   appear.
+- `macos/Tests/Control/ControlSessionPersistenceTests.swift`
+  (`rehydrationNeverInfersUndeclaredSemanticFields`) — a persisted record whose
+  mechanical fields (command `git commit -m done …`, cwd `/repo/feature-complete`,
+  title `tests passed …`) read like completion signals never rehydrates with a
+  guessed `workflow_state`, `summary`, or `agent_type`; only explicitly declared
+  facts survive a restart, verbatim.

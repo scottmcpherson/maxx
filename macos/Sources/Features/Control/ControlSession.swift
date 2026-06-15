@@ -37,7 +37,28 @@ struct ControlSession {
     /// create time or via `set-group` and is never inferred. Group membership
     /// changes emit Maxx-owned mechanical events on the structured stream.
     var group: String?
+    /// Optional parent session id (MAX-5). A mechanical association edge the
+    /// registry persists: it links this session to a parent session it was
+    /// explicitly created under. Set only at create time from a caller-supplied
+    /// id (validated to reference a known session) — never inferred from process
+    /// names, paths, or any ambient signal. Richer parent-child UX/semantics are
+    /// MAX-6; MAX-5 only stores and round-trips the edge.
+    var parentID: UUID?
+    /// Agent-declared agent type (MAX-5), e.g. `claude-code` or `codex`. An
+    /// explicit self-declaration from the agent/integration, set at create time
+    /// or via `set-agent-type`. Like every declared field it is stored verbatim
+    /// and never inferred from the command, process name, branch, path, or title.
+    var agentType: String?
     let createdAt: Date
+    /// When any field on this record last changed (an API mutation or an
+    /// observed mechanical lifecycle transition). Maxx-owned bookkeeping, bumped
+    /// by the registry; used for retention of stale records across restarts.
+    var updatedAt: Date
+    /// The last time Maxx mechanically observed this session's surface still
+    /// existing (set during reconciliation while the surface is present). A
+    /// kernel/runtime fact, never output inference; nil until first observed.
+    /// Used together with ``updatedAt`` for deterministic stale-record retention.
+    var lastSeenAt: Date?
     /// True once the session was explicitly canceled/closed through the API.
     ///
     /// This is an explicit, Maxx-owned lifecycle fact recorded in response to an
@@ -87,6 +108,15 @@ struct ControlSession {
     var summaryAt: Date?
     /// Who declared `summary` (defaults to `agent`).
     var summarySource: String?
+
+    /// True when this record was rehydrated from disk on app launch rather than
+    /// created live this run (MAX-5). A mechanical fact about *this* run — Maxx
+    /// knows it loaded the record from its own store — not anything inferred
+    /// about the work. Runtime-only: it is never persisted (every record on disk
+    /// is, by definition, restorable), and a `restart` that spawns a fresh
+    /// surface clears it. Surfaces from a previous run no longer exist, so a
+    /// restored record's lifecycle computes as `closed` until it is restarted.
+    var restoredFromPreviousRun: Bool = false
 
     /// Sequence of the most recently recorded event, or nil if none.
     var lastSeq: Int? { events.last?.seq }
@@ -150,6 +180,7 @@ struct ControlSession {
         static let maxPayloadBytes = 8192
         static let maxSummaryLength = 1024
         static let maxGroupLength = 128
+        static let maxAgentTypeLength = 128
     }
 
     /// The default `source` recorded for agent declarations when the caller does
@@ -191,7 +222,7 @@ enum ControlLifecycle: String {
 /// never originates or infers a value here — not from terminal output, process
 /// names, branch names, paths, idle time, or process exit. The enum is kept
 /// intentionally small; new states are an additive change.
-enum WorkflowState: String, CaseIterable {
+enum WorkflowState: String, CaseIterable, Codable {
     case running
     case needsInput
     case blocked
@@ -448,6 +479,26 @@ enum ControlValidation {
         return group
     }
 
+    /// Validate an agent-declared agent type (MAX-5), e.g. `claude-code`. Same
+    /// namespaced character rules as states/groups so it stays a stable, opaque
+    /// token (Maxx never derives meaning from its text). Returns nil for an
+    /// absent/empty value (meaning "no agent type" at create / "leave unchanged"
+    /// is handled by the caller).
+    static func validateAgentType(_ agentType: String?) throws -> String? {
+        guard let agentType, !agentType.isEmpty else { return nil }
+        guard agentType.count <= ControlSession.Limits.maxAgentTypeLength else {
+            throw ControlError(
+                .invalidRequest,
+                "agent_type exceeds \(ControlSession.Limits.maxAgentTypeLength) characters")
+        }
+        guard isValidNamespacedName(agentType) else {
+            throw ControlError(
+                .invalidRequest,
+                "agent_type '\(agentType)' contains invalid characters (allowed: A-Z a-z 0-9 _ . - : /)")
+        }
+        return agentType
+    }
+
     /// Validate an emitted event name. Same character rules as states.
     static func validateEventName(_ name: String?) throws -> String {
         guard let name, !name.isEmpty else {
@@ -522,5 +573,123 @@ enum ControlValidation {
                 .invalidRequest,
                 "unsupported signal '\(name)' (allowed: SIGINT, SIGTERM, SIGKILL, SIGHUP, SIGQUIT)")
         }
+    }
+}
+
+// MARK: - Persistence (MAX-5)
+
+/// On-disk encoding for the persistent session registry.
+///
+/// A dedicated `Codable` conformance (rather than the synthesized one) so the
+/// stored schema is explicit, snake-cased, and **migration-friendly**: every
+/// field beyond the stable identity (`id`/`surface_id`/`created_at`) is decoded
+/// with `decodeIfPresent` and a default, so a registry file written by an older
+/// (or newer) Maxx build still loads — a missing field becomes its default
+/// rather than a hard decode failure. `restoredFromPreviousRun` is deliberately
+/// **not** encoded: it is a fact about the current run, recomputed on load.
+extension ControlSession: Codable {
+    enum CodingKeys: String, CodingKey {
+        case id
+        case surfaceID = "surface_id"
+        case parentID = "parent_id"
+        case title, command, cwd, env, location, status, metadata, group
+        case agentType = "agent_type"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case lastSeenAt = "last_seen_at"
+        case canceled, archived
+        case archivedAt = "archived_at"
+        case archiveReason = "archive_reason"
+        case restartCount = "restart_count"
+        case lastObservedLifecycle = "last_observed_lifecycle"
+        case events
+        case nextSeq = "next_seq"
+        case workflowState = "workflow_state"
+        case workflowStateAt = "workflow_state_at"
+        case workflowStateSource = "workflow_state_source"
+        case summary
+        case summaryAt = "summary_at"
+        case summarySource = "summary_source"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(UUID.self, forKey: .id)
+        let surfaceID = try container.decode(UUID.self, forKey: .surfaceID)
+        let createdAt = try container.decode(Date.self, forKey: .createdAt)
+        let events = try container.decodeIfPresent([ControlEvent].self, forKey: .events) ?? []
+        self.init(
+            id: id,
+            surfaceID: surfaceID,
+            title: try container.decodeIfPresent(String.self, forKey: .title),
+            command: try container.decodeIfPresent(String.self, forKey: .command),
+            cwd: try container.decodeIfPresent(String.self, forKey: .cwd),
+            env: try container.decodeIfPresent([String: String].self, forKey: .env) ?? [:],
+            // Tolerate an unknown future `location`/`workflow_state` raw value:
+            // fall back rather than throw, so an additive enum case from a newer
+            // build doesn't drop the whole record on an older build.
+            location: ((try? container.decodeIfPresent(ControlLocation.self, forKey: .location)) ?? nil) ?? .tab,
+            status: try container.decodeIfPresent(String.self, forKey: .status) ?? "created",
+            metadata: try container.decodeIfPresent(
+                [String: ControlJSONValue].self, forKey: .metadata) ?? [:],
+            group: try container.decodeIfPresent(String.self, forKey: .group),
+            parentID: try container.decodeIfPresent(UUID.self, forKey: .parentID),
+            agentType: try container.decodeIfPresent(String.self, forKey: .agentType),
+            createdAt: createdAt,
+            // Older schemas may predate updatedAt; fall back to createdAt.
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt,
+            lastSeenAt: try container.decodeIfPresent(Date.self, forKey: .lastSeenAt),
+            canceled: try container.decodeIfPresent(Bool.self, forKey: .canceled) ?? false,
+            archived: try container.decodeIfPresent(Bool.self, forKey: .archived) ?? false,
+            archivedAt: try container.decodeIfPresent(Date.self, forKey: .archivedAt),
+            archiveReason: try container.decodeIfPresent(String.self, forKey: .archiveReason),
+            restartCount: try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0,
+            lastObservedLifecycle: try container.decodeIfPresent(
+                String.self, forKey: .lastObservedLifecycle),
+            events: events,
+            // Keep sequence numbers monotonic across restarts: resume past the
+            // last persisted event even if `next_seq` was absent in the file.
+            nextSeq: try container.decodeIfPresent(Int.self, forKey: .nextSeq)
+                ?? ((events.last?.seq).map { $0 + 1 } ?? 0),
+            workflowState: (try? container.decodeIfPresent(WorkflowState.self, forKey: .workflowState)) ?? nil,
+            workflowStateAt: try container.decodeIfPresent(Date.self, forKey: .workflowStateAt),
+            workflowStateSource: try container.decodeIfPresent(
+                String.self, forKey: .workflowStateSource),
+            summary: try container.decodeIfPresent(String.self, forKey: .summary),
+            summaryAt: try container.decodeIfPresent(Date.self, forKey: .summaryAt),
+            summarySource: try container.decodeIfPresent(String.self, forKey: .summarySource))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(surfaceID, forKey: .surfaceID)
+        try container.encodeIfPresent(parentID, forKey: .parentID)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(command, forKey: .command)
+        try container.encodeIfPresent(cwd, forKey: .cwd)
+        if !env.isEmpty { try container.encode(env, forKey: .env) }
+        try container.encode(location, forKey: .location)
+        try container.encode(status, forKey: .status)
+        if !metadata.isEmpty { try container.encode(metadata, forKey: .metadata) }
+        try container.encodeIfPresent(group, forKey: .group)
+        try container.encodeIfPresent(agentType, forKey: .agentType)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(lastSeenAt, forKey: .lastSeenAt)
+        try container.encode(canceled, forKey: .canceled)
+        try container.encode(archived, forKey: .archived)
+        try container.encodeIfPresent(archivedAt, forKey: .archivedAt)
+        try container.encodeIfPresent(archiveReason, forKey: .archiveReason)
+        try container.encode(restartCount, forKey: .restartCount)
+        try container.encodeIfPresent(lastObservedLifecycle, forKey: .lastObservedLifecycle)
+        if !events.isEmpty { try container.encode(events, forKey: .events) }
+        try container.encode(nextSeq, forKey: .nextSeq)
+        try container.encodeIfPresent(workflowState, forKey: .workflowState)
+        try container.encodeIfPresent(workflowStateAt, forKey: .workflowStateAt)
+        try container.encodeIfPresent(workflowStateSource, forKey: .workflowStateSource)
+        try container.encodeIfPresent(summary, forKey: .summary)
+        try container.encodeIfPresent(summaryAt, forKey: .summaryAt)
+        try container.encodeIfPresent(summarySource, forKey: .summarySource)
     }
 }

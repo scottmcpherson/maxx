@@ -234,6 +234,21 @@ the current declared state is left unchanged. `set-summary` is independent of
 `set-state`, so an agent can update the displayed text without changing status.
 Both record an audit entry and are surfaced in `get` / `list` / `watch`.
 
+### Agent type and parent (persisted)
+
+An agent declares its type explicitly; Maxx stores it verbatim and persists it
+across restarts (MAX-5). A session can also be created under an explicit parent.
+
+```bash
+maxx +control sessions set-agent-type <session_id> --agent-type claude-code
+maxx +control sessions create --command "zig build test" --agent-type codex
+maxx +control sessions create --command "zig build" --parent <parent_session_id>
+```
+
+`--agent-type` is validated as an opaque token (Maxx never derives meaning from
+its text) and recorded with a source and timestamp. `--parent` must reference a
+known `session_id`; the persisted edge is mechanical, never inferred.
+
 ### Structured event stream (`stream` / `event`)
 
 A **cross-resource, cursor-addressed event bus** for supervisor agents. Where
@@ -347,6 +362,7 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.clear-metadata`  | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
 | `sessions.set-state`       | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
 | `sessions.set-summary`     | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-agent-type`  | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
 | `sessions.set-group`       | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
 | `stream.watch`             | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
 | `stream.wait`              | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
@@ -545,6 +561,60 @@ stale metadata is ever restored from a previous run.
   a specific signal (`SIGINT`/`SIGTERM`/`SIGKILL`/`SIGHUP`/`SIGQUIT`) to the
   foreground process via the explicit process-control path — never by
   synthesizing terminal input.
+
+## The persistent session registry (MAX-5)
+
+The session registry is durable: it survives an app restart so Maxx keeps a
+mechanical view of sessions and the facts agents declared on them. This persists
+the registry; it does **not** persist or revive the terminal processes, which die
+with the app.
+
+**What is persisted.** Each record stores its stable `session_id` and
+`surface_id`, the optional `parent_id` (a persisted parent association), `group`,
+the declared `agent_type`, `title`, `command`, `cwd`, caller-owned `status`, the
+agent-reported `metadata`, the agent-declared `workflow_state` / `summary` (with
+their sources/timestamps), the mechanical lifecycle flags (`archived`,
+`restart_count`, last-observed lifecycle), the audit log, and the
+`created_at` / `updated_at` / `last_seen_at` timestamps. `updated_at` is bumped on
+any change; `last_seen_at` is the last time Maxx mechanically observed the
+surface still existing (used for retention).
+
+**Where.** A single versioned JSON document, `registry.json`, in the same
+per-user control directory as the socket and token (honoring `MAXX_CONTROL_DIR`),
+written `0600` inside the `0700` directory — the registry can carry
+agent-declared metadata, so it gets the same private-to-the-user hardening. It
+survives an app restart and is cleared on reboot along with the rest of the
+runtime directory (no live session survives a reboot either). Writes are atomic
+(temp file + rename) and happen on every mutation, plus a flush on app
+termination.
+
+**Restart rehydration.** On launch the registry loads its records. Their surfaces
+no longer exist, so each restored record's lifecycle computes as `closed`, it has
+no `pid`, and it is flagged `restored: true` (a mechanical fact about this run,
+not an inference about the work). A restored record is fully listable/readable via
+`get` / `list` / `events`, and — because its `command` is persisted — is
+`restart`-able: a restart spawns a fresh surface, revives the record (`restored`
+clears, lifecycle returns to `running`), and increments `restart_count`.
+
+**Declared fields.** `agent_type` is an explicit agent self-declaration
+(`set-agent-type`, or `--agent-type` at `create`), stored verbatim like all
+declared facts and never inferred from the command, process name, branch, path, or
+title. `parent` is supplied at `create` time as a known `session_id`; the edge is
+verified (`not_found` for an unknown id, `invalid_request` for a non-UUID) and
+persisted, but never inferred from naming or spawn order. Both `set-agent-type`
+and a `--group`/`--parent` association are gated by the same capabilities as the
+other declaration/group verbs (`state:set` and `groups:create`).
+
+**Retention.** Deterministic and bounded so the file cannot grow without limit:
+records older than 14 days (by `max(updated_at, last_seen_at)`) are dropped, and
+if more than 500 remain, the newest are kept. The same policy is applied on save
+and on load.
+
+**No inference on load.** Rehydration replays exactly what was stored and nothing
+more. A record whose mechanical fields (command, cwd, title) happen to read like
+completion signals never comes back with a guessed `workflow_state`, `summary`, or
+`agent_type` — only explicitly declared facts survive, verbatim. See
+[`no-inference.md`](no-inference.md).
 
 ## The structured event stream contract (MAX-7)
 
