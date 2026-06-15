@@ -146,30 +146,50 @@ struct ControlSessionStore {
         return decoder
     }
 
-    /// Load the persisted sessions with retention applied, or `[]` on any
-    /// problem. Pure w.r.t. the registry: it returns records for the caller to
-    /// rehydrate and never touches live surfaces.
-    func load(now: Date) -> [ControlSession] {
+    /// The outcome of a load: the retained records plus whether the existing file
+    /// must be left untouched.
+    struct LoadResult {
+        var sessions: [ControlSession]
+        /// True when a registry file exists but is a newer, unreadable schema. The
+        /// caller must then NOT write through this store, so a downgrade run does
+        /// not clobber the newer build's file. False for a missing, corrupt, or
+        /// readable file (all safe to overwrite).
+        var preserveExistingFile: Bool
+    }
+
+    /// Load the persisted sessions with retention applied, reporting whether the
+    /// existing file must be preserved. Pure w.r.t. the registry: it returns
+    /// records for the caller to rehydrate and never touches live surfaces.
+    func loadResult(now: Date) -> LoadResult {
         guard let data = try? Data(contentsOf: fileURL) else {
-            return []  // No file yet (first run) — start empty.
+            return LoadResult(sessions: [], preserveExistingFile: false)  // First run.
         }
         let snapshot: ControlRegistrySnapshot
         do {
             snapshot = try Self.makeDecoder().decode(ControlRegistrySnapshot.self, from: data)
         } catch {
+            // Corrupt/garbage file: safe to start fresh and overwrite.
             Self.logger.error(
                 "ignoring unreadable session registry at \(fileURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
-            return []
+            return LoadResult(sessions: [], preserveExistingFile: false)
         }
         guard snapshot.version <= ControlRegistrySnapshot.currentVersion else {
             // A file from a newer build whose schema we do not understand: refuse
-            // it rather than risk misreading it. Don't delete it — a downgrade is
-            // usually temporary and the newer build will read it again.
+            // to read it AND preserve it, so a downgrade run does not destroy the
+            // newer build's data on its next write. The newer build reads it again.
             Self.logger.error(
-                "ignoring session registry with unsupported version \(snapshot.version) (this build understands up to \(ControlRegistrySnapshot.currentVersion))")
-            return []
+                "preserving session registry with unsupported version \(snapshot.version) (this build understands up to \(ControlRegistrySnapshot.currentVersion)); persistence disabled for this run")
+            return LoadResult(sessions: [], preserveExistingFile: true)
         }
-        return retention.apply(to: snapshot.sessions, now: now)
+        return LoadResult(
+            sessions: retention.apply(to: snapshot.sessions, now: now),
+            preserveExistingFile: false)
+    }
+
+    /// Convenience for callers that only need the records (e.g. tests). Equivalent
+    /// to `loadResult(now:).sessions`.
+    func load(now: Date) -> [ControlSession] {
+        loadResult(now: now).sessions
     }
 
     /// Atomically write the given sessions (retention applied). Logs and returns

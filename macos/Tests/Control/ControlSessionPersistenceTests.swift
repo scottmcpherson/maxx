@@ -563,4 +563,45 @@ struct ControlSessionPersistenceTests {
         #expect(again?.lifecycle == "closed")
         #expect(again?.updatedAt == canceledUpdatedAt)
     }
+
+    @Test func cancelingAnArchivedSessionDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+        let archived = registry.handle(
+            request(.sessionsArchive, .init(id: sid)), host: host).result?.session
+        let archivedUpdatedAt = archived?.updatedAt
+
+        // Canceling an already-archived (terminal) session is a no-op: its
+        // lifecycle stays `archived` and updated_at must not advance.
+        clock.now = clock.now.addingTimeInterval(120)
+        let canceled = registry.handle(
+            request(.sessionsAction, .init(id: sid, action: "cancel")), host: host).result?.session
+        #expect(canceled?.lifecycle == "archived")
+        #expect(canceled?.updatedAt == archivedUpdatedAt)
+    }
+
+    // MARK: - Newer-schema preservation (downgrade safety)
+
+    @Test func newerVersionFileIsPreservedAcrossMutations() throws {
+        let url = tempStoreURL()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = "{ \"version\": 999, \"sessions\": [] }"
+        try Data(original.utf8).write(to: url)
+
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: url, clock: clock)
+        // The newer schema loads nothing and suspends persistence for this run.
+        #expect(registry.count == 0)
+
+        // A mutation that would normally persist must NOT overwrite the newer file.
+        _ = registry.handle(request(.sessionsCreate, .init()), host: host)
+
+        let after = try Data(contentsOf: url)
+        let parsed = try JSONSerialization.jsonObject(with: after) as? [String: Any]
+        #expect(parsed?["version"] as? Int == 999)
+        #expect((parsed?["sessions"] as? [Any])?.isEmpty == true)
+    }
 }

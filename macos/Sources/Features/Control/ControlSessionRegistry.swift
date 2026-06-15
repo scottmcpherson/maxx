@@ -84,6 +84,11 @@ final class ControlSessionRegistry {
     /// point it at a temp file (or omit it entirely).
     private let store: ControlSessionStore?
 
+    /// True once a write would clobber an existing registry file written by a
+    /// newer build (an unsupported schema version). Set at rehydrate; while set,
+    /// ``persist`` is a no-op so a downgrade run never destroys the newer file.
+    private var persistenceSuspended = false
+
     // MARK: Structured event stream (MAX-7)
 
     /// Append-only, bounded global event bus: the cross-resource view of
@@ -155,7 +160,10 @@ final class ControlSessionRegistry {
     /// infers anything: each field is the verbatim persisted value.
     private func rehydrate() {
         guard let store else { return }
-        for var session in store.load(now: now()) {
+        let result = store.loadResult(now: now())
+        // A newer build's file must not be overwritten by this (older) run.
+        persistenceSuspended = result.preserveExistingFile
+        for var session in result.sessions {
             session.restoredFromPreviousRun = true
             session.lastObservedLifecycle = session.archived
                 ? ControlLifecycle.archived.rawValue
@@ -166,8 +174,10 @@ final class ControlSessionRegistry {
 
     /// Persist the current session set, if a store is configured. Called from the
     /// single mutation choke point (``store(_:)``), on observed lifecycle
-    /// transitions, and from ``flush``. A no-op without a store.
+    /// transitions, and from ``flush``. A no-op without a store, or while
+    /// persistence is suspended to preserve a newer build's registry file.
     private func persist() {
+        guard !persistenceSuspended else { return }
         store?.save(Array(sessions.values), now: now())
     }
 
@@ -1687,15 +1697,16 @@ final class ControlSessionRegistry {
             handle.close()
         }
         session.canceled = true
+        // Only the first transition into a terminal state mutates the record (the
+        // one-shot `closed` event + lifecycle) and is worth persisting. Canceling a
+        // session that is ALREADY terminal — already canceled, archived, or
+        // observed closed — changes nothing observable (its lifecycle is unchanged),
+        // so record nothing and skip store(): an idempotent cancel retry, including
+        // one against an already-archived session, never bumps updatedAt or
+        // refreshes the terminal record's retention recency.
         if !alreadyTerminal {
             session.lastObservedLifecycle = ControlLifecycle.closed.rawValue
             recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
-        }
-        // Re-canceling an already-canceled session changes nothing on the record
-        // (the `canceled` flip and the one-shot `closed` event both only happen on
-        // the first cancel): skip store() so an idempotent cancel retry never bumps
-        // updatedAt or refreshes the terminal record's retention recency.
-        if !wasCanceled {
             store(&session)
         }
         return .success(.init(session: view(of: session, host: host), canceled: true))
