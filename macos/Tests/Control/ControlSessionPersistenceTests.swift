@@ -799,6 +799,42 @@ struct ControlSessionPersistenceTests {
         #expect(changed?.updatedAt != createdUpdatedAt)
     }
 
+    @Test func redundantStatusUpdateDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(
+            request(.sessionsCreate, .init(status: "building")), host: host)
+        let sid = created.result?.session?.sessionID
+        let createdUpdatedAt = created.result?.session?.updatedAt
+
+        // Re-setting status to the value it already holds is a no-op → no bump.
+        clock.now = clock.now.addingTimeInterval(60)
+        let same = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, status: "building")),
+            host: host).result?.session
+        #expect(same?.updatedAt == createdUpdatedAt)
+
+        // A real status change bumps.
+        clock.now = clock.now.addingTimeInterval(60)
+        let changed = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, status: "done")),
+            host: host).result?.session
+        #expect(changed?.updatedAt != createdUpdatedAt)
+    }
+
+    @Test func noOpMetadataUpdateStillRejectsInvalidSource() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+
+        // An empty (no-op) metadata merge with an invalid (empty) source must still
+        // be rejected — source is validated before the no-op guard.
+        let response = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, metadata: [:], source: "")), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
     @Test func archivedRecordIsNotRefreshedByRestartReconcile() {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

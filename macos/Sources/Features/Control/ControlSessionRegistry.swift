@@ -622,7 +622,12 @@ final class ControlSessionRegistry {
         }
 
         var changed = false
-        if let status = try ControlValidation.validateStatus(params?.status) {
+        // Setting status to the value it already holds is a no-op: don't mark the
+        // record changed (which would bump updated_at and refresh retention recency
+        // for a closed/restored record). Validation still runs, rejecting a bad
+        // status regardless.
+        if let status = try ControlValidation.validateStatus(params?.status),
+            status != session.status {
             session.status = status
             changed = true
         }
@@ -632,6 +637,10 @@ final class ControlSessionRegistry {
             // Merge (append) semantics: provided keys overwrite/add to existing
             // metadata. The combined map is re-validated against the limits.
             let validated = try ControlValidation.validateMetadata(metadata)
+            // Validate the source up front — before the no-op check — so an invalid
+            // source (empty/overlong) is rejected even when the merge changes
+            // nothing, matching the other metadata mutators.
+            let source = try ControlValidation.validateSource(params?.source)
             var merged = session.metadata
             merged.merge(validated) { _, new in new }
             let normalized = try ControlValidation.validateMetadata(merged)
@@ -649,7 +658,6 @@ final class ControlSessionRegistry {
                 // `watch`/`events` consumer observes update-driven metadata changes.
                 // `update` is a documented metadata-merge path; it must not be a
                 // silent, unobservable mutation.
-                let source = try ControlValidation.validateSource(params?.source)
                 let at = now()
                 let pid = liveSurface(of: session, host: host)?.pid
                 for key in validated.keys.sorted() {
