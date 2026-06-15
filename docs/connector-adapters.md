@@ -139,8 +139,18 @@ reserved, explicit keys shown on the launched tab:
 - `connector.url` — the source URL, when provided.
 - `connector.launched_at` — launch timestamp, when the caller supplies one.
 
-A `LaunchRequest` is exactly the input the Control API's `sessions.create`
-consumes. `LaunchRequest.writeControlRequest` emits that request shape.
+`LaunchRequest.writeControlRequest` emits the Control API's
+`{ token?, method, params }` request envelope for `sessions.create`. The
+**token is supplied by the runner** (the per-call capability token it reads from
+the control directory); `resolve` runs offline and omits it, and the control
+server rejects a tokenless request — so `launch` becomes sendable only once the
+runner injects the token.
+
+For `.env` delivery the prompt rides in `params.env` (`MAXX_CONNECTOR_PROMPT`).
+For `.stdin`/`.file` delivery the prompt is **not** in the control request — the
+runner delivers it out of band using the resolved `prompt` and `prompt_delivery`.
+So `launch` (`params`) alone is not the whole launch; consumers must also read
+`prompt`/`prompt_delivery`.
 
 ## CLI
 
@@ -152,13 +162,19 @@ maxx +connector resolve --source linear --command claude \
 ```
 
 `resolve` reads a payload (from `--payload <file>`, or stdin when omitted/`-`),
-parses it with the named adapter, resolves the launch, and prints the normalized
-event plus the `sessions.create` control request the launch corresponds to.
+parses it with the named adapter, resolves the launch, and prints the **resolve
+envelope**: the normalized `event`, the `prompt_delivery` mode, the resolved
+`prompt`, and the `launch` (`sessions.create`) control request. A runner
+consumes the whole envelope — it injects the capability token into `launch` and,
+for `stdin`/`file` delivery, hands the `prompt` to the launched command out of
+band. `launch.params` alone is therefore not sufficient.
 
 ## What is intentionally not here yet
 
-This layer **resolves** a launch; it does not **execute** one. Sending the
-resolved `sessions.create` to a running Maxx, receiving webhooks, and fetching
-payloads over the network (with the associated auth) are the **runner**, kept
-separate so the resolution logic stays pure and exhaustively testable. The
-`resolve` CLI output is precisely the request a future runner will send.
+This layer **resolves** a launch; it does not **execute** one. The **runner** —
+kept separate so the resolution logic stays pure and exhaustively testable —
+owns: injecting the per-call capability token into the control request, sending
+`sessions.create` to a running Maxx, delivering the prompt for `stdin`/`file`
+modes, receiving webhooks, and fetching payloads over the network (with the
+associated auth). The `resolve` envelope is the complete input the runner needs;
+the runner adds only the token and the act of sending.

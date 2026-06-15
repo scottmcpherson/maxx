@@ -78,16 +78,38 @@ pub const LaunchRequest = struct {
     /// event type, url, launch timestamp). These keys are reserved.
     metadata: []const Pair,
 
-    /// Render the `sessions.create` control request this launch corresponds to.
-    /// This is the exact request a runner would send to a running Maxx; emitting
-    /// it (rather than sending it) is what `+connector resolve` does. `alloc` is
-    /// used only for transient formatting buffers.
+    /// Options for serializing the control request.
+    pub const ControlRequestOptions = struct {
+        /// The per-call capability token. A runner injects the token it read
+        /// from the control directory (`MAXX_CONTROL_DIR`); offline callers such
+        /// as `+connector resolve` leave it null and the field is omitted. The
+        /// control server REJECTS a request with no token before dispatch, so a
+        /// runner MUST supply one — this serializer does not fabricate it.
+        token: ?[]const u8 = null,
+    };
+
+    /// Render the `sessions.create` control request this launch corresponds to,
+    /// in the same `{ token?, method, params }` envelope the Control API expects
+    /// (mirrors `cli/control.zig` `buildRequest`). Emitting it rather than
+    /// sending it is what `+connector resolve` does; the runner adds the token.
+    /// `alloc` is used only for transient formatting buffers.
+    ///
+    /// Note: `params` conveys the prompt only for `.env` delivery (via the env
+    /// array). For `.stdin`/`.file` delivery the prompt is NOT in the control
+    /// request — the runner delivers it out of band from `LaunchRequest.prompt`
+    /// and `prompt_delivery`. Consumers must consult those fields, not `params`
+    /// alone, for the full launch.
     pub fn writeControlRequest(
         self: LaunchRequest,
         alloc: Allocator,
         json: *std.json.Stringify,
+        opts: ControlRequestOptions,
     ) !void {
         try json.beginObject();
+        if (opts.token) |token| {
+            try json.objectField("token");
+            try json.write(token);
+        }
         try json.objectField("method");
         try json.write("sessions.create");
         try json.objectField("params");
@@ -392,30 +414,70 @@ test "writeControlRequest emits a sessions.create request" {
         .title = "${issue.identifier}",
     }, ev, .{});
 
+    // Without a token (offline `resolve`), the field is omitted.
+    {
+        var out: std.io.Writer.Allocating = .init(alloc);
+        var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
+        try req.writeControlRequest(alloc, &json, .{});
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+        try testing.expect(parsed.object.get("token") == null);
+        try testing.expectEqualStrings("sessions.create", parsed.object.get("method").?.string);
+        const params = parsed.object.get("params").?.object;
+        try testing.expectEqualStrings("claude", params.get("command").?.string);
+        try testing.expectEqualStrings("/repo", params.get("cwd").?.string);
+        try testing.expectEqualStrings("MAX-10", params.get("title").?.string);
+        try testing.expectEqualStrings("tab", params.get("location").?.string);
+
+        // The prompt rides in env for the default `.env` delivery.
+        const env = params.get("env").?.array;
+        try testing.expectEqualStrings("MAXX_CONNECTOR_PROMPT=Work on MAX-10", env.items[0].string);
+
+        // Provenance metadata is present and explicit.
+        const meta = params.get("metadata").?.object;
+        try testing.expectEqualStrings("linear", meta.get("connector").?.string);
+        try testing.expectEqualStrings("evt-1", meta.get("connector.event_id").?.string);
+        try testing.expectEqualStrings("Issue", meta.get("connector.event_type").?.string);
+        try testing.expectEqualStrings("https://linear.app/x/MAX-10", meta.get("connector.url").?.string);
+    }
+
+    // A runner-supplied token is emitted at the top level (the real wire shape).
+    {
+        var out: std.io.Writer.Allocating = .init(alloc);
+        var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try req.writeControlRequest(alloc, &json, .{ .token = "cap-token-123" });
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+        try testing.expectEqualStrings("cap-token-123", parsed.object.get("token").?.string);
+        try testing.expectEqualStrings("sessions.create", parsed.object.get("method").?.string);
+    }
+}
+
+test "stdin delivery keeps the prompt off the control request" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ev: TriggerEvent = .{
+        .source = "github",
+        .id = "n1",
+        .type = "issue",
+        .title = "T",
+        .prompt = "DELIVER_VIA_STDIN",
+    };
+    const req = try resolve(alloc, .{ .command = "codex", .prompt_delivery = .stdin }, ev, .{});
+
+    // The prompt is carried on the LaunchRequest, not in the env-based request.
+    try testing.expect(req.prompt_delivery == .stdin);
+    try testing.expectEqualStrings("DELIVER_VIA_STDIN", req.prompt.?);
+    try testing.expectEqual(@as(usize, 0), req.env.len);
+
     var out: std.io.Writer.Allocating = .init(alloc);
-    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
-    try req.writeControlRequest(alloc, &json);
-    const text = out.written();
-
-    // Round-trip parse the emitted request and assert its shape.
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, text, .{});
-    try testing.expectEqualStrings("sessions.create", parsed.object.get("method").?.string);
-    const params = parsed.object.get("params").?.object;
-    try testing.expectEqualStrings("claude", params.get("command").?.string);
-    try testing.expectEqualStrings("/repo", params.get("cwd").?.string);
-    try testing.expectEqualStrings("MAX-10", params.get("title").?.string);
-    try testing.expectEqualStrings("tab", params.get("location").?.string);
-
-    // The prompt rides in env for the default `.env` delivery.
-    const env = params.get("env").?.array;
-    try testing.expectEqualStrings("MAXX_CONNECTOR_PROMPT=Work on MAX-10", env.items[0].string);
-
-    // Provenance metadata is present and explicit.
-    const meta = params.get("metadata").?.object;
-    try testing.expectEqualStrings("linear", meta.get("connector").?.string);
-    try testing.expectEqualStrings("evt-1", meta.get("connector.event_id").?.string);
-    try testing.expectEqualStrings("Issue", meta.get("connector.event_type").?.string);
-    try testing.expectEqualStrings("https://linear.app/x/MAX-10", meta.get("connector.url").?.string);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try req.writeControlRequest(alloc, &json, .{});
+    // The control request must NOT carry the stdin/file prompt; consumers read
+    // it from req.prompt / prompt_delivery instead.
+    try testing.expect(std.mem.indexOf(u8, out.written(), "DELIVER_VIA_STDIN") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "MAXX_CONNECTOR_PROMPT") == null);
 }
 
 test "resolve defaults title to event title" {

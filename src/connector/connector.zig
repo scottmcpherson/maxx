@@ -100,7 +100,7 @@ fn assertNoLeak(alloc: std.mem.Allocator, source: []const u8, payload: []const u
     try json.objectField("event");
     try event.writeJson(&json);
     try json.objectField("launch");
-    try req.writeControlRequest(alloc, &json);
+    try req.writeControlRequest(alloc, &json, .{});
     try json.endObject();
     const serialized = out.written();
 

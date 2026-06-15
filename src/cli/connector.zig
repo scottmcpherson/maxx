@@ -64,9 +64,12 @@ const Command = struct {
 ///
 /// Subcommands:
 ///
-///   * `resolve`: parse a payload and print the `sessions.create` control
-///     request it resolves to (it does *not* launch the tab — that runner step
-///     is intentionally separate). Flags:
+///   * `resolve`: parse a payload and print the resolve envelope — the
+///     normalized event, the prompt and its delivery mode, and the
+///     `sessions.create` control request — that a runner would consume (the
+///     runner injects the capability token and, for stdin/file delivery, hands
+///     the prompt to the command out of band). It does *not* launch the tab;
+///     that runner step is intentionally separate. Flags:
 ///     `--source linear|github` (required), `--payload <file>` (a path, or `-`
 ///     / omitted to read stdin), `--command <cmd>` (required; supports
 ///     `${field}` placeholders), `--cwd <path>`, `--title <text>`, repeatable
@@ -236,8 +239,11 @@ fn runResolve(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
         error.OutOfMemory => return err,
     };
 
-    // Print the normalized event plus the control request the launch resolves
-    // to. This is what a runner would send to a running Maxx; we only resolve.
+    // Print the resolve envelope: the normalized event, how the prompt should
+    // be delivered, the resolved prompt itself, and the `sessions.create`
+    // control request. A runner consumes the whole envelope — it injects the
+    // capability token into `launch` and, for stdin/file delivery, hands the
+    // `prompt` to the launched command out of band. We only resolve, never send.
     var out: std.io.Writer.Allocating = .init(alloc);
     var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
     try json.beginObject();
@@ -245,8 +251,12 @@ fn runResolve(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
     try event.writeJson(&json);
     try json.objectField("prompt_delivery");
     try json.write(@tagName(request.prompt_delivery));
+    if (request.prompt) |p| {
+        try json.objectField("prompt");
+        try json.write(p);
+    }
     try json.objectField("launch");
-    try request.writeControlRequest(alloc, &json);
+    try request.writeControlRequest(alloc, &json, .{});
     try json.endObject();
 
     var out_buf: [4096]u8 = undefined;
