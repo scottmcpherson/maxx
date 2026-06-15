@@ -457,18 +457,23 @@ final class ControlSessionRegistry {
         let status = try ControlValidation.validateStatus(params?.status) ?? "created"
         let group = try ControlValidation.validateGroup(params?.group)
         let agentType = try ControlValidation.validateAgentType(params?.agentType)
-        // A parent association (MAX-5) is an explicit, caller-supplied edge: the
-        // id must reference a session this registry already knows. We never infer
-        // a parent from naming, paths, or spawn order.
-        let parentID = try resolveParent(params?.parent)
+        // A parent association (MAX-5) is an explicit, caller-supplied edge to a
+        // session this registry already knows. We never infer a parent from
+        // naming, paths, or spawn order. Whether an edge is *requested* is read
+        // from the raw params, not from a resolved id, so the capability check
+        // below can run before any session lookup.
+        let parentRequested = !(params?.parent ?? "").isEmpty
         // Spawning is gated by `tabs:spawn` in `handle`; assigning a group or a
         // parent on create additionally requires `groups:create` (both are
         // association edges between sessions), and declaring an agent type at
         // create requires `state:set` (the same gate as the standalone
         // `set-agent-type` verb — otherwise create would be a way to declare it
-        // without the capability). Enforce both before the surface is spawned so a
-        // denied request never leaves a stray tab behind.
-        if group != nil || parentID != nil {
+        // without the capability). Enforce these BEFORE resolving the parent id and
+        // before the surface is spawned: a caller without `groups:create` must not
+        // be able to tell an unknown parent id (`not_found`) from an existing one
+        // (`unauthorized`) — that differential would be a session-existence oracle —
+        // and a denied request must never leave a stray tab behind.
+        if group != nil || parentRequested {
             try enforceCapability(
                 .groupsCreate, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
@@ -478,6 +483,9 @@ final class ControlSessionRegistry {
                 .stateSet, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
         }
+        // Authorized to create the association now; resolve the parent edge (which
+        // may throw `not_found` / `invalid_request`) before spawning the surface.
+        let parentID = try resolveParent(params?.parent)
 
         let location: ControlLocation
         if let raw = params?.location {

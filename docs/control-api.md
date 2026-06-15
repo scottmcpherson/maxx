@@ -620,7 +620,10 @@ title. `parent` is supplied at `create` time as a known `session_id`; the edge i
 verified (`not_found` for an unknown id, `invalid_request` for a non-UUID) and
 persisted, but never inferred from naming or spawn order. Both `set-agent-type`
 and a `--group`/`--parent` association are gated by the same capabilities as the
-other declaration/group verbs (`state:set` and `groups:create`).
+other declaration/group verbs (`state:set` and `groups:create`). The
+`groups:create` check runs **before** the parent id is resolved, so a caller that
+lacks it gets `unauthorized` whether or not the id exists — the parent lookup
+never becomes a session-existence oracle.
 
 **Retention.** Deterministic and bounded so the file cannot grow without limit.
 The age cutoff retires only records observed **terminal** (closed or archived):

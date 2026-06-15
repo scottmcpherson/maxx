@@ -1753,6 +1753,42 @@ struct ControlSessionRegistryTests {
         #expect(response.result?.session?.agentType == "claude-code")
     }
 
+    @Test func createWithParentDoesNotLeakSessionExistenceWithoutGroupsCreate() {
+        // A caller with `tabs:spawn` but not `groups:create` must not be able to
+        // use `create --parent <id>` as an oracle for whether a session id exists.
+        // An unknown id and an existing id must return the SAME error
+        // (`unauthorized`) — the capability is checked before the parent lookup —
+        // and neither denied request may spawn a surface.
+        let policy = ControlPolicy(sources: [
+            ControlPolicySource(id: "spawn-only", kind: .external, allow: [.tabsSpawn])
+        ])
+        let registry = ControlSessionRegistry(policy: policy)
+        let host = FakeControlSessionHost()
+
+        // Spawning a plain tab (no association) needs only `tabs:spawn`, so this
+        // gives us a genuinely existing session id to probe with.
+        let parent = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", caller: "spawn-only")), host: host)
+        let existingID = parent.result?.session?.sessionID
+        #expect(existingID != nil)
+        #expect(host.createdRequests.count == 1)
+
+        // Existing parent id → unauthorized (the association is not permitted).
+        let withExisting = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "ls", parent: existingID, caller: "spawn-only")), host: host)
+        #expect(withExisting.error?.code == "unauthorized")
+
+        // Unknown parent id → the SAME unauthorized, NOT not_found. No oracle.
+        let withUnknown = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "ls", parent: UUID().uuidString, caller: "spawn-only")), host: host)
+        #expect(withUnknown.error?.code == "unauthorized")
+
+        // Neither denied request spawned a surface — still just the one parent tab.
+        #expect(host.createdRequests.count == 1)
+    }
+
     // MARK: - Connector launch glue (MAX-14)
 
     /// Policy decision (MAX-14): create-time metadata rides under `tabs:spawn`,
