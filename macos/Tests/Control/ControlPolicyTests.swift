@@ -78,7 +78,9 @@ struct ControlPolicyEvaluatorTests {
     }
 
     @Test func unimplementedCapabilitiesAreAlwaysDenied() {
-        for capability in [ControlCapability.groupsList, .groupsCreate, .automationTrigger] {
+        // `groups:create` became implemented with MAX-7, so it is no longer in
+        // this set; `groups:list` and `automation:trigger` remain method-less.
+        for capability in [ControlCapability.groupsList, .automationTrigger] {
             if case .deny = decide("local-cli", capability) {} else {
                 Issue.record("expected deny for \(capability.rawValue)")
             }

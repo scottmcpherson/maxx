@@ -32,6 +32,11 @@ struct ControlSession {
     /// originates, normalizes, or interprets these values, and never derives them
     /// from terminal output, process names, branch names, paths, or idle time.
     var metadata: [String: ControlJSONValue]
+    /// Optional group label for supervisor coordination (MAX-7). A session may
+    /// belong to at most one group at a time; membership is set explicitly at
+    /// create time or via `set-group` and is never inferred. Group membership
+    /// changes emit Maxx-owned mechanical events on the structured stream.
+    var group: String?
     let createdAt: Date
     /// True once the session was explicitly canceled/closed through the API.
     ///
@@ -45,6 +50,12 @@ struct ControlSession {
     var archiveReason: String?
     /// Number of times the session's command has been restarted.
     var restartCount: Int = 0
+    /// The Maxx-owned lifecycle value most recently *recorded* as a mechanical
+    /// stream event, so the registry can emit a `process.exited`/`closed` event
+    /// exactly once when it next observes the kernel-reported transition. nil
+    /// until first observed (treated as `running`). This is reconciliation of an
+    /// explicit kernel fact, never output inference.
+    var lastObservedLifecycle: String?
     /// Append-only audit log of agent-declared facts and Maxx-owned lifecycle
     /// actions. Drives `wait`, `watch`, and `events`.
     var events: [ControlEvent] = []
@@ -138,6 +149,7 @@ struct ControlSession {
         static let maxReasonLength = 1024
         static let maxPayloadBytes = 8192
         static let maxSummaryLength = 1024
+        static let maxGroupLength = 128
     }
 
     /// The default `source` recorded for agent declarations when the caller does
@@ -416,6 +428,24 @@ enum ControlValidation {
                 "state '\(state)' contains invalid characters (allowed: A-Z a-z 0-9 _ . - : /)")
         }
         return state
+    }
+
+    /// Validate a group label. Same namespaced character rules as states/events
+    /// so a group id is a stable, opaque token (no inference from its text).
+    /// Returns nil for an absent/empty group (which means "no group" / "leave").
+    static func validateGroup(_ group: String?) throws -> String? {
+        guard let group, !group.isEmpty else { return nil }
+        guard group.count <= ControlSession.Limits.maxGroupLength else {
+            throw ControlError(
+                .invalidRequest,
+                "group exceeds \(ControlSession.Limits.maxGroupLength) characters")
+        }
+        guard isValidNamespacedName(group) else {
+            throw ControlError(
+                .invalidRequest,
+                "group '\(group)' contains invalid characters (allowed: A-Z a-z 0-9 _ . - : /)")
+        }
+        return group
     }
 
     /// Validate an emitted event name. Same character rules as states.

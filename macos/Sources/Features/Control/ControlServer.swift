@@ -235,6 +235,10 @@ final class ControlServer {
             handleWait(request, fd: fd)
         case .sessionsWatch:
             handleWatch(request, fd: fd)
+        case .streamWatch:
+            handleStreamWatch(request, fd: fd)
+        case .streamWait:
+            handleStreamWait(request, fd: fd)
         default:
             sendResponse(dispatch(request), to: fd)
         }
@@ -335,7 +339,7 @@ final class ControlServer {
 
         Self.logger.info("control sessions.watch: streaming")
         var plan = initial.0
-        if !writeStreamMessage(initial.1, to: fd) { return }
+        if !writeJSONLine(initial.1, to: fd) { return }
 
         // An explicit timeout caps the stream; otherwise it runs until the
         // session ends or the client disconnects.
@@ -348,17 +352,110 @@ final class ControlServer {
             }
             plan = update.plan
             // Stop the moment a write fails (the client disconnected).
-            for message in update.messages where !writeStreamMessage(message, to: fd) {
+            for message in update.messages where !writeJSONLine(message, to: fd) {
                 return
             }
             if update.ended {
-                _ = writeStreamMessage(
+                _ = writeJSONLine(
                     ControlStreamMessage(type: "end", lifecycle: plan.lastLifecycle), to: fd)
                 return
             }
             if let deadline, Date() >= deadline { return }
             if peerClosed(fd) { return }
             usleep(Self.pollIntervalMicros)
+        }
+    }
+
+    // MARK: - Structured event stream (MAX-7)
+
+    /// Stream the cross-resource event bus as newline-delimited
+    /// ``ControlStreamFeedMessage`` objects (a `hello`, then `event`s, then a
+    /// trailing `end`), until a single-session filter's session ends, the
+    /// optional timeout elapses, or the client disconnects.
+    private func handleStreamWatch(_ request: ControlRequest, fd: Int32) {
+        let initial: (ControlSessionRegistry.StreamWatchPlan, [ControlStreamFeedMessage])
+        do {
+            initial = try DispatchQueue.main.sync {
+                try MainActor.assumeIsolated {
+                    try self.registry.beginStreamWatch(request.params, host: self.host)
+                }
+            }
+        } catch let error as ControlError {
+            Self.logger.info("control stream.watch: error \(error.code.rawValue, privacy: .public)")
+            sendResponse(.failure(error), to: fd)
+            return
+        } catch {
+            sendResponse(.failure(ControlError(.internalError, "\(error)")), to: fd)
+            return
+        }
+
+        Self.logger.info("control stream.watch: streaming")
+        var plan = initial.0
+        for message in initial.1 where !writeJSONLine(message, to: fd) { return }
+
+        let deadline = request.params?.timeoutMs
+            .map { Date().addingTimeInterval(Double(max(0, min($0, Self.maxTimeoutMs))) / 1000.0) }
+
+        while true {
+            let update = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { self.registry.pollStreamWatch(plan, host: self.host) }
+            }
+            plan = update.plan
+            for message in update.messages where !writeJSONLine(message, to: fd) { return }
+            if update.ended {
+                _ = writeJSONLine(ControlStreamFeedMessage(type: "end"), to: fd)
+                return
+            }
+            if let deadline, Date() >= deadline { return }
+            if peerClosed(fd) { return }
+            usleep(Self.pollIntervalMicros)
+        }
+    }
+
+    /// Block until a `stream.wait` resolves (a matching event, or a group-wide
+    /// condition) or the timeout elapses, then send exactly one response.
+    private func handleStreamWait(_ request: ControlRequest, fd: Int32) {
+        let plan: ControlSessionRegistry.StreamWaitPlan
+        do {
+            plan = try DispatchQueue.main.sync {
+                try MainActor.assumeIsolated { try self.registry.beginStreamWait(request.params, host: self.host) }
+            }
+        } catch let error as ControlError {
+            Self.logger.info("control stream.wait: error \(error.code.rawValue, privacy: .public)")
+            sendResponse(.failure(error), to: fd)
+            return
+        } catch {
+            sendResponse(.failure(ControlError(.internalError, "\(error)")), to: fd)
+            return
+        }
+
+        let timeoutMs = min(request.params?.timeoutMs ?? Self.waitDefaultTimeoutMs, Self.maxTimeoutMs)
+        let deadline = Date().addingTimeInterval(Double(max(0, timeoutMs)) / 1000.0)
+
+        while true {
+            let progress = DispatchQueue.main.sync {
+                MainActor.assumeIsolated { self.registry.pollStreamWait(plan, host: self.host) }
+            }
+            switch progress {
+            case let .matched(event, sessions):
+                Self.logger.info("control stream.wait: ok")
+                sendResponse(
+                    .success(.init(sessions: sessions, outcome: "matched", streamEvent: event)),
+                    to: fd)
+                return
+            case .ended:
+                Self.logger.info("control stream.wait: ended")
+                sendResponse(.success(.init(outcome: "ended")), to: fd)
+                return
+            case .pending:
+                if Date() >= deadline {
+                    Self.logger.info("control stream.wait: timeout")
+                    sendResponse(.success(.init(outcome: "timeout")), to: fd)
+                    return
+                }
+                if peerClosed(fd) { return }
+                usleep(Self.pollIntervalMicros)
+            }
         }
     }
 
@@ -424,11 +521,12 @@ final class ControlServer {
         writeAll(out, to: fd)
     }
 
-    /// Encode and write one streaming message terminated by a newline. Returns
-    /// false if the write failed (e.g. the client disconnected), signaling the
-    /// streaming loop to stop.
-    private func writeStreamMessage(_ message: ControlStreamMessage, to fd: Int32) -> Bool {
-        guard var out = try? JSONEncoder().encode(message) else { return false }
+    /// Encode and write any Encodable value as one newline-terminated JSON line
+    /// (used for every streaming response — per-session `watch` and the
+    /// cross-resource `stream.watch`). Returns false if the write failed (e.g.
+    /// the client disconnected), signaling the streaming loop to stop.
+    private func writeJSONLine<T: Encodable>(_ value: T, to fd: Int32) -> Bool {
+        guard var out = try? JSONEncoder().encode(value) else { return false }
         out.append(0x0A)
         return writeAll(out, to: fd)
     }

@@ -22,10 +22,11 @@ import Foundation
 /// Capabilities are modeled as typed values (not free-form strings) with stable
 /// raw names for API/config serialization. The vocabulary intentionally covers
 /// the full surface described in MAX-11 — including capabilities Maxx does not
-/// yet implement a method for (`output:read`, `groups:*`, `automation:trigger`).
+/// yet implement a method for (`output:read`, `groups:list`, `automation:trigger`).
 /// Those exist in the model but are reported as *unavailable* and therefore
 /// always denied, so the policy contract is complete and forward-compatible: when
-/// the underlying feature lands, only `isImplemented` flips.
+/// the underlying feature lands, only `isImplemented` flips. (`groups:create`
+/// became implemented with MAX-7.)
 enum ControlCapability: String, CaseIterable, Codable, Sendable {
     /// Enumerate / read API-created sessions (tabs) and their audit log.
     case tabsList = "tabs:list"
@@ -58,17 +59,19 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
 
     /// True when a method actually exists for this capability in this build.
     ///
-    /// Output readback, tab groups, and automation triggers are part of the
-    /// policy vocabulary but not yet implemented as control methods, so the
-    /// evaluator reports them as unavailable (denied) regardless of allowlists.
-    /// `metadata:set` is implemented; its *enforcement* is deferred until MAX-4
-    /// reworks the metadata surface (see `ControlPolicyMapping`).
+    /// `groups:create` became implemented with MAX-7 (`sessions.set-group` and
+    /// `sessions create --group`); `metadata:set` is implemented and enforced as
+    /// of MAX-4 (set/remove/clear-metadata and metadata-only updates — see
+    /// `ControlPolicyMapping`). Output readback, group *listing*, and automation
+    /// triggers remain part of the policy vocabulary but have no method behind
+    /// them yet, so the evaluator reports them as unavailable (denied) regardless
+    /// of allowlists.
     var isImplemented: Bool {
         switch self {
         case .tabsList, .tabsSpawn, .tabsRestart, .tabsFocus, .tabsClose,
-             .inputSend, .keysPress, .stateSet, .metadataSet:
+             .inputSend, .keysPress, .stateSet, .metadataSet, .groupsCreate:
             return true
-        case .outputRead, .groupsList, .groupsCreate, .automationTrigger:
+        case .outputRead, .groupsList, .automationTrigger:
             return false
         }
     }
@@ -484,10 +487,18 @@ enum ControlPolicyMapping {
         params: ControlRequest.Params?
     ) -> ControlCapability? {
         switch method {
-        case .sessionsList, .sessionsGet, .sessionsEvents, .sessionsWait, .sessionsWatch:
+        case .sessionsList, .sessionsGet, .sessionsEvents, .sessionsWait, .sessionsWatch,
+             .streamWatch, .streamWait:
+            // Observing the cross-resource event stream is the same read
+            // capability as listing/observing sessions.
             return .tabsList
         case .sessionsCreate:
             return .tabsSpawn
+        case .sessionsSetGroup:
+            // Assigning/clearing group membership is the group-mutation
+            // capability (implemented as of MAX-7). `create --group` enforces it
+            // as a secondary check on top of `tabs:spawn`.
+            return .groupsCreate
         case .sessionsRestart:
             return .tabsRestart
         case .sessionsArchive:

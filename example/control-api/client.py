@@ -28,6 +28,13 @@ Usage:
     ./client.py emit-event <session_id> --event pr.opened --payload-json '{"pr":123}'
     ./client.py set-metadata <session_id> --key reviewer --value alice
 
+    # Structured event stream (MAX-7 — cross-resource, cursor-addressed):
+    ./client.py set-group <session_id> --group release   # (omit --group to leave)
+    ./client.py stream-watch --group release --since 0
+    ./client.py stream-wait --group release --event deploy.done --timeout 1800000
+    ./client.py stream-wait --group release --all exited --timeout 3600000
+    ./client.py event-emit --session <session_id> --type declared.status --json '{"step":3}'
+
 Timeouts here are milliseconds (the wire field is `timeout_ms`).
 """
 
@@ -116,6 +123,7 @@ def main() -> int:
     create.add_argument("--command")
     create.add_argument("--status")
     create.add_argument("--location", choices=["tab", "window"])
+    create.add_argument("--group")
     create.add_argument("--metadata", action="append", default=[])
     create.add_argument("--env", action="append", default=[])
 
@@ -180,11 +188,38 @@ def main() -> int:
     set_metadata.add_argument("--key", required=True)
     set_metadata.add_argument("--value", default="")
 
+    # Structured event stream (MAX-7).
+    set_group = sub.add_parser("set-group")
+    set_group.add_argument("id")
+    set_group.add_argument("--group", help="omit to leave the current group")
+
+    stream_watch = sub.add_parser("stream-watch")
+    stream_watch.add_argument("--session")
+    stream_watch.add_argument("--tab")
+    stream_watch.add_argument("--group")
+    stream_watch.add_argument("--since", type=int, help="resume after this cursor")
+    stream_watch.add_argument("--timeout", type=int, help="timeout in milliseconds")
+
+    stream_wait = sub.add_parser("stream-wait")
+    stream_wait.add_argument("--session")
+    stream_wait.add_argument("--tab")
+    stream_wait.add_argument("--group")
+    stream_wait.add_argument("--event")
+    stream_wait.add_argument("--all", help="group condition: idle | exited | declared:<state>")
+    stream_wait.add_argument("--since", type=int)
+    stream_wait.add_argument("--timeout", type=int, help="timeout in milliseconds")
+
+    event_emit = sub.add_parser("event-emit")
+    event_emit.add_argument("--session", required=True)
+    event_emit.add_argument("--type", dest="type", required=True)
+    event_emit.add_argument("--json", dest="json", help="structured JSON payload")
+    event_emit.add_argument("--source")
+
     args = parser.parse_args()
 
     if args.verb == "create":
         params = {"metadata": kv(args.metadata), "env": args.env}
-        for field in ("title", "cwd", "command", "status", "location"):
+        for field in ("title", "cwd", "command", "status", "location", "group"):
             value = getattr(args, field)
             if value is not None:
                 params[field] = value
@@ -260,6 +295,50 @@ def main() -> int:
             "sessions.set-metadata",
             {"id": args.id, "key": args.key, "value": args.value},
         )
+    elif args.verb == "set-group":
+        params = {"id": args.id}
+        # An omitted/empty --group means "leave the current group".
+        if args.group is not None:
+            params["group"] = args.group
+        response = call("sessions.set-group", params)
+    elif args.verb == "stream-watch":
+        params = {}
+        if args.session is not None:
+            params["id"] = args.session
+        if args.tab is not None:
+            params["tab"] = args.tab
+        if args.group is not None:
+            params["group"] = args.group
+        if args.since is not None:
+            params["since"] = args.since
+        if args.timeout is not None:
+            params["timeout_ms"] = args.timeout
+        return stream("stream.watch", params)
+    elif args.verb == "stream-wait":
+        params = {}
+        if args.session is not None:
+            params["id"] = args.session
+        if args.tab is not None:
+            params["tab"] = args.tab
+        if args.group is not None:
+            params["group"] = args.group
+        if args.event is not None:
+            params["event"] = args.event
+        if args.all is not None:
+            params["all"] = args.all
+        if args.since is not None:
+            params["since"] = args.since
+        if args.timeout is not None:
+            params["timeout_ms"] = args.timeout
+        # Keep the write side open so the server can detect us disconnecting.
+        response = call("stream.wait", params, half_close=False)
+    elif args.verb == "event-emit":
+        params = {"id": args.session, "event": args.type}
+        if args.json is not None:
+            params["payload_json"] = args.json
+        if args.source is not None:
+            params["source"] = args.source
+        response = call("sessions.emit-event", params)
     else:
         parser.error("unknown verb")
 
