@@ -127,7 +127,10 @@ pub fn run(alloc: Allocator) !u8 {
     };
 
     return switch (cmd.verb) {
-        .serve => try runServe(arena_alloc, cmd, stderr),
+        // serve is long-lived: hand it the BASE allocator, not this action arena,
+        // so its per-request arenas and dedup store can actually release memory
+        // (an arena backed by another arena never returns chunks to its parent).
+        .serve => try runServe(alloc, cmd, stderr),
         .validate => try runValidate(arena_alloc, cmd, stderr),
     };
 }
@@ -235,7 +238,17 @@ fn resolveSecrets(alloc: Allocator, cfg: Config, stderr: *std.io.Writer) !?Secre
     return .{ .entries = try list.toOwnedSlice(alloc) };
 }
 
-fn runServe(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
+/// `gpa` is the BASE allocator (not an arena). Long-lived startup state (config,
+/// secrets, control dir) lives in a dedicated `serve_arena` freed when serve
+/// returns; the dedup store and every per-request arena are backed by `gpa`
+/// directly so they can actually return memory — an arena backed by another
+/// arena never releases chunks to its parent, which would make the long-lived
+/// listener grow per request.
+fn runServe(gpa: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
+    var serve_arena = ArenaAllocator.init(gpa);
+    defer serve_arena.deinit();
+    const alloc = serve_arena.allocator();
+
     const cfg = (try loadConfig(alloc, cmd, stderr)) orelse return 1;
 
     var secrets = (try resolveSecrets(alloc, cfg, stderr)) orelse return 1;
@@ -246,7 +259,9 @@ fn runServe(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
     };
 
     const state_path = cmd.state_file orelse try std.fmt.allocPrint(alloc, "{s}/webhook-seen.json", .{dir});
-    var store: ?DedupStore = if (cmd.no_dedup) null else DedupStore.open(alloc, state_path) catch |err| switch (err) {
+    // The store owns its own arena (off `gpa`), so its persistent allocations are
+    // released by `deinit`, not pinned in `serve_arena`.
+    var store: ?DedupStore = if (cmd.no_dedup) null else DedupStore.open(gpa, state_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         error.Unreadable => {
             try stderr.print(
@@ -309,7 +324,9 @@ fn runServe(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
             continue;
         };
 
-        var req_arena = ArenaAllocator.init(alloc);
+        // Backed by the base allocator (not serve_arena), so deinit truly frees
+        // this request's memory each iteration.
+        var req_arena = ArenaAllocator.init(gpa);
         defer req_arena.deinit();
 
         // handleConnection owns the connection (it closes it on its own defer).
