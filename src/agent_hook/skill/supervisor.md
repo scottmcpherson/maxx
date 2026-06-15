@@ -69,32 +69,50 @@ Notes on invocation:
 
 ### 1. spawn — create a visible child tab with an explicit prompt
 
-Pass the child's whole command line as `--command`: the agent CLI, its
-permission flags, then the task prompt as one quoted argument. Give it a short
-`--title`, the working directory, and any env it needs. Declare the agent type
-and the parent/group up front so the relationship is explicit from creation.
+> **`--command` runs in the child's _login shell_.** Maxx launches the session by
+> typing `<command>; exit` into a shell, so the whole string is shell-parsed —
+> unlike `maxx-agent-hook new-tab -- claude "<prompt>"`, which passes its args
+> verbatim with no shell. **Never interpolate untrusted or variable prompt text**
+> (an issue title, a user message, a file's contents) into `--command`: a prompt
+> containing `$(…)`, backticks, `;`, or quotes would be evaluated by the shell
+> before the agent even starts, and embedded quotes would break the command.
+
+So spawn the agent and its **permission flags** as the command (no task text in
+it), capture the returned `session_id`, then deliver the task as **literal
+input** (next step) — `--action input` is sent verbatim to the running agent and
+is never shell-parsed, so it is safe even for untrusted prompts.
 
 ```sh
-# Claude Code child:
+# Claude Code child — launcher only; the task is delivered as input below.
 child=$(maxx +control sessions create \
   --title "Fix parser" \
   --cwd "$PWD" \
   --agent-type claude-code \
   --group refactor-2026 \
   --metadata role=worker --metadata task=MAX-123 \
-  --command 'claude --permission-mode acceptEdits "Fix the JSON parser overflow in src/parse.zig; run the parser tests."' \
+  --command 'claude --permission-mode acceptEdits' \
   | jq -r .result.session.session_id)
 
-# Codex child (note the different permission flags):
+# Codex child (note the different permission flags).
 child=$(maxx +control sessions create \
   --title "Add CSV export" \
   --cwd "$PWD" \
   --agent-type codex \
   --group refactor-2026 \
   --metadata role=worker --metadata task=MAX-124 \
-  --command 'codex --full-auto "Add CSV export to the report module; add a test."' \
+  --command 'codex --full-auto' \
   | jq -r .result.session.session_id)
+
+# Deliver the task prompt as literal input once the agent is up (give it a
+# moment to start its prompt). Safe for variable/untrusted text — no shell parses it.
+maxx +control sessions action "$child" --action input \
+  --input 'Fix the JSON parser overflow in src/parse.zig; run the parser tests.'
 ```
+
+(A short, fixed prompt you author yourself _can_ be embedded directly in
+`--command` — single-quote the whole command and keep `$`, backticks, and quotes
+out of the prompt — but route anything dynamic through `--action input` so an
+injected prompt can never reach the shell.)
 
 **Preserve the returned `session_id`** — it is the handle for every later move.
 Do not rediscover children by tab title, process name, or cwd. To attach a child
