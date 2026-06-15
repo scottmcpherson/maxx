@@ -423,11 +423,19 @@ final class ControlSessionRegistry {
         let parentID = try resolveParent(params?.parent)
         // Spawning is gated by `tabs:spawn` in `handle`; assigning a group or a
         // parent on create additionally requires `groups:create` (both are
-        // association edges between sessions). Enforce it before the surface is
-        // spawned so a denied request never leaves a stray tab behind.
+        // association edges between sessions), and declaring an agent type at
+        // create requires `state:set` (the same gate as the standalone
+        // `set-agent-type` verb — otherwise create would be a way to declare it
+        // without the capability). Enforce both before the surface is spawned so a
+        // denied request never leaves a stray tab behind.
         if group != nil || parentID != nil {
             try enforceCapability(
                 .groupsCreate, caller: params?.caller, confirm: params?.confirm,
+                target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
+        }
+        if agentType != nil {
+            try enforceCapability(
+                .stateSet, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
         }
 
@@ -942,8 +950,11 @@ final class ControlSessionRegistry {
                 message: reason,
                 createdAt: date,
                 pid: nil)
+            store(&session)
         }
-        store(&session)
+        // Re-archiving an already-archived session is an idempotent no-op: don't
+        // store/bump updatedAt, which would refresh the retention recency of a
+        // terminal record on every redundant archive from a cleanup loop.
         return view(of: session, host: host)
     }
 

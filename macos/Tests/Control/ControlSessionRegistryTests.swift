@@ -1722,6 +1722,37 @@ struct ControlSessionRegistryTests {
         #expect(host.createdRequests.count == 1)
     }
 
+    @Test func createWithAgentTypeRequiresStateSet() {
+        // Declaring an agent type at create time is gated by `state:set` (the same
+        // gate as the standalone `set-agent-type` verb), so a source that may
+        // spawn tabs but not declare state is denied — and no surface is spawned.
+        let policy = ControlPolicy(sources: [
+            ControlPolicySource(id: "spawn-only", kind: .external, allow: [.tabsSpawn])
+        ])
+        let registry = ControlSessionRegistry(policy: policy)
+        let host = FakeControlSessionHost()
+        let response = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "ls", agentType: "claude-code", caller: "spawn-only")),
+            host: host)
+        #expect(response.error?.code == "unauthorized")
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func createWithAgentTypeAllowedWithStateSet() {
+        let policy = ControlPolicy(sources: [
+            ControlPolicySource(id: "declarer", kind: .external, allow: [.tabsSpawn, .stateSet])
+        ])
+        let registry = ControlSessionRegistry(policy: policy)
+        let host = FakeControlSessionHost()
+        let response = registry.handle(
+            request(.sessionsCreate, .init(
+                command: "ls", agentType: "claude-code", caller: "declarer")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.agentType == "claude-code")
+    }
+
     // MARK: - Connector launch glue (MAX-14)
 
     /// Policy decision (MAX-14): create-time metadata rides under `tabs:spawn`,

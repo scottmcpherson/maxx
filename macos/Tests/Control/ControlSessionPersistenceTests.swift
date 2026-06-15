@@ -524,4 +524,23 @@ struct ControlSessionPersistenceTests {
         #expect(listed?.lifecycle == "archived")
         #expect(listed?.updatedAt == archivedUpdatedAt)
     }
+
+    @Test func redundantArchiveDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+        let archived = registry.handle(
+            request(.sessionsArchive, .init(id: sid)), host: host).result?.session
+        let archivedUpdatedAt = archived?.updatedAt
+
+        // A second archive of an already-archived session is an idempotent no-op:
+        // it must not bump updated_at (which would refresh the retention recency
+        // of this now-terminal record on every redundant cleanup-loop retry).
+        clock.now = clock.now.addingTimeInterval(120)
+        let again = registry.handle(
+            request(.sessionsArchive, .init(id: sid)), host: host).result?.session
+        #expect(again?.lifecycle == "archived")
+        #expect(again?.updatedAt == archivedUpdatedAt)
+    }
 }
