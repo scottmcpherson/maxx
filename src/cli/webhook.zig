@@ -373,6 +373,16 @@ const DedupPersister = struct {
             error.ReadOnly => {},
             else => return err,
         };
+        // Reclaim arena memory once enough age-pruned / count-evicted records have
+        // accumulated. This listener keeps one store for its whole lifetime, so
+        // without compaction the arena grows with total deliveries even though the
+        // live set stays bounded (MAX-15). Amortized O(1) and it never changes the
+        // live entry set, so suppression is unaffected. An OOM here just defers
+        // reclamation to the next persist and leaves the store intact — not worth
+        // failing an otherwise-durable request over best-effort housekeeping.
+        self.store.compactIfNeeded() catch |err| switch (err) {
+            error.OutOfMemory => {},
+        };
     }
 };
 
