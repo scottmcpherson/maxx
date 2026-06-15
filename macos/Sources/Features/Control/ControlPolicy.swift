@@ -475,11 +475,10 @@ enum ControlPolicyMapping {
     /// The capability a method (and, for `sessions.action`, its sub-action)
     /// requires. Returns `nil` for requests that are intentionally *ungated*:
     ///
-    ///   * `sessions.update` / `sessions.set-metadata` — metadata-write
-    ///     enforcement is deferred until MAX-4 reworks the metadata API.
     ///   * `policy.check` — read-only policy introspection, no side effect.
     ///   * `sessions.action` with a missing/unknown action — left to the handler
     ///     to reject with its existing error, so error semantics are unchanged.
+    ///   * a no-op `sessions.update` that writes neither `status` nor `metadata`.
     static func capability(
         for method: ControlMethod,
         params: ControlRequest.Params?
@@ -506,14 +505,15 @@ enum ControlPolicyMapping {
         case .sessionsUpdate:
             // `update` writes caller-owned `status` and/or `metadata`. A `status`
             // write is a state mutation — the same field `declare-state` writes
-            // and `wait --state` matches — so it is gated by `state:set` here,
-            // not left open. A metadata-only update (no status) stays ungated
-            // until MAX-4 reworks the metadata surface (per MAX-11 scoping).
-            return params?.status != nil ? .stateSet : nil
-        case .sessionsSetMetadata:
-            // Deferred to MAX-4 (per MAX-11 scoping): the metadata-write surface
-            // is being reworked there, so gating it now would churn twice.
-            return nil
+            // and `wait --state` matches — so it is gated by `state:set` (the
+            // stronger gate when both are present). A metadata-only update is
+            // gated by `metadata:set` (MAX-4). A no-op update gates on nothing.
+            if params?.status != nil { return .stateSet }
+            return params?.metadata != nil ? .metadataSet : nil
+        case .sessionsSetMetadata, .sessionsRemoveMetadata, .sessionsClearMetadata:
+            // The agent-reported metadata write surface (MAX-4) is gated by
+            // `metadata:set`.
+            return .metadataSet
         case .policyCheck:
             return nil
         }

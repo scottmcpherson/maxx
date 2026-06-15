@@ -116,9 +116,10 @@ struct ControlPolicyEvaluatorTests {
 @MainActor
 struct ControlPolicyMappingTests {
     private func params(
-        action: String? = nil, location: String? = nil, id: String? = nil, status: String? = nil
+        action: String? = nil, location: String? = nil, id: String? = nil, status: String? = nil,
+        metadata: [String: ControlJSONValue]? = nil
     ) -> ControlRequest.Params {
-        .init(id: id, status: status, location: location, action: action)
+        .init(id: id, metadata: metadata, status: status, location: location, action: action)
     }
 
     @Test func readMethodsMapToTabsList() {
@@ -144,14 +145,21 @@ struct ControlPolicyMappingTests {
         }
     }
 
-    @Test func metadataWritesAreUngatedUntilMax4() {
-        // Per MAX-11 scoping: metadata-write capability checks are deferred to
-        // MAX-4. A metadata-only update and set-metadata map to no gated
-        // capability for now.
+    @Test func metadataWritesMapToMetadataSet() {
+        // MAX-4 wires the deferred metadata-write gating: set/remove/clear and a
+        // metadata-only update all require `metadata:set`.
+        #expect(ControlPolicyMapping.capability(
+            for: .sessionsSetMetadata, params: params()) == .metadataSet)
+        #expect(ControlPolicyMapping.capability(
+            for: .sessionsRemoveMetadata, params: params()) == .metadataSet)
+        #expect(ControlPolicyMapping.capability(
+            for: .sessionsClearMetadata, params: params()) == .metadataSet)
+        #expect(ControlPolicyMapping.capability(
+            for: .sessionsUpdate, params: params(metadata: ["k": .string("v")])) == .metadataSet)
+        // A no-op update (neither status nor metadata) gates on nothing.
         #expect(ControlPolicyMapping.capability(for: .sessionsUpdate, params: params()) == nil)
-        #expect(ControlPolicyMapping.capability(for: .sessionsSetMetadata, params: params()) == nil)
-        // …but a `status` write via update is a state mutation, gated by
-        // state:set (not deferred), so it is not a way around state:set.
+        // A `status` write via update is a state mutation, gated by state:set
+        // (the stronger gate even when metadata is present too).
         #expect(ControlPolicyMapping.capability(
             for: .sessionsUpdate, params: params(status: "blocked")) == .stateSet)
     }
@@ -281,26 +289,33 @@ struct ControlPolicyEnforcementTests {
         #expect(input.error?.code == ControlErrorCode.unauthorized.rawValue)
     }
 
-    @Test func statusUpdateIsGatedByStateSetButMetadataOnlyUpdateIsNot() {
+    @Test func updateIsGatedByMetadataSetAndStateSet() {
         let registry = makeRegistry()
         let host = FakeControlSessionHost()
         let id = seedSession(registry, host)
 
-        // A metadata-only update is currently ungated (deferred to MAX-4), so
-        // even a read-only external source can perform it today.
+        // A metadata-only update is gated by metadata:set (MAX-4), which
+        // readonly-external lacks → denied.
         let metaOnly = registry.handle(
             .init(token: "t", method: .sessionsUpdate,
-                  params: .init(id: id, metadata: ["k": "v"], caller: "readonly-external")),
+                  params: .init(id: id, metadata: ["k": .string("v")], caller: "readonly-external")),
             host: host)
-        #expect(metaOnly.ok)
+        #expect(metaOnly.error?.code == ControlErrorCode.unauthorized.rawValue)
 
-        // …but writing `status` through update is a state mutation gated by
-        // state:set, which readonly-external lacks → denied (closes the bypass).
+        // A `status` write through update is a state mutation gated by state:set,
+        // which readonly-external also lacks → denied.
         let statusWrite = registry.handle(
             .init(token: "t", method: .sessionsUpdate,
                   params: .init(id: id, status: "blocked", caller: "readonly-external")),
             host: host)
         #expect(statusWrite.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        // The trusted local source (no caller claim) can do both.
+        let localMeta = registry.handle(
+            .init(token: "t", method: .sessionsUpdate,
+                  params: .init(id: id, metadata: ["k": .string("v")])),
+            host: host)
+        #expect(localMeta.ok)
     }
 
     @Test func existingLocalFlowsAreUnchanged() {

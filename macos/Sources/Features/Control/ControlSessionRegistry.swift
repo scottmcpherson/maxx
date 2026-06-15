@@ -57,6 +57,11 @@ protocol ControlSurfaceHandle {
     /// the UI can render a badge. Called only in response to an explicit
     /// `set-state`/`set-summary` request — never from output inference.
     func applyDeclaredState(_ declared: ControlDeclaredState)
+    /// Push the session's agent-reported metadata (MAX-4) to the surface so the
+    /// UI can display it. Called only in response to an explicit metadata request
+    /// (`create`/`update`/`set-metadata`/`remove-metadata`/`clear-metadata`) —
+    /// never inferred from terminal output.
+    func applyMetadata(_ metadata: [String: ControlJSONValue])
 }
 
 /// The in-memory registry of API-created sessions plus the request dispatcher.
@@ -128,7 +133,7 @@ final class ControlSessionRegistry {
             case .sessionsGet:
                 return .success(.init(session: try get(request.params, host: host)))
             case .sessionsList:
-                return .success(.init(sessions: list(host: host)))
+                return .success(.init(sessions: list(request.params, host: host)))
             case .sessionsUpdate:
                 return .success(.init(session: try update(request.params, host: host)))
             case .sessionsAction:
@@ -144,6 +149,10 @@ final class ControlSessionRegistry {
                 return .success(.init(session: view, event: event))
             case .sessionsSetMetadata:
                 return .success(.init(session: try setMetadata(request.params, host: host)))
+            case .sessionsRemoveMetadata:
+                return .success(.init(session: try removeMetadata(request.params, host: host)))
+            case .sessionsClearMetadata:
+                return .success(.init(session: try clearMetadata(request.params, host: host)))
             case .sessionsSetState:
                 return .success(.init(session: try setState(request.params, host: host)))
             case .sessionsSetSummary:
@@ -330,6 +339,11 @@ final class ControlSessionRegistry {
             createdAt: now(),
             canceled: false)
         sessions[session.id] = session
+        // Surface any metadata supplied at create time so the UI shows it from
+        // the start (an explicit caller declaration, never inferred).
+        if !metadata.isEmpty {
+            pushMetadata(session, to: host.surface(for: session.surfaceID))
+        }
         return view(of: session, host: host)
     }
 
@@ -341,10 +355,31 @@ final class ControlSessionRegistry {
         return view(of: session, host: host)
     }
 
-    private func list(host: ControlSessionHost) -> [ControlSessionView] {
-        sessions.values
+    private func list(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) -> [ControlSessionView] {
+        let filters = params?.metadataFilter ?? []
+        return sessions.values
+            .filter { Self.matchesMetadataFilter($0.metadata, filters) }
             .sorted { $0.createdAt < $1.createdAt }
             .map { view(of: $0, host: host) }
+    }
+
+    /// Whether a session's metadata satisfies every supplied filter (AND). A
+    /// filter with only a `key` requires that key to be present; a filter with a
+    /// `value` additionally requires the value to match when compared as a string
+    /// (``ControlJSONValue/displayString``). Comparison is a display affordance —
+    /// Maxx never reinterprets the stored value.
+    static func matchesMetadataFilter(
+        _ metadata: [String: ControlJSONValue],
+        _ filters: [ControlRequest.MetadataFilter]
+    ) -> Bool {
+        for filter in filters {
+            guard let value = metadata[filter.key] else { return false }
+            if let target = filter.value, value.displayString != target { return false }
+        }
+        return true
     }
 
     private func update(
@@ -370,6 +405,7 @@ final class ControlSessionRegistry {
             session.status = status
         }
 
+        var metadataChanged = false
         if let metadata = params?.metadata {
             // Merge (append) semantics: provided keys overwrite/add to existing
             // metadata. The combined map is re-validated against the limits.
@@ -377,9 +413,25 @@ final class ControlSessionRegistry {
             var merged = session.metadata
             merged.merge(validated) { _, new in new }
             session.metadata = try ControlValidation.validateMetadata(merged)
+            metadataChanged = true
+
+            // Audit each provided key the same way `set-metadata` does, so a
+            // `watch`/`events` consumer observes update-driven metadata changes.
+            // `update` is a documented metadata-merge path; it must not be a
+            // silent, unobservable mutation.
+            let source = try ControlValidation.validateSource(params?.source)
+            let at = now()
+            let pid = host.surface(for: session.surfaceID)?.pid
+            for key in validated.keys.sorted() {
+                session.appendEvent(
+                    kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+            }
         }
 
         sessions[session.id] = session
+        if metadataChanged {
+            pushMetadata(session, to: host.surface(for: session.surfaceID))
+        }
         return view(of: session, host: host)
     }
 
@@ -473,8 +525,10 @@ final class ControlSessionRegistry {
         return (view(of: session, host: host), recorded)
     }
 
-    /// Set a single caller-owned metadata key (the auditable, one-key form of
-    /// `update`).
+    /// Set (merge) a single agent-reported metadata key — the auditable, one-key
+    /// form of `update`. The value is either a plain string (`value`) or, when
+    /// `value_json` is supplied, an arbitrary parsed JSON value (so a single key
+    /// can carry a nested object/array). Maxx stores it verbatim.
     private func setMetadata(
         _ params: ControlRequest.Params?,
         host: ControlSessionHost
@@ -485,16 +539,89 @@ final class ControlSessionRegistry {
         }
         let source = try ControlValidation.validateSource(params?.source)
 
+        // `value_json` (structured) takes precedence over `value` (plain string);
+        // with neither, the key is set to an empty string.
+        let value: ControlJSONValue
+        if let raw = params?.valueJson {
+            value = try ControlJSONValue.parse(raw)
+        } else {
+            value = .string(params?.value ?? "")
+        }
+
         var merged = session.metadata
-        merged[key] = params?.value ?? ""
+        merged[key] = value
         session.metadata = try ControlValidation.validateMetadata(merged)
+        let handle = host.surface(for: session.surfaceID)
         session.appendEvent(
             kind: .metadata,
             name: key,
             source: source,
             createdAt: now(),
-            pid: host.surface(for: session.surfaceID)?.pid)
+            pid: handle?.pid)
         sessions[session.id] = session
+        pushMetadata(session, to: handle)
+        return view(of: session, host: host)
+    }
+
+    /// Remove one or more agent-reported metadata keys. Accepts a single `key`
+    /// and/or a `keys` array; at least one key must be named. Keys that are not
+    /// present are ignored (idempotent), but at least one named key is required
+    /// so the call is never a silent no-op against a typo.
+    private func removeMetadata(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let source = try ControlValidation.validateSource(params?.source)
+
+        var targets: [String] = []
+        if let key = params?.key, !key.isEmpty { targets.append(key) }
+        if let keys = params?.keys { targets.append(contentsOf: keys.filter { !$0.isEmpty }) }
+        guard !targets.isEmpty else {
+            throw ControlError(.invalidRequest, "remove-metadata requires 'key' or 'keys'")
+        }
+
+        let handle = host.surface(for: session.surfaceID)
+        let at = now()
+        for key in targets where session.metadata[key] != nil {
+            session.metadata[key] = nil
+            session.appendEvent(
+                kind: .metadata,
+                name: key,
+                source: source,
+                message: "removed",
+                createdAt: at,
+                pid: handle?.pid)
+        }
+        sessions[session.id] = session
+        pushMetadata(session, to: handle)
+        return view(of: session, host: host)
+    }
+
+    /// Clear all agent-reported metadata for a session in one atomic step, so
+    /// the UI/filtering never observes a partially-cleared map.
+    private func clearMetadata(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let source = try ControlValidation.validateSource(params?.source)
+        let handle = host.surface(for: session.surfaceID)
+
+        // Only record an audit entry when there was something to clear, so a
+        // redundant clear stays a clean no-op.
+        if !session.metadata.isEmpty {
+            session.metadata = [:]
+            session.appendEvent(
+                kind: .metadata,
+                name: "*",
+                source: source,
+                message: "cleared",
+                createdAt: now(),
+                pid: handle?.pid)
+        }
+        sessions[session.id] = session
+        pushMetadata(session, to: handle)
         return view(of: session, host: host)
     }
 
@@ -571,6 +698,16 @@ final class ControlSessionRegistry {
     private func pushDeclaration(_ session: ControlSession, to handle: ControlSurfaceHandle?) {
         guard let declared = session.declaredStateForDisplay else { return }
         handle?.applyDeclaredState(declared)
+    }
+
+    /// Push the session's current agent-reported metadata to its live surface so
+    /// the UI reflects it. A no-op if the surface is gone. Like ``pushDeclaration``
+    /// this is the only path from a metadata declaration to the UI; it carries the
+    /// explicit map verbatim — never anything Maxx inferred. The whole map is sent
+    /// on every change so the UI swaps atomically rather than observing a
+    /// partially-applied update.
+    private func pushMetadata(_ session: ControlSession, to handle: ControlSurfaceHandle?) {
+        handle?.applyMetadata(session.metadata)
     }
 
     // MARK: - Lifecycle control
@@ -658,6 +795,13 @@ final class ControlSessionRegistry {
             createdAt: now(),
             pid: host.surface(for: newSurface)?.pid)
         sessions[session.id] = session
+        // Metadata is scoped to the session record, so it survives the restart;
+        // re-push it to the fresh surface so the chip persists (the new surface
+        // starts with an empty map). The declared workflow-state badge, by
+        // contrast, was cleared above because it is per-run.
+        if !session.metadata.isEmpty {
+            pushMetadata(session, to: host.surface(for: newSurface))
+        }
         return view(of: session, host: host)
     }
 

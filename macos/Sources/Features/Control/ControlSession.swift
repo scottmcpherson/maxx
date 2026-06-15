@@ -25,8 +25,13 @@ struct ControlSession {
     /// `declare-state` writes it (and records an audit entry); `update` writes it
     /// without one. `wait --state` matches against it.
     var status: String
-    /// Caller-owned metadata.
-    var metadata: [String: String]
+    /// Agent-reported structured metadata (MAX-4): a namespaced key → arbitrary
+    /// JSON value map an agent or orchestrator explicitly attaches to the session
+    /// (e.g. `linear.issue`, `pr.url`, `repo`, `branch`, `run.id`,
+    /// `cleanup.command`). Maxx stores and surfaces it verbatim — it never
+    /// originates, normalizes, or interprets these values, and never derives them
+    /// from terminal output, process names, branch names, paths, or idle time.
+    var metadata: [String: ControlJSONValue]
     let createdAt: Date
     /// True once the session was explicitly canceled/closed through the API.
     ///
@@ -121,7 +126,11 @@ struct ControlSession {
         static let maxCommand = 4096
         static let maxMetadataKeys = 32
         static let maxMetadataKeyLength = 64
-        static let maxMetadataValueLength = 1024
+        /// Per-value cap on the serialized (compact JSON) size of a single
+        /// metadata value, so one key cannot carry an unbounded structure.
+        static let maxMetadataValueBytes = 2048
+        /// Cap on the total serialized size of a session's whole metadata map.
+        static let maxMetadataBytes = 16384
         static let maxEnvEntries = 256
         static let maxStateLength = 128
         static let maxEventNameLength = 128
@@ -285,8 +294,16 @@ enum ControlValidation {
         return cwd
     }
 
-    /// Validate and return a normalized metadata dictionary.
-    static func validateMetadata(_ metadata: [String: String]?) throws -> [String: String] {
+    /// Validate a structured metadata map and return it **unchanged**.
+    ///
+    /// The map is agent-reported (MAX-4): keys are namespaced identifiers and
+    /// values are arbitrary JSON. Validation only bounds size and key shape so a
+    /// caller cannot push an unbounded payload — it never normalizes, reorders,
+    /// or reinterprets values, so unknown keys and structured values round-trip
+    /// verbatim.
+    static func validateMetadata(
+        _ metadata: [String: ControlJSONValue]?
+    ) throws -> [String: ControlJSONValue] {
         guard let metadata else { return [:] }
         guard metadata.count <= ControlSession.Limits.maxMetadataKeys else {
             throw ControlError(
@@ -307,11 +324,19 @@ enum ControlValidation {
                     .invalidRequest,
                     "metadata key '\(key)' contains invalid characters (allowed: A-Z a-z 0-9 _ . -)")
             }
-            guard value.count <= ControlSession.Limits.maxMetadataValueLength else {
+            guard value.serializedByteCount <= ControlSession.Limits.maxMetadataValueBytes else {
                 throw ControlError(
                     .invalidRequest,
-                    "metadata value for '\(key)' exceeds \(ControlSession.Limits.maxMetadataValueLength) characters")
+                    "metadata value for '\(key)' exceeds \(ControlSession.Limits.maxMetadataValueBytes) bytes")
             }
+        }
+        // Bound the whole map, not just each value, so many medium values cannot
+        // add up to an unbounded payload.
+        let total = metadata.values.reduce(0) { $0 + $1.serializedByteCount }
+        guard total <= ControlSession.Limits.maxMetadataBytes else {
+            throw ControlError(
+                .invalidRequest,
+                "metadata exceeds \(ControlSession.Limits.maxMetadataBytes) bytes total")
         }
         return metadata
     }

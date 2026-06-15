@@ -24,6 +24,9 @@ final class FakeControlSessionHost: ControlSessionHost {
         /// The most recent declared state/summary pushed to this surface for
         /// display. Lets tests assert the registry → UI path without a real view.
         var declaredState: ControlDeclaredState?
+        /// The most recent agent-reported metadata pushed to this surface for
+        /// display (MAX-4). Nil until a metadata declaration is pushed.
+        var metadata: [String: ControlJSONValue]?
     }
 
     var surfaces: [UUID: Surface] = [:]
@@ -79,6 +82,9 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     func applyDeclaredState(_ declared: ControlDeclaredState) {
         surface.declaredState = declared
     }
+    func applyMetadata(_ metadata: [String: ControlJSONValue]) {
+        surface.metadata = metadata
+    }
 }
 
 @MainActor
@@ -99,10 +105,13 @@ struct ControlSessionRegistryTests {
         action: String? = nil,
         input: String? = nil
     ) -> ControlRequest.Params {
+        // The convenience overload takes plain strings; wrap them as JSON string
+        // values to match the structured metadata model (MAX-4). Tests that need
+        // structured values build `ControlRequest.Params` directly.
         .init(
             id: id, title: title, cwd: cwd, command: command, env: env,
-            metadata: metadata, status: status, location: location,
-            action: action, input: input)
+            metadata: metadata?.mapValues { .string($0) }, status: status,
+            location: location, action: action, input: input)
     }
 
     private func request(
@@ -150,8 +159,8 @@ struct ControlSessionRegistryTests {
 
         let session = response.result?.session
         #expect(session?.status == "waiting_for_review")
-        #expect(session?.metadata["workflow"] == "release")
-        #expect(session?.metadata["request_id"] == "abc")
+        #expect(session?.metadata["workflow"] == .string("release"))
+        #expect(session?.metadata["request_id"] == .string("abc"))
     }
 
     @Test func createRejectsRelativeCwd() {
@@ -214,10 +223,22 @@ struct ControlSessionRegistryTests {
         #expect(response.error?.code == "invalid_request")
     }
 
-    @Test func metadataValueTooLongRejected() {
-        let long = String(repeating: "x", count: ControlSession.Limits.maxMetadataValueLength + 1)
+    @Test func metadataValueTooLargeRejected() {
+        let long = String(repeating: "x", count: ControlSession.Limits.maxMetadataValueBytes + 1)
         let response = makeRegistry().handle(
             request(.sessionsCreate, params(metadata: ["k": long])),
+            host: FakeControlSessionHost())
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func metadataTotalTooLargeRejected() {
+        // Each value is within the per-value cap, but together they exceed the
+        // total-map cap, so the whole map is rejected (no unbounded payloads).
+        let chunk = String(repeating: "y", count: ControlSession.Limits.maxMetadataValueBytes - 16)
+        var big: [String: String] = [:]
+        for index in 0..<24 { big["k\(index)"] = chunk }
+        let response = makeRegistry().handle(
+            request(.sessionsCreate, params(metadata: big)),
             host: FakeControlSessionHost())
         #expect(response.error?.code == "invalid_request")
     }
@@ -263,8 +284,8 @@ struct ControlSessionRegistryTests {
 
         let session = updated.result?.session
         #expect(session?.status == "waiting_for_review")
-        #expect(session?.metadata["a"] == "1")
-        #expect(session?.metadata["b"] == "2")
+        #expect(session?.metadata["a"] == .string("1"))
+        #expect(session?.metadata["b"] == .string("2"))
     }
 
     @Test func updateRejectsServerOwnedFields() {
@@ -507,7 +528,7 @@ struct ControlSessionRegistryTests {
         #expect(response.result?.event?.name == "pr.opened")
         #expect(response.result?.event?.kind == "event")
         #expect(response.result?.event?.source == "agent")
-        #expect(response.result?.event?.payload == .object(["pr": .number(123)]))
+        #expect(response.result?.event?.payload == .object(["pr": .integer(123)]))
     }
 
     @Test func emitEventRejectsInvalidPayload() {
@@ -528,7 +549,7 @@ struct ControlSessionRegistryTests {
         let response = registry.handle(
             request(.sessionsSetMetadata, .init(id: id, key: "workflow", value: "release")),
             host: host)
-        #expect(response.result?.session?.metadata["workflow"] == "release")
+        #expect(response.result?.session?.metadata["workflow"] == .string("release"))
 
         let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
         #expect(log.result?.events?.first?.kind == "metadata")
@@ -542,6 +563,287 @@ struct ControlSessionRegistryTests {
         let response = registry.handle(
             request(.sessionsSetMetadata, .init(id: id, value: "x")), host: host)
         #expect(response.error?.code == "invalid_request")
+    }
+
+    // MARK: - Agent-reported structured metadata (MAX-4)
+
+    @Test func setMetadataStoresStructuredJSONValue() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        // A `value_json` carries an arbitrary nested value, stored verbatim.
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(
+                id: id, key: "run", valueJson: #"{"id":"run_abc","attempts":[1,2]}"#)),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata["run"] == .object([
+            "id": .string("run_abc"),
+            "attempts": .array([.integer(1), .integer(2)]),
+        ]))
+        // The structured value is also pushed to the surface for display.
+        #expect(host.surfaces[surface]?.metadata?["run"] == .object([
+            "id": .string("run_abc"),
+            "attempts": .array([.integer(1), .integer(2)]),
+        ]))
+    }
+
+    @Test func metadataPreservesLargeIntegerValues() {
+        // Regression: a >2^53 integer supplied via value_json must round-trip
+        // verbatim (not collapse to a lossy Double) through store + display.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(id: id, key: "run.id", valueJson: "9007199254740993")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata["run.id"] == .integer(9_007_199_254_740_993))
+        #expect(response.result?.session?.metadata["run.id"]?.displayString == "9007199254740993")
+    }
+
+    @Test func updateMetadataIsAuditedAndObservableViaWatch() throws {
+        // `update` is a documented metadata-merge path, so a metadata change made
+        // through it must be observable to a `watch`/`events` consumer — not just
+        // the single-key `set-metadata`.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let (plan, _) = try registry.beginWatch(.init(id: id), host: host)
+        let updated = registry.handle(
+            request(.sessionsUpdate, params(id: id, metadata: ["repo": "org/repo"])), host: host)
+        #expect(updated.ok)
+
+        // The active watch surfaces the change as a new metadata audit event.
+        let watch = registry.pollWatch(plan, host: host)
+        #expect(watch.messages.contains {
+            $0.type == "event" && $0.event?.kind == "metadata" && $0.event?.name == "repo"
+        })
+        // And it is in the audit log read back by `events`.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.contains { $0.kind == "metadata" && $0.name == "repo" } == true)
+    }
+
+    @Test func metadataRoundTripsUnknownKeysWithoutNormalization() {
+        // Acceptance: unknown, namespaced keys and structured values survive a
+        // set → read round-trip byte-for-byte, with no interpretation.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let original: [String: ControlJSONValue] = [
+            "linear.issue": .string("MAX-4"),
+            "pr.url": .string("https://github.com/org/repo/pull/456"),
+            "repo": .string("org/repo"),
+            "branch": .string("codex/agent-metadata-api"),
+            "run.id": .string("run_abc123"),
+            "cleanup.command": .string("git worktree remove ../wt"),
+            "x.unknown.flag": .bool(true),
+            "x.nested": .object(["a": .array([.number(1), .null, .string("z")])]),
+        ]
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, .init(metadata: original)), host: host)
+        let id = created.result?.session?.sessionID
+
+        let got = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(got.result?.session?.metadata == original)
+    }
+
+    @Test func removeMetadataDropsNamedKeys() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, params(metadata: ["a": "1", "b": "2", "c": "3"])),
+            host: host)
+        let id = created.result?.session?.sessionID
+
+        let response = registry.handle(
+            request(.sessionsRemoveMetadata, .init(id: id, keys: ["a", "c"])), host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata["a"] == nil)
+        #expect(response.result?.session?.metadata["b"] == .string("2"))
+        #expect(response.result?.session?.metadata["c"] == nil)
+        // The surface reflects the post-removal map.
+        #expect(host.surfaces[surfaceID]?.metadata?.keys.sorted() == ["b"])
+        // Each present removed key is audited.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        let removed = log.result?.events?.filter { $0.message == "removed" }
+        #expect(removed?.count == 2)
+    }
+
+    @Test func removeMetadataRequiresAKey() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsRemoveMetadata, .init(id: id)), host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func removeMetadataIgnoresAbsentKeys() {
+        // Removing a key that isn't present is a no-op success (idempotent) as
+        // long as at least one key was named.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let created = registry.handle(
+            request(.sessionsCreate, params(metadata: ["a": "1"])), host: host)
+        let id = created.result?.session?.sessionID
+        let response = registry.handle(
+            request(.sessionsRemoveMetadata, .init(id: id, keys: ["missing"])), host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata["a"] == .string("1"))
+        // Nothing was actually removed, so nothing is audited.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.contains { $0.message == "removed" } == false)
+    }
+
+    @Test func clearMetadataRemovesEverything() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, params(metadata: ["a": "1", "b": "2"])), host: host)
+        let id = created.result?.session?.sessionID
+
+        let response = registry.handle(
+            request(.sessionsClearMetadata, .init(id: id)), host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.metadata.isEmpty == true)
+        #expect(host.surfaces[surfaceID]?.metadata?.isEmpty == true)
+        // The clear is audited once.
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.filter { $0.message == "cleared" }.count == 1)
+    }
+
+    @Test func clearMetadataOnEmptyIsCleanNoOp() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsClearMetadata, .init(id: id)), host: host)
+        #expect(response.ok)
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.contains { $0.message == "cleared" } == false)
+    }
+
+    @Test func setMetadataRejectsOversizedJSONValue() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let big = String(repeating: "z", count: ControlSession.Limits.maxMetadataValueBytes + 1)
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(id: id, key: "k", valueJson: "\"\(big)\"")),
+            host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func setMetadataRejectsInvalidJSONValue() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let response = registry.handle(
+            request(.sessionsSetMetadata, .init(id: id, key: "k", valueJson: "{not json")),
+            host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func metadataPersistsAcrossRestart() {
+        // Metadata is scoped to the session record's lifetime, so a restart (which
+        // keeps the stable session_id) preserves it — unlike the per-run workflow
+        // state badge, which a restart clears.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host, command: "ls")
+        _ = registry.handle(
+            request(.sessionsSetMetadata, .init(id: id, key: "repo", value: "org/repo")),
+            host: host)
+
+        let newSurface = UUID()
+        host.nextCreateID = newSurface
+        let restarted = registry.handle(request(.sessionsRestart, .init(id: id)), host: host)
+        #expect(restarted.ok)
+        #expect(restarted.result?.session?.metadata["repo"] == .string("org/repo"))
+        // The metadata must also be re-pushed to the fresh surface so the chip
+        // persists across the restart (the new surface starts with an empty map).
+        #expect(host.surfaces[newSurface]?.metadata?["repo"] == .string("org/repo"))
+    }
+
+    @Test func listFiltersByMetadataKeyAndValue() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let a = registry.handle(
+            request(.sessionsCreate, params(metadata: ["repo": "org/a", "stage": "build"])),
+            host: host)
+        let b = registry.handle(
+            request(.sessionsCreate, params(metadata: ["repo": "org/b", "stage": "build"])),
+            host: host)
+        _ = registry.handle(
+            request(.sessionsCreate, params(metadata: ["other": "x"])), host: host)
+
+        // key=value selects exactly the matching session.
+        let byRepo = registry.handle(
+            request(.sessionsList, .init(metadataFilter: [.init(key: "repo", value: "org/a")])),
+            host: host)
+        #expect(byRepo.result?.sessions?.count == 1)
+        #expect(byRepo.result?.sessions?.first?.sessionID == a.result?.session?.sessionID)
+
+        // key-only (presence) selects every session carrying that key.
+        let byStage = registry.handle(
+            request(.sessionsList, .init(metadataFilter: [.init(key: "stage", value: nil)])),
+            host: host)
+        #expect(byStage.result?.sessions?.count == 2)
+
+        // Multiple filters AND together.
+        let both = registry.handle(
+            request(.sessionsList, .init(metadataFilter: [
+                .init(key: "stage", value: "build"),
+                .init(key: "repo", value: "org/b"),
+            ])),
+            host: host)
+        #expect(both.result?.sessions?.count == 1)
+        #expect(both.result?.sessions?.first?.sessionID == b.result?.session?.sessionID)
+
+        // A non-matching value selects nothing.
+        let none = registry.handle(
+            request(.sessionsList, .init(metadataFilter: [.init(key: "repo", value: "org/none")])),
+            host: host)
+        #expect(none.result?.sessions?.isEmpty == true)
+    }
+
+    @Test func listFilterMatchesStructuredValueByJSON() {
+        // A structured value is matched by its compact JSON rendering, so a filter
+        // can target e.g. a numeric or boolean value without special-casing.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        _ = registry.handle(
+            request(.sessionsCreate, .init(metadata: ["run.attempt": .number(3)])), host: host)
+        let match = registry.handle(
+            request(.sessionsList, .init(metadataFilter: [.init(key: "run.attempt", value: "3")])),
+            host: host)
+        #expect(match.result?.sessions?.count == 1)
+    }
+
+    @Test func metadataIsNeverInferredFromProcessState() {
+        // Regression for the no-inference rule: a session created with no metadata
+        // exposes an empty map and pushes nothing to the surface, and a process
+        // exit (a Maxx-owned lifecycle change) never invents metadata.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let fresh = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(fresh.result?.session?.metadata.isEmpty == true)
+        #expect(host.surfaces[surface]?.metadata == nil)
+
+        host.surfaces[surface]?.alive = false
+        let after = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(after.result?.session?.metadata.isEmpty == true)
+        #expect(after.result?.session?.lifecycle == "exited")
     }
 
     // MARK: - Agent-declared workflow state (MAX-3)
@@ -1102,21 +1404,61 @@ struct ControlValidationTests {
 
 struct ControlJSONValueTests {
     @Test func parsesNestedJSON() throws {
-        let value = try ControlJSONValue.parse(#"{"a":[1,true,"x"],"b":null}"#)
+        // Integer literals decode to `.integer` (exact), non-integers to `.number`.
+        let value = try ControlJSONValue.parse(#"{"a":[1,true,"x"],"b":null,"c":1.5}"#)
         #expect(value == .object([
-            "a": .array([.number(1), .bool(true), .string("x")]),
+            "a": .array([.integer(1), .bool(true), .string("x")]),
             "b": .null,
+            "c": .number(1.5),
         ]))
     }
 
     @Test func roundTripsThroughCoding() throws {
-        let value = ControlJSONValue.object(["n": .number(42), "s": .string("hi")])
+        let value = ControlJSONValue.object(["n": .integer(42), "f": .number(1.5), "s": .string("hi")])
         let data = try JSONEncoder().encode(value)
         let decoded = try JSONDecoder().decode(ControlJSONValue.self, from: data)
         #expect(decoded == value)
     }
 
+    @Test func parsesLargeIntegersWithoutPrecisionLoss() throws {
+        // 2^53 + 1 is the canonical value a Double cannot represent; it must
+        // survive parse → serialize byte-for-byte (regression for verbatim
+        // metadata corruption).
+        let value = try ControlJSONValue.parse("9007199254740993")
+        #expect(value == .integer(9_007_199_254_740_993))
+        #expect(value.serializedJSON == "9007199254740993")
+        #expect(value.displayString == "9007199254740993")
+        // Int64.max also round-trips.
+        let max = try ControlJSONValue.parse("9223372036854775807")
+        #expect(max == .integer(Int64.max))
+        #expect(max.serializedJSON == "9223372036854775807")
+    }
+
     @Test func rejectsMalformedJSON() {
         #expect(throws: ControlError.self) { _ = try ControlJSONValue.parse("{nope") }
+    }
+
+    @Test func displayStringShowsBareStringsUnquoted() {
+        // A bare string renders as itself; structured/scalar values render as
+        // compact JSON. Used for the metadata chip and basic list filtering.
+        #expect(ControlJSONValue.string("org/repo").displayString == "org/repo")
+        #expect(ControlJSONValue.number(3).displayString == "3")
+        #expect(ControlJSONValue.bool(true).displayString == "true")
+        #expect(ControlJSONValue.array([.number(1), .number(2)]).displayString == "[1,2]")
+    }
+
+    @Test func serializedByteCountCountsScalarsAndStructures() {
+        // Scalars are measured even though JSONEncoder rejects top-level fragments.
+        #expect(ControlJSONValue.string("ab").serializedByteCount == 4) // "ab"
+        #expect(ControlJSONValue.number(1).serializedByteCount == 1)
+        #expect(ControlJSONValue.object(["a": .number(1)]).serializedByteCount == #"{"a":1}"#.utf8.count)
+    }
+
+    @Test func serializedJSONSortsObjectKeysDeterministically() {
+        // Object keys serialize in sorted order, so display and `list` filtering
+        // on object values are stable regardless of Dictionary hashing.
+        let value = ControlJSONValue.object(["b": .number(2), "a": .number(1)])
+        #expect(value.serializedJSON == #"{"a":1,"b":2}"#)
+        #expect(value.displayString == #"{"a":1,"b":2}"#)
     }
 }
