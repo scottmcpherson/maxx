@@ -117,17 +117,75 @@ the current declared state is left unchanged. `set-summary` is independent of
 `set-state`, so an agent can update the displayed text without changing status.
 Both record an audit entry and are surfaced in `get` / `list` / `watch`.
 
+### Structured event stream (`stream` / `event`)
+
+A **cross-resource, cursor-addressed event bus** for supervisor agents. Where
+`sessions watch`/`wait` follow one session, `stream watch`/`wait` follow tab,
+session, and group activity together, with a process-wide monotonic cursor so a
+supervisor can resume after a dropped connection (and is told, via a `reset`,
+when its cursor predates what Maxx still retains). Maxx emits its own
+mechanical lifecycle events (create/focus/close/process-exit and group
+membership changes); agents declare workflow-relevant events explicitly. Maxx
+never infers either.
+
+```bash
+# Group sessions for coordination (also accepted as `sessions create --group`).
+maxx +control sessions set-group <session_id> --group release
+maxx +control sessions set-group <session_id>            # (no --group) leaves the group
+
+# Stream every event as newline-delimited JSON, filtered and resumable.
+maxx +control stream watch
+maxx +control stream watch --group release
+maxx +control stream watch --session <session_id>
+maxx +control stream watch --tab <surface_id>
+maxx +control stream watch --since <cursor> --timeout 10m
+
+# Block until a specific event is observed on the stream (optionally filtered).
+maxx +control stream wait --group release --event deploy.done --timeout 30m
+maxx +control stream wait --session <session_id> --event tests.green
+
+# Block until every member of a group satisfies a condition.
+maxx +control stream wait --group release --all exited
+maxx +control stream wait --group release --all idle
+maxx +control stream wait --group release --all declared:complete
+
+# Declare a structured event (shorthand for `sessions emit-event`).
+maxx +control event emit --session <session_id> --type declared.status --json '{"step":3,"of":7}'
+```
+
+`stream watch` first prints a `hello` line carrying the current `cursor` and the
+envelope `schema`, then one `{"type":"event","event":{…}}` line per matching
+event, and a final `{"type":"end"}` when a single-session filter's session ends
+(otherwise it runs until `--timeout` or the caller disconnects). `--since
+<cursor>` replays retained events after that cursor; if the cursor predates the
+retained window the `hello` line carries `"reset": true` and `"dropped_through":
+<cursor>` so the supervisor knows a gap occurred rather than silently missing it.
+
+`stream wait` prints one response whose `result.outcome` is `matched`, `timeout`,
+or `ended`; on a `--event` match it also carries the `stream_event` envelope, and
+on a `--group --all` match the satisfying member `sessions`. `--all` takes
+`idle`, `exited`, or `declared:<state>`:
+
+- `exited` — every member's Maxx-owned `lifecycle` has left `running`
+  (`exited`/`closed`/`archived`). Purely mechanical.
+- `declared:<state>` — every member's agent-declared `workflow_state` equals
+  `<state>` (one of `running`/`needsInput`/`blocked`/`complete`/`failed`).
+- `idle` — no member is currently declared `running`. A member that declared any
+  non-running state, or has not declared one, counts as idle; only an explicit
+  `running` declaration is "busy". This is defined entirely on explicit
+  declarations — Maxx never guesses idleness from output or timing.
+
 The raw JSON response is printed to stdout. Exit codes are stable so scripts can
 branch on them:
 
-| Exit | Meaning                                                          |
-| ---- | --------------------------------------------------------------- |
-| `0`  | Success, or `wait` observed its condition (`matched`).          |
-| `1`  | Generic error (transport, usage, validation).                   |
-| `2`  | `wait` timed out before the condition held.                     |
-| `3`  | Missing target — no session with that id (`not_found`).         |
-| `4`  | `wait` target ended (session became terminal) before matching.  |
-| `5`  | Unsupported operation for this session (e.g. nothing to restart).|
+| Exit | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | Success, or `wait` observed its condition (`matched`).            |
+| `1`  | Generic error (transport, usage, validation).                     |
+| `2`  | `wait` timed out before the condition held.                       |
+| `3`  | Missing target — no session with that id (`not_found`).           |
+| `4`  | `wait` target ended (session became terminal) before matching.    |
+| `5`  | Unsupported operation for this session (e.g. nothing to restart). |
 
 `wait` blocks until its condition holds, then prints a single response whose
 `result.outcome` is `matched`, `timeout`, or `ended`. `watch` streams one JSON
@@ -144,23 +202,26 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                   | REST equivalent                          | Purpose                                                     |
-| ------------------------ | ---------------------------------------- | ----------------------------------------------------------- |
-| `sessions.create`        | `POST /control/v1/sessions`              | Create a tab/session from explicit inputs.                  |
-| `sessions.get`           | `GET /control/v1/sessions/{id}`          | Explicit lifecycle state + declared metadata.               |
-| `sessions.list`          | `GET /control/v1/sessions`               | List API-created sessions.                                  |
-| `sessions.update`        | `PATCH /control/v1/sessions/{id}`        | Update caller-owned `status`/`metadata` only.               |
-| `sessions.action`        | `POST /control/v1/sessions/{id}/actions` | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.|
-| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`     | Block on a state/event/lifecycle until matched or timeout.  |
-| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`   | Stream lifecycle/event changes (newline-delimited).         |
-| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive` | Close the surface, retain the record.                       |
-| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart` | Replay the recorded/supplied command in a fresh surface.    |
-| `sessions.events`        | `GET /control/v1/sessions/{id}/log`      | Read the audit log (declared states/events + lifecycle).    |
-| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`    | Agent declares a lifecycle state (audited).                 |
-| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`    | Agent emits a named event with optional JSON payload.       |
-| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`     | Agent sets one caller-owned metadata key.                   |
-| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display. |
-| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`  | Agent sets the human-readable summary shown with the state. |
+| Method                   | REST equivalent                                | Purpose                                                      |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------ |
+| `sessions.create`        | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                   |
+| `sessions.get`           | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                |
+| `sessions.list`          | `GET /control/v1/sessions`                     | List API-created sessions.                                   |
+| `sessions.update`        | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only.                |
+| `sessions.action`        | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`. |
+| `sessions.wait`          | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.   |
+| `sessions.watch`         | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).          |
+| `sessions.archive`       | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                        |
+| `sessions.restart`       | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.     |
+| `sessions.events`        | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).     |
+| `sessions.declare-state` | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                  |
+| `sessions.emit-event`    | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.        |
+| `sessions.set-metadata`  | `PUT /control/v1/sessions/{id}/meta`           | Agent sets one caller-owned metadata key.                    |
+| `sessions.set-state`     | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.       |
+| `sessions.set-summary`   | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.  |
+| `sessions.set-group`     | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).    |
+| `stream.watch`           | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).   |
+| `stream.wait`            | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.           |
 
 ### Audit entries
 
@@ -223,15 +284,15 @@ Errors are predictable and documented:
 }
 ```
 
-| Code                 | Meaning                                                    |
-| -------------------- | ---------------------------------------------------------- |
-| `invalid_request`    | Malformed input, bad limits, or a disallowed update field. |
-| `unauthorized`       | Missing or wrong capability token.                         |
-| `not_found`          | No API-created session with that id.                       |
-| `already_ended`      | The session was canceled or its surface no longer exists.  |
-| `unsupported_action` | Unknown action name.                                       |
+| Code                 | Meaning                                                                |
+| -------------------- | ---------------------------------------------------------------------- |
+| `invalid_request`    | Malformed input, bad limits, or a disallowed update field.             |
+| `unauthorized`       | Missing or wrong capability token.                                     |
+| `not_found`          | No API-created session with that id.                                   |
+| `already_ended`      | The session was canceled or its surface no longer exists.              |
+| `unsupported_action` | Unknown action name.                                                   |
 | `unsupported`        | Operation not supported for this session (e.g. no command to restart). |
-| `internal`           | Unexpected server-side failure.                            |
+| `internal`           | Unexpected server-side failure.                                        |
 
 ## Identifiers & ownership
 
@@ -247,6 +308,10 @@ Errors are predictable and documented:
   Maxx-derived. `workflow_state` is one of `running`, `needsInput`, `blocked`,
   `complete`, `failed`; the response also carries `workflow_state_at` /
   `workflow_state_source` and `summary_at` / `summary_source`.
+- `group` is an optional, caller-supplied **group label** for supervisor
+  coordination (`set-group`, or `create --group`). It is an opaque token (no
+  meaning is inferred from its text); a session belongs to at most one group at a
+  time, and membership changes are recorded as Maxx-owned stream events.
 - The API only ever lists/controls **API-created** sessions. The user's
   manually-opened terminals are never reachable through it.
 
@@ -293,6 +358,125 @@ fields is rejected with `invalid_request`. `sessions.action cancel`/`close` is
   a specific signal (`SIGINT`/`SIGTERM`/`SIGKILL`/`SIGHUP`/`SIGQUIT`) to the
   foreground process via the explicit process-control path — never by
   synthesizing terminal input.
+
+## The structured event stream contract (MAX-7)
+
+Maxx is the **visible terminal-native runtime/control plane, not the workflow
+brain.** The event stream reflects that split exactly: Maxx emits the mechanical
+runtime facts it owns, agents declare the workflow facts they own, and the
+envelope tags every event with which is which (`source_kind`). A supervisor
+composes coordination from these explicit events and never has to scrape terminal
+output, match process or branch names, or time idle gaps.
+
+### The event bus
+
+Every event is appended to an in-memory, append-only bus with a **process-wide
+monotonic `cursor`** (starting at 1; stable for the run, never reused, survives
+session restarts). The bus is bounded (default 10,000 events) with oldest-first
+eviction; a `--since` cursor that predates the retained window is reported as a
+retention miss (`reset`/`dropped_through`) rather than silently skipped. The bus
+is a **superset** of the per-session audit logs: every per-session audit entry
+appears on it, plus the Maxx-owned mechanical events below that have no
+per-session entry. Durable history is intentionally out of scope for v1, but the
+cursor contract does not preclude adding it later. The cursor is in-memory and
+resets when the Maxx app restarts (the bus is not persisted); a `--since` from a
+previous run is therefore beyond the current cursor and is reported as a `reset`
+(the stream replays what it retains rather than blocking past the stale cursor).
+
+### The envelope
+
+Each `stream.watch` `event` message and each `stream.wait --event` match carries
+a schema-versioned envelope:
+
+```json
+{
+  "schema": 1,
+  "cursor": 42,
+  "seq": 3,
+  "source_kind": "agent",
+  "kind": "event",
+  "name": "deploy.done",
+  "source": "release-agent",
+  "message": null,
+  "payload": { "version": "1.4.0" },
+  "created_at": "2026-06-14T12:00:00Z",
+  "resource_kind": "session",
+  "session_id": "2B0E…",
+  "surface_id": "9F1C…",
+  "group": "release",
+  "pid": 41234
+}
+```
+
+- `schema` — envelope version; bump only on an incompatible change. Pin the
+  version you understand.
+- `cursor` — global position; pass back as `--since` to resume.
+- `seq` — the per-session audit sequence when the event is also in a session's
+  audit log; omitted for bus-only mechanical events.
+- `source_kind` — `maxx` (a mechanical runtime fact Maxx owns) or `agent` (a fact
+  an agent declared). The load-bearing ownership tag.
+- `kind` — `lifecycle` for Maxx-owned events; `state`/`event`/`metadata`/
+  `workflow-state`/`summary` for agent-declared ones.
+- `resource_kind` — currently always `session`; reserved so future tab-/group-
+  scoped events stay additive.
+- `group` — the group this event pertains to (the session's current group, or the
+  affected group for `group.joined`/`group.left`); omitted when none.
+
+Metadata-specific event fields are intentionally **not** part of this envelope
+yet; agent-reported metadata is owned by a separate change (MAX-4) and the
+envelope stays workflow-neutral until then.
+
+### Events Maxx owns (`source_kind: maxx`, `kind: lifecycle`)
+
+| `name`         | When                                                          |
+| -------------- | ------------------------------------------------------------- |
+| `created`      | A session/tab was created (its command, if any, was started). |
+| `focused`      | A session was focused via the API.                            |
+| `closed`       | A session was canceled/closed, or its surface vanished.       |
+| `exited`       | The session's child process exited (kernel-reported).         |
+| `archived`     | A session was archived.                                       |
+| `restarted`    | A session's command was restarted in a fresh surface.         |
+| `group.joined` | A session joined a group (`message`/`group` name the group).  |
+| `group.left`   | A session left a group.                                       |
+
+These derive only from explicit API actions and kernel-reported process/surface
+state — never from terminal output, process names, branch names, paths, tab
+titles, prompts, or idle time. `created` covers command start; `exited` covers
+command/process exit. Process-exit and surface-vanished events are reconciled
+when the stream (or a `get`/`list`/`events` read) next observes the kernel state.
+
+### Events agents own (`source_kind: agent`)
+
+`declare-state`, `emit-event`, `set-metadata`, `set-state`, and `set-summary`
+(see above) flow onto the stream verbatim. Maxx validates the envelope (name
+characters, payload is well-formed JSON within the size limit, source length) and
+routes it, but assigns no meaning to the agent's `type`/`payload`.
+
+### Example supervisor flow
+
+A supervisor launches a batch of jobs as a group, follows progress without
+reading any terminal text, and blocks until they all finish:
+
+```bash
+G=release-2026-06-14
+for repo in a b c; do
+  id=$(maxx +control sessions create --command "./ci.sh $repo" --group "$G" \
+        | jq -r .result.session.session_id)
+  # each job declares its own milestones:
+  #   maxx +control event emit --session "$id" --type tests.green
+  #   maxx +control sessions set-state "$id" --state complete   (or failed)
+done
+
+# Follow everything in the group as structured JSON (resumable via --since):
+maxx +control stream watch --group "$G" &
+
+# Block until every job's process has exited, then inspect declared outcomes:
+maxx +control stream wait --group "$G" --all exited --timeout 1h
+maxx +control sessions list | jq '.result.sessions[] | {id:.session_id, state:.workflow_state}'
+```
+
+Nothing here inspects terminal contents: coordination rides entirely on Maxx's
+mechanical `exited` events and the agents' explicit `set-state` declarations.
 
 ## Not in scope (yet)
 

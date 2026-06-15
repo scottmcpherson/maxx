@@ -71,6 +71,22 @@ final class ControlSessionRegistry {
     private let now: () -> Date
     private let makeID: () -> UUID
 
+    // MARK: Structured event stream (MAX-7)
+
+    /// Append-only, bounded global event bus: the cross-resource view of
+    /// everything that happens to API-created sessions, carrying a process-wide
+    /// monotonic cursor. Oldest entries are evicted once it exceeds
+    /// ``maxBusEvents``; a `stream.watch --since` below the retained window is
+    /// reported as a retention miss rather than silently skipped.
+    private var bus: [ControlBusEvent] = []
+    /// Next cursor to assign. Starts at 1 so cursor 0 / `--since 0` means
+    /// "from the very beginning" and never collides with a real event.
+    private var nextCursor: Int = 1
+    /// Bounded retention for the in-memory bus. Generous enough that a normally
+    /// attentive supervisor never misses events, small enough to cap memory.
+    /// Injectable so retention-miss behavior is unit-testable with a small bound.
+    private let maxBusEvents: Int
+
     /// Telemetry for declaration events only — the explicit `set-state` /
     /// `set-summary` calls Maxx receives, not any inferred interpretation.
     private static let logger = Logger(
@@ -85,10 +101,12 @@ final class ControlSessionRegistry {
 
     init(
         now: @escaping () -> Date = Date.init,
-        makeID: @escaping () -> UUID = UUID.init
+        makeID: @escaping () -> UUID = UUID.init,
+        maxBusEvents: Int = 10_000
     ) {
         self.now = now
         self.makeID = makeID
+        self.maxBusEvents = max(1, maxBusEvents)
     }
 
     /// Number of tracked sessions (including ended ones). Exposed for tests.
@@ -128,9 +146,12 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setSummary(request.params, host: host)))
             case .sessionsEvents:
                 return .success(.init(events: try events(request.params, host: host)))
-            case .sessionsWait, .sessionsWatch:
-                // wait/watch are long-lived and handled by the streaming path in
-                // ControlServer; they never reach this single-shot dispatcher.
+            case .sessionsSetGroup:
+                return .success(.init(session: try setGroup(request.params, host: host)))
+            case .sessionsWait, .sessionsWatch, .streamWatch, .streamWait:
+                // wait/watch (and the stream variants) are long-lived and handled
+                // by the streaming path in ControlServer; they never reach this
+                // single-shot dispatcher.
                 throw ControlError(
                     .invalidRequest, "wait/watch require a streaming connection")
             }
@@ -153,6 +174,7 @@ final class ControlSessionRegistry {
         let env = try ControlValidation.validateEnv(params?.env)
         let metadata = try ControlValidation.validateMetadata(params?.metadata)
         let status = try ControlValidation.validateStatus(params?.status) ?? "created"
+        let group = try ControlValidation.validateGroup(params?.group)
 
         let location: ControlLocation
         if let raw = params?.location {
@@ -171,7 +193,7 @@ final class ControlSessionRegistry {
             env: env,
             location: location))
 
-        let session = ControlSession(
+        var session = ControlSession(
             id: makeID(),
             surfaceID: surfaceID,
             title: title,
@@ -181,9 +203,23 @@ final class ControlSessionRegistry {
             location: location,
             status: status,
             metadata: metadata,
+            group: group,
             createdAt: now(),
             canceled: false)
+        // Baseline the observed lifecycle so reconciliation later emits exactly
+        // one `exited`/`closed` event on the kernel-reported transition.
+        session.lastObservedLifecycle = ControlLifecycle.running.rawValue
         sessions[session.id] = session
+
+        let pid = host.surface(for: session.surfaceID)?.pid
+        recordMechanical(
+            session, name: "created", group: session.group,
+            createdAt: session.createdAt, pid: pid)
+        if let group {
+            recordMechanical(
+                session, name: "group.joined", message: group, group: group,
+                createdAt: session.createdAt, pid: pid)
+        }
         return view(of: session, host: host)
     }
 
@@ -191,12 +227,16 @@ final class ControlSessionRegistry {
         _ params: ControlRequest.Params?,
         host: ControlSessionHost
     ) throws -> ControlSessionView {
+        // No reconcile here: `get` reports current state (view() computes the
+        // lifecycle fresh), and a global reconcile pass on a single-resource read
+        // would be wasted work. `list` and the stream polls own event recording.
         let session = try requireSession(params?.id)
         return view(of: session, host: host)
     }
 
     private func list(host: ControlSessionHost) -> [ControlSessionView] {
-        sessions.values
+        reconcile(host: host)
+        return sessions.values
             .sorted { $0.createdAt < $1.createdAt }
             .map { view(of: $0, host: host) }
     }
@@ -248,7 +288,9 @@ final class ControlSessionRegistry {
 
         switch actionName {
         case "focus":
-            try requireLiveSurface(session, host: host).focus()
+            let handle = try requireLiveSurface(session, host: host)
+            handle.focus()
+            recordMechanical(session, name: "focused", group: session.group, createdAt: now(), pid: handle.pid)
             return .success(.init(session: view(of: session, host: host), applied: "focus"))
 
         case "input":
@@ -293,7 +335,8 @@ final class ControlSessionRegistry {
         let message = try validateMessage(params?.message)
 
         session.status = state
-        session.appendEvent(
+        record(
+            &session,
             kind: .state,
             name: state,
             source: source,
@@ -314,7 +357,8 @@ final class ControlSessionRegistry {
         let source = try ControlValidation.validateSource(params?.source)
         let payload = try params?.payloadJson.map(ControlJSONValue.parse)
 
-        session.appendEvent(
+        record(
+            &session,
             kind: .event,
             name: name,
             source: source,
@@ -322,7 +366,7 @@ final class ControlSessionRegistry {
             createdAt: now(),
             pid: host.surface(for: session.surfaceID)?.pid)
         sessions[session.id] = session
-        // `appendEvent` always appends, so `last` is the entry we just recorded.
+        // `record` always appends, so `last` is the entry we just recorded.
         let recorded = eventView(session.events[session.events.count - 1], sessionID: session.id)
         return (view(of: session, host: host), recorded)
     }
@@ -342,7 +386,8 @@ final class ControlSessionRegistry {
         var merged = session.metadata
         merged[key] = params?.value ?? ""
         session.metadata = try ControlValidation.validateMetadata(merged)
-        session.appendEvent(
+        record(
+            &session,
             kind: .metadata,
             name: key,
             source: source,
@@ -373,7 +418,8 @@ final class ControlSessionRegistry {
         session.workflowState = state
         session.workflowStateAt = at
         session.workflowStateSource = source
-        session.appendEvent(
+        record(
+            &session,
             kind: .workflowState,
             name: state.rawValue,
             source: source,
@@ -404,7 +450,8 @@ final class ControlSessionRegistry {
         session.summary = summary
         session.summaryAt = at
         session.summarySource = source
-        session.appendEvent(
+        record(
+            &session,
             kind: .summary,
             name: "summary",
             source: source,
@@ -446,7 +493,9 @@ final class ControlSessionRegistry {
             session.archived = true
             session.archivedAt = date
             session.archiveReason = reason
-            session.appendEvent(
+            session.lastObservedLifecycle = ControlLifecycle.archived.rawValue
+            record(
+                &session,
                 kind: .lifecycle,
                 name: "archived",
                 source: ControlSession.maxxSource,
@@ -504,7 +553,11 @@ final class ControlSessionRegistry {
         session.summary = nil
         session.summaryAt = nil
         session.summarySource = nil
-        session.appendEvent(
+        // The fresh surface starts running; baseline observation accordingly so
+        // reconciliation emits exactly one exit event for the new run.
+        session.lastObservedLifecycle = ControlLifecycle.running.rawValue
+        record(
+            &session,
             kind: .lifecycle,
             name: "restarted",
             source: ControlSession.maxxSource,
@@ -676,6 +729,393 @@ final class ControlSessionRegistry {
         return WatchUpdate(messages: messages, plan: next, ended: current != .running)
     }
 
+    // MARK: - Structured event stream (MAX-7)
+
+    /// Assign the next global cursor.
+    private func takeCursor() -> Int {
+        let cursor = nextCursor
+        nextCursor += 1
+        return cursor
+    }
+
+    /// Append one entry to the bounded global bus, evicting the oldest entries
+    /// once retention is exceeded.
+    private func appendToBus(_ event: ControlBusEvent) {
+        bus.append(event)
+        if bus.count > maxBusEvents {
+            bus.removeFirst(bus.count - maxBusEvents)
+        }
+    }
+
+    /// Append a per-session audit entry *and* mirror it onto the global bus with
+    /// a fresh cursor. Use for every agent-declared fact and the archive/restart
+    /// lifecycle actions — preserving the MAX-2/3 per-session audit contract
+    /// while making the same facts visible on the cross-resource stream.
+    private func record(
+        _ session: inout ControlSession,
+        kind: ControlEventKind,
+        name: String,
+        source: String,
+        message: String? = nil,
+        payload: ControlJSONValue? = nil,
+        createdAt: Date,
+        pid: Int?
+    ) {
+        session.appendEvent(
+            kind: kind, name: name, source: source,
+            message: message, payload: payload, createdAt: createdAt, pid: pid)
+        let entry = session.events[session.events.count - 1]
+        appendToBus(ControlBusEvent(
+            cursor: takeCursor(),
+            kind: kind, name: name, source: source, sourceKind: kind.sourceKind,
+            message: message, payload: payload, createdAt: createdAt,
+            sessionID: session.id, surfaceID: session.surfaceID,
+            group: session.group, pid: pid, seq: entry.seq))
+    }
+
+    /// Record a Maxx-owned mechanical event onto the global bus *only* (no
+    /// per-session audit entry, so the MAX-2/3 per-session contract is
+    /// unchanged). These are the create/focus/close/process-exit/group-membership
+    /// facts the structured stream owns. Every one is derived from an explicit
+    /// API action or a kernel-reported state change — never from terminal output.
+    private func recordMechanical(
+        _ session: ControlSession,
+        name: String,
+        message: String? = nil,
+        group: String?,
+        createdAt: Date,
+        pid: Int?
+    ) {
+        appendToBus(ControlBusEvent(
+            cursor: takeCursor(),
+            kind: .lifecycle, name: name, source: ControlSession.maxxSource,
+            sourceKind: .maxx, message: message, payload: nil, createdAt: createdAt,
+            sessionID: session.id, surfaceID: session.surfaceID,
+            // The caller names the group this event pertains to explicitly: the
+            // session's current group for most events, or the affected group for
+            // group.joined/group.left.
+            group: group, pid: pid, seq: nil))
+    }
+
+    /// Observe kernel-reported lifecycle transitions and record the mechanical
+    /// stream events (`exited`, `closed`) that have no explicit API call behind
+    /// them, exactly once each. Idempotent and side-effect-free beyond appending
+    /// those events, so it is safe to call on every read/poll. Never inspects
+    /// terminal output: a transition is only ever the kernel-reported process
+    /// exit or the surface ceasing to exist.
+    private func reconcile(host: ControlSessionHost) {
+        for id in Array(sessions.keys) {
+            guard var session = sessions[id] else { continue }
+            let current = lifecycle(of: session, host: host).rawValue
+            let last = session.lastObservedLifecycle ?? ControlLifecycle.running.rawValue
+            guard current != last else { continue }
+            switch current {
+            case ControlLifecycle.exited.rawValue:
+                recordMechanical(
+                    session, name: "exited", group: session.group, createdAt: now(),
+                    pid: host.surface(for: session.surfaceID)?.pid)
+            case ControlLifecycle.closed.rawValue:
+                // Surface vanished without an API cancel/archive (e.g. the user
+                // closed the tab). cancel()/archive()/restart() set
+                // lastObservedLifecycle themselves, so this fires only for the
+                // un-instrumented case.
+                recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
+            default:
+                break
+            }
+            session.lastObservedLifecycle = current
+            sessions[id] = session
+        }
+    }
+
+    /// Set or clear a session's group membership, recording the Maxx-owned
+    /// `group.left`/`group.joined` mechanical events. A no-op (same group)
+    /// records nothing.
+    private func setGroup(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let newGroup = try ControlValidation.validateGroup(params?.group)
+        let old = session.group
+        guard old != newGroup else { return view(of: session, host: host) }
+
+        let at = now()
+        let pid = host.surface(for: session.surfaceID)?.pid
+        session.group = newGroup
+        sessions[session.id] = session
+        if let old {
+            recordMechanical(session, name: "group.left", message: old, group: old, createdAt: at, pid: pid)
+        }
+        if let newGroup {
+            recordMechanical(session, name: "group.joined", message: newGroup, group: newGroup, createdAt: at, pid: pid)
+        }
+        return view(of: session, host: host)
+    }
+
+    /// A filter over the stream by session/tab/group. An unset field matches
+    /// everything; set fields are ANDed together.
+    struct StreamFilter {
+        var sessionID: UUID?
+        var surfaceID: UUID?
+        var group: String?
+
+        func matches(_ event: ControlBusEvent) -> Bool {
+            if let sessionID, event.sessionID != sessionID { return false }
+            if let surfaceID, event.surfaceID != surfaceID { return false }
+            if let group, event.group != group { return false }
+            return true
+        }
+    }
+
+    /// Parse and validate the shared `--session`/`--tab`/`--group` filter.
+    private func parseFilter(_ params: ControlRequest.Params?) throws -> StreamFilter {
+        var filter = StreamFilter()
+        if let raw = params?.id, !raw.isEmpty {
+            guard let id = UUID(uuidString: raw) else {
+                throw ControlError(.invalidRequest, "session id is not a valid UUID")
+            }
+            guard sessions[id] != nil else {
+                throw ControlError(.notFound, "no session with id \(raw)")
+            }
+            filter.sessionID = id
+        }
+        if let raw = params?.tab, !raw.isEmpty {
+            guard let id = UUID(uuidString: raw) else {
+                throw ControlError(.invalidRequest, "tab id is not a valid UUID")
+            }
+            filter.surfaceID = id
+        }
+        if let group = try ControlValidation.validateGroup(params?.group) {
+            filter.group = group
+        }
+        return filter
+    }
+
+    struct StreamWatchPlan {
+        let filter: StreamFilter
+        var lastCursor: Int
+        /// When set, end the stream once this (single-session-filtered) session
+        /// reaches a terminal lifecycle.
+        let endSessionID: UUID?
+    }
+
+    /// Validate a `stream.watch`, run reconciliation, and produce the opening
+    /// `hello` line plus any retained events to replay.
+    func beginStreamWatch(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> (StreamWatchPlan, [ControlStreamFeedMessage]) {
+        reconcile(host: host)
+        let filter = try parseFilter(params)
+        let latest = nextCursor - 1
+        var baseline = params?.since ?? latest
+
+        var hello = ControlStreamFeedMessage(
+            type: "hello", cursor: latest, schema: controlStreamSchemaVersion)
+        if let since = params?.since {
+            let firstRetained = bus.first?.cursor
+            if since > latest {
+                // A cursor beyond anything this run has assigned — typically a
+                // resume with a cursor from a previous app run (the bus is
+                // in-memory and the cursor resets on restart). Don't silently
+                // gate past it forever: flag a reset and replay what we retain.
+                hello.reset = true
+                baseline = firstRetained.map { $0 - 1 } ?? latest
+            } else if let firstRetained, since + 1 < firstRetained {
+                // Retention miss: the requested cursor's successors were evicted.
+                hello.reset = true
+                hello.droppedThrough = firstRetained - 1
+                baseline = since
+            } else {
+                baseline = since
+            }
+        }
+
+        var messages: [ControlStreamFeedMessage] = [hello]
+        for event in bus where event.cursor > baseline && filter.matches(event) {
+            messages.append(ControlStreamFeedMessage(type: "event", event: streamEventView(event)))
+        }
+
+        let plan = StreamWatchPlan(
+            filter: filter,
+            lastCursor: max(latest, baseline),
+            endSessionID: filter.sessionID)
+        return (plan, messages)
+    }
+
+    struct StreamWatchUpdate {
+        var messages: [ControlStreamFeedMessage]
+        var plan: StreamWatchPlan
+        var ended: Bool
+    }
+
+    /// Produce the stream messages accumulated since the last poll. Reconciles
+    /// first so process-exit events are captured while watching.
+    func pollStreamWatch(_ plan: StreamWatchPlan, host: ControlSessionHost) -> StreamWatchUpdate {
+        reconcile(host: host)
+        var next = plan
+        var messages: [ControlStreamFeedMessage] = []
+
+        // Mid-stream retention miss: events we had not yet emitted were evicted.
+        if let firstRetained = bus.first?.cursor, firstRetained > next.lastCursor + 1 {
+            messages.append(ControlStreamFeedMessage(
+                type: "reset", reset: true, droppedThrough: firstRetained - 1))
+            next.lastCursor = firstRetained - 1
+        }
+
+        for event in bus where event.cursor > next.lastCursor && plan.filter.matches(event) {
+            messages.append(ControlStreamFeedMessage(type: "event", event: streamEventView(event)))
+        }
+        // Advance past everything scanned (including non-matching events) so we
+        // never rescan the retained window.
+        next.lastCursor = max(next.lastCursor, nextCursor - 1)
+
+        var ended = false
+        if let sid = plan.endSessionID, let session = sessions[sid] {
+            ended = lifecycle(of: session, host: host).isTerminal
+        }
+        return StreamWatchUpdate(messages: messages, plan: next, ended: ended)
+    }
+
+    /// A group-wide condition for `stream.wait --group --all`.
+    enum GroupCondition: Equatable {
+        /// No member is actively declared `running` (idle = not busy). A member
+        /// that declared any non-running workflow state, or never declared one,
+        /// counts as idle; only an explicit `running` declaration is busy.
+        case idle
+        /// Every member's Maxx-owned lifecycle has left `running` (exited/closed/
+        /// archived) — a purely mechanical condition.
+        case exited
+        /// Every member's declared workflow state equals this value.
+        case declared(WorkflowState)
+    }
+
+    enum StreamWaitMode {
+        case event(name: String, baselineCursor: Int)
+        case groupAll(group: String, condition: GroupCondition)
+    }
+
+    struct StreamWaitPlan {
+        let filter: StreamFilter
+        let mode: StreamWaitMode
+    }
+
+    enum StreamWaitProgress {
+        case matched(ControlStreamEventView?, [ControlSessionView]?)
+        case ended
+        case pending
+    }
+
+    /// Validate a `stream.wait` and capture its plan/baseline.
+    func beginStreamWait(_ params: ControlRequest.Params?, host: ControlSessionHost) throws -> StreamWaitPlan {
+        reconcile(host: host)
+        let filter = try parseFilter(params)
+
+        if let allRaw = params?.all, !allRaw.isEmpty {
+            guard params?.event == nil else {
+                throw ControlError(.invalidRequest, "pass either --event or --all, not both")
+            }
+            guard let group = filter.group else {
+                throw ControlError(.invalidRequest, "--all requires --group")
+            }
+            let condition = try parseGroupCondition(allRaw)
+            guard !membersOfGroup(group).isEmpty else {
+                throw ControlError(.invalidRequest, "no sessions in group '\(group)'")
+            }
+            return StreamWaitPlan(filter: filter, mode: .groupAll(group: group, condition: condition))
+        }
+
+        let name = try ControlValidation.validateEventName(params?.event)
+        let baseline = params?.since ?? (nextCursor - 1)
+        return StreamWaitPlan(filter: filter, mode: .event(name: name, baselineCursor: baseline))
+    }
+
+    /// Evaluate a `stream.wait` once. The server polls this until it resolves or
+    /// times out. Reconciles first so process-exit/idle conditions are observed.
+    func pollStreamWait(_ plan: StreamWaitPlan, host: ControlSessionHost) -> StreamWaitProgress {
+        reconcile(host: host)
+        switch plan.mode {
+        case let .event(name, baseline):
+            if let match = bus.first(where: {
+                $0.cursor > baseline && $0.name == name && plan.filter.matches($0)
+            }) {
+                return .matched(streamEventView(match), nil)
+            }
+            // A single-session-filtered event wait can never match once that
+            // session is terminal: end rather than block to the timeout.
+            if let sid = plan.filter.sessionID, let session = sessions[sid],
+               lifecycle(of: session, host: host).isTerminal {
+                return .ended
+            }
+            return .pending
+
+        case let .groupAll(group, condition):
+            let members = membersOfGroup(group)
+            // The group emptied out (all members left/closed). The condition is
+            // no longer meaningful; keep waiting until it is satisfied or the
+            // timeout fires rather than reporting a vacuous match.
+            guard !members.isEmpty else { return .pending }
+            let satisfied = members.allSatisfy { memberSatisfies($0, condition, host: host) }
+            guard satisfied else { return .pending }
+            let views = members
+                .sorted { $0.createdAt < $1.createdAt }
+                .map { view(of: $0, host: host) }
+            return .matched(nil, views)
+        }
+    }
+
+    private func parseGroupCondition(_ raw: String) throws -> GroupCondition {
+        if raw == "idle" { return .idle }
+        if raw == "exited" { return .exited }
+        if raw.hasPrefix("declared:") {
+            let name = String(raw.dropFirst("declared:".count))
+            return .declared(try ControlValidation.validateWorkflowState(name))
+        }
+        throw ControlError(
+            .invalidRequest,
+            "--all must be one of idle, exited, or declared:<state>")
+    }
+
+    private func membersOfGroup(_ group: String) -> [ControlSession] {
+        sessions.values.filter { $0.group == group }
+    }
+
+    private func memberSatisfies(
+        _ session: ControlSession,
+        _ condition: GroupCondition,
+        host: ControlSessionHost
+    ) -> Bool {
+        switch condition {
+        case .exited:
+            return lifecycle(of: session, host: host) != .running
+        case .idle:
+            return session.workflowState != .running
+        case let .declared(state):
+            return session.workflowState == state
+        }
+    }
+
+    /// Build the wire envelope of a bus event.
+    private func streamEventView(_ event: ControlBusEvent) -> ControlStreamEventView {
+        ControlStreamEventView(
+            schema: controlStreamSchemaVersion,
+            cursor: event.cursor,
+            seq: event.seq,
+            sourceKind: event.sourceKind.rawValue,
+            kind: event.kind.rawValue,
+            name: event.name,
+            source: event.source,
+            message: event.message,
+            payload: event.payload,
+            createdAt: Self.iso8601.string(from: event.createdAt),
+            resourceKind: "session",
+            sessionID: event.sessionID.uuidString,
+            surfaceID: event.surfaceID.uuidString,
+            group: event.group,
+            pid: event.pid)
+    }
+
     // MARK: - Helpers
 
     private func validateMessage(_ message: String?) throws -> String? {
@@ -721,10 +1161,23 @@ final class ControlSessionRegistry {
     /// a success no-op so callers can retry safely.
     private func cancel(_ input: ControlSession, host: ControlSessionHost) -> ControlResponse {
         var session = input
+        // A terminal mechanical event was already recorded if the session was
+        // canceled/archived, or reconciliation already observed the surface
+        // vanish. Keying off the observed lifecycle (not just `canceled`) is what
+        // keeps `closed` exactly-once even when the user closes the tab first and
+        // reconcile records it before an API cancel/close arrives.
+        let alreadyTerminal = session.canceled
+            || session.archived
+            || session.lastObservedLifecycle == ControlLifecycle.closed.rawValue
+            || session.lastObservedLifecycle == ControlLifecycle.archived.rawValue
         if !session.canceled, let handle = host.surface(for: session.surfaceID) {
             handle.close()
         }
         session.canceled = true
+        if !alreadyTerminal {
+            session.lastObservedLifecycle = ControlLifecycle.closed.rawValue
+            recordMechanical(session, name: "closed", group: session.group, createdAt: now(), pid: nil)
+        }
         sessions[session.id] = session
         return .success(.init(session: view(of: session, host: host), canceled: true))
     }
@@ -755,6 +1208,7 @@ final class ControlSessionRegistry {
             status: session.status,
             lifecycle: lifecycle.rawValue,
             metadata: session.metadata,
+            group: session.group,
             createdAt: Self.iso8601.string(from: session.createdAt),
             pid: pid,
             archivedAt: session.archivedAt.map(Self.iso8601.string(from:)),

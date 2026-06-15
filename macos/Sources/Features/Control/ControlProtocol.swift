@@ -71,6 +71,20 @@ enum ControlMethod: String, Codable {
 
     /// Set the short human-readable summary shown alongside the workflow state.
     case sessionsSetSummary = "sessions.set-summary"
+
+    // MARK: Structured event stream (MAX-7)
+
+    /// Set (or clear) a session's group membership, recorded as a Maxx-owned
+    /// mechanical event on the structured stream.
+    case sessionsSetGroup = "sessions.set-group"
+
+    /// Stream the cross-resource structured event bus as newline-delimited
+    /// messages, filtered by session/tab/group and resumable from a cursor.
+    case streamWatch = "stream.watch"
+
+    /// Block until a matching stream event arrives or a group-wide condition
+    /// holds, or a timeout elapses. Single response carrying the outcome.
+    case streamWait = "stream.wait"
 }
 
 // MARK: - Errors
@@ -162,6 +176,18 @@ struct ControlRequest: Codable {
         /// the `state` field above, validated against the workflow vocabulary.)
         var summary: String?
 
+        // MARK: Structured event stream (MAX-7)
+
+        /// Group label: set membership (`set-group`/`create`) or filter a
+        /// `stream.watch`/`stream.wait` to a group. Empty/absent on `set-group`
+        /// means "leave the current group".
+        var group: String?
+        /// Surface (tab) id to filter a `stream.watch`/`stream.wait` by.
+        var tab: String?
+        /// Group-wide condition for `stream.wait --group`: `idle`, `exited`, or
+        /// `declared:<workflow-state>`.
+        var all: String?
+
         enum CodingKeys: String, CodingKey {
             case id, title, cwd, command, env, metadata, status, location
             case action, input, state, event, lifecycle, message, source
@@ -170,6 +196,7 @@ struct ControlRequest: Codable {
             case timeoutMs = "timeout_ms"
             case since
             case summary
+            case group, tab, all
         }
     }
 }
@@ -193,6 +220,9 @@ struct ControlSessionView: Codable, Equatable {
     /// liveness), never from terminal output.
     var lifecycle: String
     var metadata: [String: String]
+    /// Group membership for supervisor coordination (MAX-7); omitted when the
+    /// session is not in a group. Explicitly set, never inferred.
+    var group: String?
     var createdAt: String
     var pid: Int?
     /// When the session was archived, if it has been.
@@ -223,7 +253,7 @@ struct ControlSessionView: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
         case surfaceID = "surface_id"
-        case title, command, cwd, status, lifecycle, metadata
+        case title, command, cwd, status, lifecycle, metadata, group
         case createdAt = "created_at"
         case pid
         case archivedAt = "archived_at"
@@ -262,6 +292,13 @@ struct ControlResponse: Codable {
         var event: ControlEventView?
         /// A session's audit log, returned by `sessions.events`.
         var events: [ControlEventView]?
+        /// The structured stream envelope that satisfied a `stream.wait --event`.
+        var streamEvent: ControlStreamEventView?
+
+        enum CodingKeys: String, CodingKey {
+            case session, sessions, canceled, applied, outcome, event, events
+            case streamEvent = "stream_event"
+        }
 
         init(
             session: ControlSessionView? = nil,
@@ -270,7 +307,8 @@ struct ControlResponse: Codable {
             applied: String? = nil,
             outcome: String? = nil,
             event: ControlEventView? = nil,
-            events: [ControlEventView]? = nil
+            events: [ControlEventView]? = nil,
+            streamEvent: ControlStreamEventView? = nil
         ) {
             self.session = session
             self.sessions = sessions
@@ -279,6 +317,7 @@ struct ControlResponse: Codable {
             self.outcome = outcome
             self.event = event
             self.events = events
+            self.streamEvent = streamEvent
         }
     }
 

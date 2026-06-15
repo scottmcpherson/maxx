@@ -1039,6 +1039,316 @@ struct ControlSessionRegistryTests {
             host: host)
         #expect(response.error?.code == "unsupported")
     }
+
+    // MARK: - Structured event stream (MAX-7)
+
+    private func makeGroupedSession(
+        _ registry: ControlSessionRegistry,
+        _ host: FakeControlSessionHost,
+        group: String
+    ) -> (id: String, surface: UUID) {
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", group: group)), host: host)
+        return (created.result!.session!.sessionID, surfaceID)
+    }
+
+    @Test func streamWatchReplaysFromCursorZeroIncludingCreated() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        #expect(messages.first?.type == "hello")
+        #expect(messages.first?.schema == controlStreamSchemaVersion)
+        #expect((messages.first?.cursor ?? 0) >= 1)
+        let events = messages.compactMap { $0.event }
+        // Create is a Maxx-owned mechanical fact on the stream with a cursor.
+        #expect(events.contains {
+            $0.name == "created" && $0.sourceKind == "maxx" && $0.sessionID == id
+                && $0.resourceKind == "session" && $0.cursor >= 1
+        })
+    }
+
+    @Test func streamWatchDefaultStreamsOnlyNewEvents() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        // No `--since`: the opening line carries only `hello` (no replay of the
+        // create event that happened before the watch began).
+        let (plan, messages) = try registry.beginStreamWatch(.init(), host: host)
+        #expect(messages.count == 1)
+        #expect(messages.first?.type == "hello")
+
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "ping")), host: host)
+        let update = registry.pollStreamWatch(plan, host: host)
+        #expect(update.messages.contains { $0.event?.name == "ping" && $0.event?.sourceKind == "agent" })
+    }
+
+    @Test func streamWatchFiltersByGroup() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let inGroup = makeGroupedSession(registry, host, group: "g1")
+        let other = makeGroupedSession(registry, host, group: "g2")
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0, group: "g1"), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(!events.isEmpty)
+        #expect(events.allSatisfy { $0.group == "g1" })
+        #expect(events.contains { $0.sessionID == inGroup.id })
+        #expect(!events.contains { $0.sessionID == other.id })
+    }
+
+    @Test func streamWatchFiltersBySession() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let a = makeSession(registry, host)
+        let b = makeSession(registry, host)
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: b.id, event: "noise")), host: host)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(id: a.id, since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.allSatisfy { $0.sessionID == a.id })
+        #expect(!events.contains { $0.sessionID == b.id })
+    }
+
+    @Test func streamWatchSinceResumesInOrderWithoutRetentionMiss() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)  // created = cursor 1
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "ping")), host: host)  // 2
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "pong")), host: host)  // 3
+
+        let (_, messages) = try registry.beginStreamWatch(.init(id: id, since: 1), host: host)
+        #expect(messages.first?.reset == nil)
+        let names = messages.compactMap { $0.event?.name }
+        #expect(names == ["ping", "pong"])
+    }
+
+    @Test func streamWatchReportsRetentionMiss() throws {
+        // A tiny bus so eviction is easy to force.
+        let registry = ControlSessionRegistry(maxBusEvents: 3)
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)  // created = cursor 1
+        for index in 0..<4 {  // cursors 2,3,4,5 -> bus retains 3,4,5
+            _ = registry.handle(
+                request(.sessionsEmitEvent, .init(id: id, event: "e\(index)")), host: host)
+        }
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 1), host: host)
+        #expect(messages.first?.type == "hello")
+        #expect(messages.first?.reset == true)
+        // Events up to and including cursor 2 were dropped to retention.
+        #expect(messages.first?.droppedThrough == 2)
+    }
+
+    @Test func streamWatchStaleForwardSinceResets() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)  // created = cursor 1, latest = 1
+        _ = id
+        // A cursor beyond anything this run assigned (e.g. resumed with a cursor
+        // from a previous app run) must not gate events forever: the stream flags
+        // a reset and replays what is retained instead of silently swallowing.
+        let (plan, messages) = try registry.beginStreamWatch(.init(since: 999), host: host)
+        #expect(messages.first?.reset == true)
+        #expect(messages.compactMap { $0.event }.contains { $0.name == "created" })
+        // And live events after the (small) latest cursor still stream.
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "after")), host: host)
+        let update = registry.pollStreamWatch(plan, host: host)
+        #expect(update.messages.contains { $0.event?.name == "after" })
+    }
+
+    @Test func reconcileEmitsExitedMechanicalEvent() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+        host.surfaces[surface]?.alive = false  // kernel-reported process exit
+
+        let (_, messages) = try registry.beginStreamWatch(.init(id: id, since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.contains { $0.name == "exited" && $0.sourceKind == "maxx" })
+    }
+
+    @Test func mechanicalEventsAreBusOnlyNotInPerSessionLog() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        _ = registry.handle(request(.sessionsAction, .init(id: id, action: "focus")), host: host)
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "ping")), host: host)
+
+        // The per-session audit log (MAX-2 contract) is unchanged: it holds only
+        // the agent-declared emit-event, not the bus-only create/focus events.
+        let response = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        let kinds = response.result?.events?.map(\.kind) ?? []
+        #expect(kinds == ["event"])
+    }
+
+    @Test func setGroupRecordsMembershipEventsAndUpdatesView() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let joined = registry.handle(
+            request(.sessionsSetGroup, .init(id: id, group: "release")), host: host)
+        #expect(joined.result?.session?.group == "release")
+
+        let left = registry.handle(request(.sessionsSetGroup, .init(id: id)), host: host)
+        #expect(left.result?.session?.group == nil)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.contains {
+            $0.name == "group.joined" && $0.group == "release" && $0.sourceKind == "maxx"
+        })
+        #expect(events.contains { $0.name == "group.left" && $0.group == "release" })
+    }
+
+    @Test func streamWaitForEventMatchesAcrossGroup() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let member = makeGroupedSession(registry, host, group: "g")
+
+        let plan = try registry.beginStreamWait(.init(event: "ready", group: "g"), host: host)
+        guard case .pending = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected pending before any matching event")
+            return
+        }
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: member.id, event: "ready")), host: host)
+        guard case let .matched(event, _) = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected matched after the event arrives")
+            return
+        }
+        #expect(event?.name == "ready")
+        #expect(event?.sourceKind == "agent")
+    }
+
+    @Test func streamWaitGroupAllExited() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let a = makeGroupedSession(registry, host, group: "g")
+        let b = makeGroupedSession(registry, host, group: "g")
+
+        let plan = try registry.beginStreamWait(.init(group: "g", all: "exited"), host: host)
+        guard case .pending = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected pending while both members run")
+            return
+        }
+        host.surfaces[a.surface]?.alive = false
+        guard case .pending = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected pending while one member still runs")
+            return
+        }
+        host.surfaces[b.surface]?.alive = false
+        guard case let .matched(_, sessions) = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected matched once all members exited")
+            return
+        }
+        #expect(sessions?.count == 2)
+    }
+
+    @Test func streamWaitGroupAllDeclared() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let a = makeGroupedSession(registry, host, group: "g")
+        let b = makeGroupedSession(registry, host, group: "g")
+
+        let plan = try registry.beginStreamWait(.init(group: "g", all: "declared:complete"), host: host)
+        _ = registry.handle(request(.sessionsSetState, .init(id: a.id, state: "complete")), host: host)
+        guard case .pending = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected pending until every member declares complete")
+            return
+        }
+        _ = registry.handle(request(.sessionsSetState, .init(id: b.id, state: "complete")), host: host)
+        guard case .matched = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected matched once all members declared complete")
+            return
+        }
+    }
+
+    @Test func streamWaitGroupAllIdle() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let a = makeGroupedSession(registry, host, group: "g")
+        _ = makeGroupedSession(registry, host, group: "g")
+
+        // No member declared `running`, so the group is idle straight away.
+        let idlePlan = try registry.beginStreamWait(.init(group: "g", all: "idle"), host: host)
+        guard case .matched = registry.pollStreamWait(idlePlan, host: host) else {
+            Issue.record("expected matched: no member is declared running")
+            return
+        }
+
+        // Declaring `running` on a member makes the group not-idle.
+        _ = registry.handle(request(.sessionsSetState, .init(id: a.id, state: "running")), host: host)
+        let busyPlan = try registry.beginStreamWait(.init(group: "g", all: "idle"), host: host)
+        guard case .pending = registry.pollStreamWait(busyPlan, host: host) else {
+            Issue.record("expected pending: a member is declared running")
+            return
+        }
+    }
+
+    @Test func streamWaitAllRequiresGroup() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        _ = makeSession(registry, host)
+        #expect(throws: ControlError.self) {
+            _ = try registry.beginStreamWait(.init(all: "exited"), host: host)
+        }
+    }
+
+    @Test func streamWaitEmptyGroupRejected() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        #expect(throws: ControlError.self) {
+            _ = try registry.beginStreamWait(.init(group: "nobody", all: "exited"), host: host)
+        }
+    }
+
+    @Test func streamWaitEventEndsWhenSessionTerminal() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let plan = try registry.beginStreamWait(.init(id: id, event: "never"), host: host)
+        _ = registry.handle(request(.sessionsArchive, .init(id: id)), host: host)
+        guard case .ended = registry.pollStreamWait(plan, host: host) else {
+            Issue.record("expected ended once the session is terminal")
+            return
+        }
+    }
+
+    @Test func streamWatchEndsWhenFilteredSessionTerminal() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        let (plan, _) = try registry.beginStreamWatch(.init(id: id), host: host)
+        _ = registry.handle(request(.sessionsArchive, .init(id: id)), host: host)
+        let update = registry.pollStreamWatch(plan, host: host)
+        #expect(update.ended)
+    }
+
+    @Test func streamEnforcesNoInferenceOwnershipBoundary() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        // With no agent declaration, every event on the stream is a Maxx-owned
+        // mechanical fact — Maxx never originates an `agent` event.
+        let (_, mechanical) = try registry.beginStreamWatch(.init(id: id, since: 0), host: host)
+        let before = mechanical.compactMap { $0.event }
+        #expect(!before.isEmpty)
+        #expect(before.allSatisfy { $0.sourceKind == "maxx" })
+
+        // Only an explicit declaration produces an `agent`-owned event.
+        _ = registry.handle(request(.sessionsEmitEvent, .init(id: id, event: "ci.passed")), host: host)
+        let (_, after) = try registry.beginStreamWatch(.init(id: id, since: 0), host: host)
+        let declared = after.compactMap { $0.event }.filter { $0.sourceKind == "agent" }
+        #expect(declared.contains { $0.name == "ci.passed" })
+    }
 }
 
 @MainActor

@@ -33,6 +33,15 @@ pub const Options = struct {
     }
 };
 
+/// The top-level command group. `sessions` is the per-session surface (MAX-1..3);
+/// `stream` is the cross-resource structured event stream and `event` the agent
+/// event-declaration shorthand (MAX-7).
+const Group = enum {
+    sessions,
+    stream,
+    event,
+};
+
 const Verb = enum {
     create,
     get,
@@ -52,10 +61,17 @@ const Verb = enum {
     // MAX-3 agent-declared workflow state verbs.
     @"set-state",
     @"set-summary",
+    // MAX-7 structured event stream verbs.
+    @"set-group",
+    emit,
 };
 
-/// A parsed `maxx +control sessions ...` invocation.
+/// A parsed `maxx +control <group> ...` invocation.
 const Command = struct {
+    /// The command group. Always set explicitly by `parseCommand`; defaulted to
+    /// `.sessions` so direct `Command{ .verb = … }` literals (e.g. in tests) stay
+    /// concise.
+    group: Group = .sessions,
     verb: Verb,
     id: ?[]const u8 = null,
     title: ?[]const u8 = null,
@@ -77,28 +93,44 @@ const Command = struct {
     reason: ?[]const u8 = null,
     signal: ?[]const u8 = null,
     summary: ?[]const u8 = null,
+    // MAX-7 structured event stream fields.
+    group_name: ?[]const u8 = null,
+    tab: ?[]const u8 = null,
+    all: ?[]const u8 = null,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
     metadata: std.ArrayList([2][]const u8) = .empty,
     env: std.ArrayList([]const u8) = .empty,
 
     fn method(self: Command) []const u8 {
-        return switch (self.verb) {
-            .create => "sessions.create",
-            .get => "sessions.get",
-            .list => "sessions.list",
-            .update => "sessions.update",
-            .cancel, .action => "sessions.action",
-            .wait => "sessions.wait",
-            .watch => "sessions.watch",
-            .archive => "sessions.archive",
-            .restart => "sessions.restart",
-            .events => "sessions.events",
-            .@"declare-state" => "sessions.declare-state",
-            .@"emit-event" => "sessions.emit-event",
-            .@"set-metadata" => "sessions.set-metadata",
-            .@"set-state" => "sessions.set-state",
-            .@"set-summary" => "sessions.set-summary",
+        return switch (self.group) {
+            .sessions => switch (self.verb) {
+                .create => "sessions.create",
+                .get => "sessions.get",
+                .list => "sessions.list",
+                .update => "sessions.update",
+                .cancel, .action => "sessions.action",
+                .wait => "sessions.wait",
+                .watch => "sessions.watch",
+                .archive => "sessions.archive",
+                .restart => "sessions.restart",
+                .events => "sessions.events",
+                .@"declare-state" => "sessions.declare-state",
+                .@"emit-event" => "sessions.emit-event",
+                .@"set-metadata" => "sessions.set-metadata",
+                .@"set-state" => "sessions.set-state",
+                .@"set-summary" => "sessions.set-summary",
+                .@"set-group" => "sessions.set-group",
+                .emit => unreachable,
+            },
+            // `stream watch`/`stream wait` are the cross-resource stream.
+            .stream => switch (self.verb) {
+                .watch => "stream.watch",
+                .wait => "stream.wait",
+                else => unreachable,
+            },
+            // `event emit` is shorthand for an agent event declaration.
+            .event => "sessions.emit-event",
         };
     }
 
@@ -184,6 +216,25 @@ const ParseError = error{
 ///     `failed`. An unknown value is rejected.
 ///   * `sessions set-summary <session_id> --summary <text> [--source <name>]`
 ///
+/// Structured event stream (MAX-7 — a cross-resource, cursor-addressed event
+/// bus for supervisor agents):
+///
+///   * `sessions set-group <session_id> --group <name>`: join (or, with an empty
+///     `--group`, leave) a coordination group. Membership changes are recorded
+///     as Maxx-owned mechanical events. `sessions create` also takes `--group`.
+///   * `stream watch [--session <id>] [--tab <surface_id>] [--group <name>]
+///     [--since <cursor>] [--timeout <dur>]`: stream the global event bus as
+///     newline-delimited JSON, filtered by resource and resumable from a cursor.
+///   * `stream wait [--session <id>|--tab <id>|--group <name>] --event <type>
+///     [--since <cursor>] [--timeout <dur>]`: block until a matching stream event
+///     arrives.
+///   * `stream wait --group <name> --all <idle|exited|declared:<state>>
+///     [--timeout <dur>]`: block until every member of a group satisfies the
+///     condition.
+///   * `event emit --session <id> --type <name> [--json <payload>]
+///     [--source <name>]`: shorthand for an agent event declaration (maps to
+///     `sessions emit-event`).
+///
 /// The create response includes a stable `session_id` to use for all later
 /// operations. The raw JSON response is printed to stdout. Exit codes are
 /// stable: 0 success/matched, 1 generic error, 2 `wait` timeout, 3 missing
@@ -210,14 +261,20 @@ pub fn run(alloc: Allocator) !u8 {
     const cmd = parseCommand(arena_alloc, &iter) catch |err| switch (err) {
         error.MissingGroup, error.MissingVerb => return Action.help_error,
         error.UnknownGroup => {
-            try stderr.print("error: expected 'sessions' subcommand group\n", .{});
+            try stderr.print(
+                "error: expected a 'sessions', 'stream', or 'event' subcommand group\n",
+                .{},
+            );
             return 1;
         },
         error.UnknownVerb => {
             try stderr.print(
-                "error: unknown subcommand. Try: create, get, list, update, cancel, action, " ++
-                    "wait, watch, archive, restart, events, declare-state, emit-event, set-metadata, " ++
-                    "set-state, set-summary\n",
+                "error: unknown subcommand.\n" ++
+                    "  sessions: create, get, list, update, cancel, action, wait, watch, " ++
+                    "archive, restart, events, declare-state, emit-event, set-metadata, " ++
+                    "set-state, set-summary, set-group\n" ++
+                    "  stream:   watch, wait\n" ++
+                    "  event:    emit\n",
                 .{},
             );
             return 1;
@@ -267,14 +324,13 @@ pub fn run(alloc: Allocator) !u8 {
     // `watch` streams many newline-delimited messages until the session ends or
     // the caller disconnects; print them as they arrive.
     if (cmd.verb == .watch) {
-        streamResponse(arena_alloc, socket_path, request) catch |err| {
+        return streamResponse(arena_alloc, socket_path, request) catch |err| {
             try stderr.print(
                 "error: could not reach Maxx control socket at {s}: {}\n",
                 .{ socket_path, err },
             );
             return 1;
         };
-        return 0;
     }
 
     // `wait` keeps its write side open so the server can detect a caller that
@@ -391,12 +447,12 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
         group = iter.next() orelse return error.MissingGroup;
     }
 
-    if (!std.mem.eql(u8, group, "sessions")) return error.UnknownGroup;
+    const parsed_group = parseGroup(group) orelse return error.UnknownGroup;
 
     const verb_str = iter.next() orelse return error.MissingVerb;
-    const verb = parseVerb(verb_str) orelse return error.UnknownVerb;
+    const verb = parseVerb(parsed_group, verb_str) orelse return error.UnknownVerb;
 
-    var cmd: Command = .{ .verb = verb };
+    var cmd: Command = .{ .group = parsed_group, .verb = verb };
     while (iter.next()) |raw_arg| {
         const arg: []const u8 = raw_arg;
         if (try flagValue(alloc, arg, iter, "--title")) |v| {
@@ -437,6 +493,23 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.signal = v;
         } else if (try flagValue(alloc, arg, iter, "--summary")) |v| {
             cmd.summary = v;
+        } else if (try flagValue(alloc, arg, iter, "--session")) |v| {
+            // `--session <id>` is the stream/event spelling of the target id.
+            cmd.id = v;
+        } else if (try flagValue(alloc, arg, iter, "--tab")) |v| {
+            cmd.tab = v;
+        } else if (try flagValue(alloc, arg, iter, "--group")) |v| {
+            cmd.group_name = v;
+        } else if (try flagValue(alloc, arg, iter, "--all")) |v| {
+            cmd.all = v;
+        } else if (try flagValue(alloc, arg, iter, "--type")) |v| {
+            // `event emit --type <name>` is the spelling of the event name.
+            cmd.event = v;
+        } else if (cmd.group == .event and cmd.verb == .emit and
+            (std.mem.eql(u8, arg, "--json") or std.mem.startsWith(u8, arg, "--json=")))
+        {
+            // `event emit --json '{...}'` carries the structured payload.
+            cmd.payload_json = (try flagValue(alloc, arg, iter, "--json")).?;
         } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
             cmd.timeout_ms = parseDurationMs(v) orelse return error.InvalidDuration;
         } else if (try flagValue(alloc, arg, iter, "--since")) |v| {
@@ -462,10 +535,47 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
     return cmd;
 }
 
-fn parseVerb(s: []const u8) ?Verb {
-    inline for (@typeInfo(Verb).@"enum".fields) |field| {
-        if (std.mem.eql(u8, s, field.name)) return @field(Verb, field.name);
+fn parseGroup(s: []const u8) ?Group {
+    inline for (@typeInfo(Group).@"enum".fields) |field| {
+        if (std.mem.eql(u8, s, field.name)) return @field(Group, field.name);
     }
+    return null;
+}
+
+/// Parse a verb, rejecting verbs that do not belong to the given group (so
+/// `stream create` or `event watch` are usage errors rather than silently
+/// mapped to the wrong method).
+fn parseVerb(group: Group, s: []const u8) ?Verb {
+    return switch (group) {
+        .sessions => sessionsVerb(s),
+        .stream => streamVerb(s),
+        .event => eventVerb(s),
+    };
+}
+
+fn sessionsVerb(s: []const u8) ?Verb {
+    const candidates = [_]Verb{
+        .create,         .get,             .list,
+        .update,         .cancel,          .action,
+        .wait,           .watch,           .archive,
+        .restart,        .events,          .@"declare-state",
+        .@"emit-event",  .@"set-metadata", .@"set-state",
+        .@"set-summary", .@"set-group",
+    };
+    inline for (candidates) |v| {
+        if (std.mem.eql(u8, s, @tagName(v))) return v;
+    }
+    return null;
+}
+
+fn streamVerb(s: []const u8) ?Verb {
+    if (std.mem.eql(u8, s, "watch")) return .watch;
+    if (std.mem.eql(u8, s, "wait")) return .wait;
+    return null;
+}
+
+fn eventVerb(s: []const u8) ?Verb {
+    if (std.mem.eql(u8, s, "emit")) return .emit;
     return null;
 }
 
@@ -580,6 +690,18 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
         try json.objectField("summary");
         try json.write(v);
     }
+    if (cmd.group_name) |v| {
+        try json.objectField("group");
+        try json.write(v);
+    }
+    if (cmd.tab) |v| {
+        try json.objectField("tab");
+        try json.write(v);
+    }
+    if (cmd.all) |v| {
+        try json.objectField("all");
+        try json.write(v);
+    }
     if (cmd.timeout_ms) |v| {
         try json.objectField("timeout_ms");
         try json.write(v);
@@ -656,8 +778,12 @@ fn sendRequest(
 /// straight to stdout until the connection closes. Used by `watch`; the write
 /// side stays open so the server keeps the stream alive until the session ends
 /// or we disconnect by closing the fd.
-fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !void {
-    _ = alloc;
+///
+/// Returns the process exit code: 0 for a normal stream, or the mapped error
+/// code when the server's *first* line is a single error response (e.g. a bad
+/// `--session`/`--tab` filter), so a `watch` honors the same documented exit
+/// codes as the single-shot verbs instead of always exiting 0.
+fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8) !u8 {
     if (socket_path.len >= 104) return error.PathTooLong;
 
     const fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
@@ -679,14 +805,47 @@ fn streamResponse(alloc: Allocator, socket_path: []const u8, request: []const u8
     var stdout_writer = std.fs.File.stdout().writer(&out_buf);
     const stdout = &stdout_writer.interface;
 
+    var first_line: std.ArrayList(u8) = .empty;
+    defer first_line.deinit(alloc);
+    var first_done = false;
+    var exit: u8 = 0;
+
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = c.read(fd, &buf, buf.len);
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
-        try stdout.writeAll(buf[0..@intCast(n)]);
+        const chunk = buf[0..@intCast(n)];
+        try stdout.writeAll(chunk);
         try stdout.flush();
+
+        // Accumulate the first line and, once complete, classify it: a stream
+        // carries `hello`/`event`/`end` (no `ok` field), whereas an error is a
+        // single `{"ok":false,...}` object we map to a stable exit code.
+        if (!first_done) {
+            for (chunk) |ch| {
+                if (ch == '\n') {
+                    first_done = true;
+                    break;
+                }
+                try first_line.append(alloc, ch);
+            }
+            if (first_done and isErrorResponse(alloc, first_line.items)) {
+                exit = exitCode(alloc, first_line.items, .watch);
+            }
+        }
     }
+    return exit;
+}
+
+/// True only when `line` is a JSON object carrying `"ok": false` (an error
+/// response), as opposed to a stream feed message (which has no `ok` field).
+fn isErrorResponse(alloc: Allocator, line: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const ok = parsed.value.object.get("ok") orelse return false;
+    return ok == .bool and !ok.bool;
 }
 
 fn writeAll(fd: c_int, bytes: []const u8) !void {
@@ -982,6 +1141,150 @@ test "buildRequest wait includes timeout_ms and lifecycle" {
     try testing.expectEqualStrings("exited", params.get("lifecycle").?.string);
     try testing.expectEqual(@as(i64, 1500), params.get("timeout_ms").?.integer);
     try testing.expectEqual(@as(i64, 3), params.get("since").?.integer);
+}
+
+test "parseCommand stream watch with filters and since" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "stream watch --group release --tab TAB-1 --since 7 --json",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .stream);
+    try testing.expect(cmd.verb == .watch);
+    try testing.expectEqualStrings("release", cmd.group_name.?);
+    try testing.expectEqualStrings("TAB-1", cmd.tab.?);
+    try testing.expectEqual(@as(i64, 7), cmd.since.?);
+    try testing.expectEqualStrings("stream.watch", cmd.method());
+}
+
+test "parseCommand stream wait group --all" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "stream wait --group release --all declared:complete --timeout 5m",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .stream);
+    try testing.expect(cmd.verb == .wait);
+    try testing.expectEqualStrings("release", cmd.group_name.?);
+    try testing.expectEqualStrings("declared:complete", cmd.all.?);
+    try testing.expectEqual(@as(u64, 300_000), cmd.timeout_ms.?);
+    try testing.expectEqualStrings("stream.wait", cmd.method());
+}
+
+test "buildRequest stream watch carries filters and since" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .group = .stream,
+        .verb = .watch,
+        .group_name = "release",
+        .since = 12,
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("stream.watch", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("release", params.get("group").?.string);
+    try testing.expectEqual(@as(i64, 12), params.get("since").?.integer);
+}
+
+test "parseCommand event emit maps to sessions.emit-event" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Use a quote-free payload: the test-only ArgIteratorGeneral strips double
+    // quotes, but a real shell passes the JSON through to argv verbatim.
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "event emit --session ID-1 --type declared.status --json [1,2,3]",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .event);
+    try testing.expect(cmd.verb == .emit);
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("declared.status", cmd.event.?);
+    try testing.expectEqualStrings("[1,2,3]", cmd.payload_json.?);
+    try testing.expectEqualStrings("sessions.emit-event", cmd.method());
+}
+
+test "buildRequest event emit carries event and payload" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .group = .event,
+        .verb = .emit,
+        .id = "ID-1",
+        .event = "declared.status",
+        .payload_json = "{\"step\":3}",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.emit-event", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("declared.status", params.get("event").?.string);
+    try testing.expectEqualStrings("{\"step\":3}", params.get("payload_json").?.string);
+}
+
+test "parseCommand set-group with group flag" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions set-group ID-1 --group release",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .sessions);
+    try testing.expect(cmd.verb == .@"set-group");
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("release", cmd.group_name.?);
+    try testing.expectEqualStrings("sessions.set-group", cmd.method());
+}
+
+test "parseVerb rejects cross-group verbs" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // `stream create` is not a valid stream verb.
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "stream create");
+    defer iter.deinit();
+    try testing.expectError(error.UnknownVerb, parseCommand(alloc, &iter));
 }
 
 test "exitCode maps wait outcomes and error codes" {

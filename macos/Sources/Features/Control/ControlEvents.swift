@@ -30,6 +30,26 @@ enum ControlEventKind: String, Codable {
     case summary
     /// Maxx recorded a runtime lifecycle action it performed (archive/restart).
     case lifecycle
+
+    /// Who owns this fact. Maxx-owned mechanical runtime facts (`lifecycle`)
+    /// versus agent-declared semantic facts (everything else). This is the
+    /// load-bearing ownership boundary the global event stream exposes as
+    /// `source_kind` so a supervisor never has to guess whether Maxx originated a
+    /// fact or merely recorded an agent's declaration.
+    var sourceKind: ControlSourceKind {
+        switch self {
+        case .lifecycle: return .maxx
+        case .state, .event, .metadata, .workflowState, .summary: return .agent
+        }
+    }
+}
+
+/// Ownership of an event in the structured stream: a Maxx-owned mechanical
+/// runtime fact, or a fact an agent declared. Kept explicit in the envelope so
+/// supervisors can trust the boundary without inspecting the event name.
+enum ControlSourceKind: String, Codable {
+    case maxx
+    case agent
 }
 
 /// A single append-only entry in a session's audit log.
@@ -89,6 +109,117 @@ struct ControlStreamMessage: Codable {
     var event: ControlEventView?
     /// Present for `lifecycle` and `end` messages.
     var lifecycle: String?
+}
+
+// MARK: - Structured event stream (MAX-7)
+
+/// One entry in the registry's append-only, bounded global event bus.
+///
+/// The bus is the cross-resource view of everything that happens to API-created
+/// sessions, carrying a process-wide monotonic ``cursor`` so a supervisor can
+/// stream, filter, and resume from a known point regardless of which session an
+/// event belongs to. It is a superset of the per-session audit logs: every
+/// per-session audit entry is mirrored here, and Maxx-owned mechanical events
+/// that have no per-session audit entry (create/focus/close/process-exit/group
+/// membership) are recorded here only — so the per-session contract is unchanged.
+///
+/// Internal value type; the wire form is ``ControlStreamEventView``.
+struct ControlBusEvent {
+    /// Process-wide monotonically increasing cursor, starting at 1. Stable for
+    /// the life of the run; survives session restarts and is never reused.
+    let cursor: Int
+    let kind: ControlEventKind
+    let name: String
+    let source: String
+    let sourceKind: ControlSourceKind
+    let message: String?
+    let payload: ControlJSONValue?
+    let createdAt: Date
+    let sessionID: UUID
+    let surfaceID: UUID
+    /// The group this event pertains to (the session's current group for most
+    /// events; the affected group for `group.joined`/`group.left`). nil when the
+    /// session is not in a group.
+    let group: String?
+    let pid: Int?
+    /// The per-session audit sequence when this event also exists in a session's
+    /// audit log; nil for bus-only mechanical events.
+    let seq: Int?
+}
+
+/// The schema-versioned wire envelope emitted by the global event stream
+/// (`stream.watch` / `stream.wait`).
+///
+/// A deliberate superset of ``ControlEventView`` so supervisors get a stable,
+/// correlatable record with a global cursor and an explicit ownership tag. New
+/// fields are additive and optional; metadata-specific event fields are
+/// intentionally deferred to MAX-4 so this envelope stays workflow-neutral.
+struct ControlStreamEventView: Codable, Equatable {
+    /// Envelope schema version. Bumped only on an incompatible change so a
+    /// supervisor can pin the contract it understands.
+    var schema: Int
+    /// Process-wide monotonic cursor. Pass back as `--since` to resume.
+    var cursor: Int
+    /// Per-session audit sequence, when this event is also in a session's audit
+    /// log; omitted for bus-only mechanical events.
+    var seq: Int?
+    /// `maxx` for mechanical runtime facts Maxx owns; `agent` for declared facts.
+    var sourceKind: String
+    var kind: String
+    var name: String
+    var source: String
+    var message: String?
+    var payload: ControlJSONValue?
+    var createdAt: String
+    /// The kind of resource this event is about. Currently always `session`;
+    /// reserved so future tab-/group-scoped events stay additive.
+    var resourceKind: String
+    var sessionID: String
+    var surfaceID: String
+    /// Group this event pertains to, if any.
+    var group: String?
+    var pid: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case schema, cursor, seq
+        case sourceKind = "source_kind"
+        case kind, name, source, message, payload
+        case createdAt = "created_at"
+        case resourceKind = "resource_kind"
+        case sessionID = "session_id"
+        case surfaceID = "surface_id"
+        case group, pid
+    }
+}
+
+/// The schema version of ``ControlStreamEventView``.
+let controlStreamSchemaVersion = 1
+
+/// A single newline-delimited message in a `stream.watch` stream. Distinct from
+/// the per-session ``ControlStreamMessage`` because the global stream is
+/// event-centric and cursor-aware.
+struct ControlStreamFeedMessage: Codable {
+    /// `hello` (opening line: current cursor + retention window), `event` (one
+    /// bus event), or `end` (the stream is closing).
+    var type: String
+    /// Present on `hello`: the latest global cursor at stream start, so a
+    /// consumer that passed no `--since` can resume from here later.
+    var cursor: Int?
+    /// Present on `hello`: the envelope schema version.
+    var schema: Int?
+    /// Present on `hello` when a requested `--since` fell outside the retained
+    /// window: the stream resumes from the oldest retained event and the events
+    /// up to and including `dropped_through` were lost to retention.
+    var reset: Bool?
+    var droppedThrough: Int?
+    /// Present on `event`.
+    var event: ControlStreamEventView?
+
+    enum CodingKeys: String, CodingKey {
+        case type, cursor, schema, reset
+        case droppedThrough = "dropped_through"
+        case event
+    }
 }
 
 /// A minimal JSON value, so `emit-event --payload-json` round-trips arbitrary
