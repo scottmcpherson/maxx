@@ -88,11 +88,17 @@ that still reports the same id — is suppressed instead of launching twice.
   is unsuitable.
 
 Only a **successful** launch is recorded as seen, so a transient failure (a denied
-policy, an unreachable socket) can be retried. The store is bounded by both count
-(oldest records dropped past a cap) and age (records past ~30 days are pruned
-before each save), written `0600` and atomically (per-process temp + rename),
-leaves a newer-schema file untouched (fail-open, no clobber), and recovers from a
-corrupt file by starting empty.
+policy, an unreachable socket) can be retried. The store is bounded on the write
+side as well as the read side — by count (oldest records dropped past a cap), by
+age (records past ~30 days pruned before each save), and by size (per-field length
+caps keep each record small, and `save` refuses to write a file that would exceed
+the read cap rather than persist one the next run would reject). It is written
+`0600` and atomically (per-process temp + rename), leaves a newer-schema file
+untouched (fail-open, no clobber), and recovers from a corrupt file by starting
+empty. If the seen-marker cannot be persisted (unwritable directory, disk full, or
+the size backstop), the run reports an `error_code` and exits non-zero — the tab
+launched, but a retry could duplicate it, so the operator is not falsely told the
+event was recorded.
 
 A given `--state-file` is meant to be driven by **one runner at a time** (the
 usual model: one poll loop or one webhook relay per trigger). Atomic writes mean

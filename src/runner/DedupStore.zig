@@ -46,12 +46,24 @@ const log = std.log.scoped(.runner_dedup);
 /// Current on-disk schema version.
 pub const version_current: u32 = 1;
 
-/// Largest state file we will read. Each record is well under 512 bytes; this
-/// bounds even a maximally full file with comfortable headroom.
-pub const max_file_bytes: usize = 4 * 1024 * 1024;
+/// Largest state file we will read *and* write. The write path is bounded by
+/// this too: with the per-field caps and the count cap below, a maximally full
+/// file stays well under it, and `save` refuses to write a file that would exceed
+/// it (so we never persist a file the next run would reject as oversized).
+pub const max_file_bytes: usize = 8 * 1024 * 1024;
 
 /// Hard cap on retained records. Oldest are dropped first on overflow.
 pub const default_max_entries: usize = 4000;
+
+/// Per-field length caps applied at insert time. They keep each record small so
+/// the count cap (`default_max_entries`) also bounds the *serialized* size:
+/// 4000 × (512 + 256 + 128 + 20 + JSON overhead) stays comfortably under
+/// `max_file_bytes`. An event id / `--dedup-key` longer than `max_key_len` is an
+/// abuse/edge case the store refuses to record (visibly), rather than letting it
+/// grow the file past the read cap and silently lose all suppression.
+pub const max_key_len: usize = 512;
+pub const max_trigger_len: usize = 256;
+pub const max_source_len: usize = 128;
 
 /// Default age (seconds) past which the runner prunes records before saving, so
 /// the file is bounded by time as well as count. The runner computes a cutoff
@@ -72,6 +84,8 @@ arena: std.heap.ArenaAllocator,
 path: []const u8,
 entries: std.ArrayListUnmanaged(Entry) = .empty,
 max_entries: usize = default_max_entries,
+/// Read/write size cap (defaults to `max_file_bytes`; overridable for tests).
+max_bytes: usize = max_file_bytes,
 /// False when a newer-schema file is present: we neither trust its contents nor
 /// overwrite it. Suppression is disabled (fail-open) until the file is gone.
 writable: bool = true,
@@ -122,14 +136,14 @@ fn load(self: *DedupStore) LoadError!void {
     defer file.close();
 
     const stat = try file.stat();
-    if (stat.size > max_file_bytes) {
+    if (stat.size > self.max_bytes) {
         log.warn("dedup state file {s} is {d} bytes (> {d}); ignoring", .{
-            self.path, stat.size, max_file_bytes,
+            self.path, stat.size, self.max_bytes,
         });
         return error.TooLarge;
     }
 
-    const bytes = try file.readToEndAlloc(a, max_file_bytes);
+    const bytes = try file.readToEndAlloc(a, self.max_bytes);
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch
         return error.Malformed;
     if (parsed != .object) return error.Malformed;
@@ -190,16 +204,31 @@ pub fn seen(self: *const DedupStore, trigger: []const u8, source: []const u8, ke
     return false;
 }
 
+pub const MarkError = error{
+    /// A field exceeded its per-field length cap. Refused rather than recorded so
+    /// a pathological event id / dedup key cannot grow the file past the read cap
+    /// and silently disable all suppression.
+    FieldTooLong,
+} || Allocator.Error;
+
 /// Record `(trigger, source, key)` as fired at `at`. No-op if already present
-/// (idempotent — a retry never refreshes recency or grows the file). Enforces
-/// the count bound. Marks the store dirty so `save` persists it.
+/// (idempotent — a retry never refreshes recency or grows the file). Rejects
+/// over-long fields, enforces the count bound, and marks the store dirty so
+/// `save` persists it.
 pub fn markSeen(
     self: *DedupStore,
     trigger: []const u8,
     source: []const u8,
     key: []const u8,
     at: []const u8,
-) Allocator.Error!void {
+) MarkError!void {
+    if (trigger.len > max_trigger_len or source.len > max_source_len or key.len > max_key_len) {
+        log.warn(
+            "refusing dedup record with over-long field (trigger {d}/{d}, source {d}/{d}, key {d}/{d})",
+            .{ trigger.len, max_trigger_len, source.len, max_source_len, key.len, max_key_len },
+        );
+        return error.FieldTooLong;
+    }
     if (self.seen(trigger, source, key)) return;
     const a = self.arena.allocator();
     try self.entries.append(a, .{
@@ -279,17 +308,33 @@ pub fn serialize(self: *const DedupStore, alloc: Allocator) Allocator.Error![]u8
 pub const SaveError = error{
     /// A newer-schema file is present; saving would clobber it.
     ReadOnly,
+    /// The serialized state would exceed `max_bytes` — i.e. the next run would
+    /// reject it as oversized. Refused so we never persist an unreadable file;
+    /// the previous good file is left intact. With the per-field and count caps
+    /// this is a backstop that should not trigger in normal operation.
+    TooLarge,
 } || Allocator.Error || std.fs.File.OpenError || std.fs.File.WriteError || std.posix.RenameError;
 
-/// Atomically persist the store. Writes `<path>.tmp` 0600 then renames it over
-/// `path`, so a failure leaves the previous good file intact. A no-op when the
-/// store is not dirty. Refuses to write when a newer-schema file is present.
+/// Atomically persist the store. Writes `<path>.tmp.<pid>` 0600 then renames it
+/// over `path`, so a failure leaves the previous good file intact. A no-op when
+/// the store is not dirty. Refuses to write when a newer-schema file is present
+/// or when the serialized state would exceed the read cap.
 pub fn save(self: *DedupStore) SaveError!void {
     if (!self.writable) return error.ReadOnly;
     if (!self.dirty) return;
 
     const a = self.arena.allocator();
     const bytes = try self.serialize(a);
+
+    // Never persist a file the next run would reject as oversized. The per-field
+    // caps and count cap keep us well under this in practice; this is the hard
+    // backstop, checked before we touch the filesystem so the prior file stands.
+    if (bytes.len > self.max_bytes) {
+        log.warn("refusing to write {d}-byte dedup state to {s} (> {d})", .{
+            bytes.len, self.path, self.max_bytes,
+        });
+        return error.TooLarge;
+    }
 
     // Use a per-process temp name so two runners writing the same state file do
     // not corrupt each other's temp before the rename. The final rename is still
@@ -471,4 +516,48 @@ test "oversized file is refused and loads empty" {
     defer store.deinit();
     try testing.expectEqual(@as(usize, 0), store.count());
     try testing.expect(store.writable);
+}
+
+test "markSeen refuses an over-long key instead of growing unbounded" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "long.json");
+
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+
+    const huge = try arena.alloc(u8, max_key_len + 1);
+    @memset(huge, 'k');
+    try testing.expectError(error.FieldTooLong, store.markSeen("t", "s", huge, "2026-06-15T00:00:00Z"));
+    // Nothing recorded, store stays clean (no dirty write of a bloated record).
+    try testing.expectEqual(@as(usize, 0), store.count());
+    try testing.expect(!store.dirty);
+    // A normal-length key still records fine.
+    try store.markSeen("t", "s", "ok-key", "2026-06-15T00:00:00Z");
+    try testing.expect(store.seen("t", "s", "ok-key"));
+}
+
+test "save refuses to write a file larger than the read cap" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpDirPath(arena, &td, "cap.json");
+
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+    // Tighten the cap so a couple of records exceed it (the production default is
+    // far larger than any record the per-field caps allow).
+    store.max_bytes = 64;
+    try store.markSeen("trigger", "source", "key-one", "2026-06-15T00:00:00Z");
+    try store.markSeen("trigger", "source", "key-two", "2026-06-15T00:00:01Z");
+    // The serialized state exceeds 64 bytes, so save refuses and leaves no file.
+    try testing.expectError(error.TooLarge, store.save());
+    try testing.expectError(error.FileNotFound, td.dir.access("cap.json", .{}));
 }

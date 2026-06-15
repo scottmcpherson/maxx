@@ -319,7 +319,7 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
     var sock = SocketSender{ .socket_path = socket_path };
 
     const trigger_name = cmd.trigger orelse source;
-    const rec = try runner.dispatch(alloc, .{
+    var rec = try runner.dispatch(alloc, .{
         .trigger = trigger_name,
         .trigger_type = trigger_type,
         .event = event,
@@ -344,8 +344,21 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
                 s.pruneOlderThan(runner.epochToIso(&buf, @intCast(cutoff_s)));
             }
             s.save() catch |err| switch (err) {
-                error.ReadOnly => {}, // newer-schema file present; intentionally not overwritten
-                else => log.warn("could not persist dedup state to {s}: {}", .{ state_path, err }),
+                // A newer-schema file present means suppression is intentionally
+                // fail-open and we must not clobber it — not an error to report.
+                error.ReadOnly => {},
+                // Any other save failure means the seen-marker was NOT persisted:
+                // this one-shot runner is about to exit, so a retry/redelivery
+                // would launch another visible tab. Surface it on the record and
+                // exit non-zero so the operator is not falsely told it was
+                // recorded. (Only set if a delivery error was not already noted.)
+                else => {
+                    if (rec.error_code == null) {
+                        rec.error_code = "dedup_save_failed";
+                        rec.error_message = @errorName(err);
+                    }
+                    log.warn("could not persist dedup state to {s}: {}", .{ state_path, err });
+                },
             };
         }
         // Sweep prompt temp files left by previous `.file`-delivery runs.
