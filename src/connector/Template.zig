@@ -113,6 +113,17 @@ pub const LaunchRequest = struct {
         /// control server REJECTS a request with no token before dispatch, so a
         /// runner MUST supply one — this serializer does not fabricate it.
         token: ?[]const u8 = null,
+        /// Additional environment entries appended after the resolved `env`. The
+        /// runner uses this for explicit, runner-owned variables it must inject at
+        /// create time — e.g. `MAXX_CONNECTOR_PROMPT_FILE` for `.file` prompt
+        /// delivery. These are copied verbatim, never derived; the connector layer
+        /// attaches no meaning to them.
+        extra_env: []const Pair = &.{},
+        /// Additional metadata pairs merged into the resolved provenance metadata.
+        /// The runner uses this for its own explicit provenance keys (the trigger
+        /// name, trigger type, received timestamp). Like `extra_env`, these are
+        /// explicit caller-supplied values copied verbatim — never inferred.
+        extra_metadata: []const Pair = &.{},
     };
 
     /// Render the `sessions.create` control request this launch corresponds to,
@@ -170,10 +181,15 @@ pub const LaunchRequest = struct {
             try json.write(c);
         }
 
-        if (self.env.len > 0) {
+        if (self.env.len + opts.extra_env.len > 0) {
             try json.objectField("env");
             try json.beginArray();
             for (self.env) |e| {
+                const joined = try std.fmt.allocPrint(alloc, "{s}={s}", .{ e.key, e.value });
+                defer alloc.free(joined);
+                try json.write(joined);
+            }
+            for (opts.extra_env) |e| {
                 const joined = try std.fmt.allocPrint(alloc, "{s}={s}", .{ e.key, e.value });
                 defer alloc.free(joined);
                 try json.write(joined);
@@ -184,6 +200,10 @@ pub const LaunchRequest = struct {
         try json.objectField("metadata");
         try json.beginObject();
         for (self.metadata) |m| {
+            try json.objectField(m.key);
+            try json.write(m.value);
+        }
+        for (opts.extra_metadata) |m| {
             try json.objectField(m.key);
             try json.write(m.value);
         }
@@ -522,6 +542,40 @@ test "writeControlRequest emits a sessions.create request" {
         try testing.expect(params.get("caller") == null);
         try testing.expect(params.get("group") == null);
     }
+}
+
+test "writeControlRequest merges extra_env and extra_metadata" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ev: TriggerEvent = .{ .source = "linear", .id = "evt-1", .type = "Issue", .title = "T" };
+    const req = try resolve(alloc, .{
+        .command = "claude",
+        .env = &.{.{ .key = "CONFIGURED", .value = "1" }},
+    }, ev, .{ .launched_at = "2026-06-15T00:00:00Z" });
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try req.writeControlRequest(alloc, &json, .{
+        .token = "tok",
+        .extra_env = &.{.{ .key = "MAXX_CONNECTOR_PROMPT_FILE", .value = "/tmp/p.txt" }},
+        .extra_metadata = &.{.{ .key = "runner.trigger", .value = "linear-issues" }},
+    });
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+    const params = parsed.object.get("params").?.object;
+
+    // The resolved env comes first, the runner's extra env after it.
+    const env = params.get("env").?.array;
+    try testing.expectEqual(@as(usize, 2), env.items.len);
+    try testing.expectEqualStrings("CONFIGURED=1", env.items[0].string);
+    try testing.expectEqualStrings("MAXX_CONNECTOR_PROMPT_FILE=/tmp/p.txt", env.items[1].string);
+
+    // Connector provenance plus the runner's explicit metadata key.
+    const meta = params.get("metadata").?.object;
+    try testing.expectEqualStrings("linear", meta.get("connector").?.string);
+    try testing.expectEqualStrings("linear-issues", meta.get("runner.trigger").?.string);
 }
 
 test "resolve carries caller and templated group" {

@@ -132,6 +132,13 @@ fields`) — connector payloads stuffed with bait (branch, head ref, labels,
   metadata, caller, group, or the emitted `sessions.create` request; only
   explicitly copied fields and templated group values from explicit event fields
   appear.
+- `src/runner/runner.zig` (`no-inference: only explicit fields and reserved
+  provenance reach the request`) — the automation trigger runner dispatches a
+  payload stuffed with bait and asserts none of it reaches the `sessions.create`
+  it sends; the runner's own provenance is limited to reserved, explicit
+  `runner.*` keys. A polling trigger fires only on its configured exit-code
+  contract and forwards the check's stdout as an opaque payload — it never reads
+  the output to decide meaning (`src/runner/poll.zig`).
 - `macos/Tests/Control/ControlSessionPersistenceTests.swift`
   (`rehydrationNeverInfersUndeclaredSemanticFields`) — a persisted record whose
   mechanical fields (command `git commit -m done …`, cwd `/repo/feature-complete`,
