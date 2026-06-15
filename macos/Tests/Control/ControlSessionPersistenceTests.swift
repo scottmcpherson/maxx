@@ -717,6 +717,35 @@ struct ControlSessionPersistenceTests {
         #expect(updated?.updatedAt == createdUpdatedAt)
     }
 
+    @Test func metadataUpdateThatChangesNothingDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(
+            request(.sessionsCreate, .init(metadata: ["k": .string("v")])), host: host)
+        let sid = created.result?.session?.sessionID
+        let createdUpdatedAt = created.result?.session?.updatedAt
+
+        // An empty metadata map merges to no change → no bump, no rewrite.
+        clock.now = clock.now.addingTimeInterval(60)
+        let emptied = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, metadata: [:])), host: host).result?.session
+        #expect(emptied?.updatedAt == createdUpdatedAt)
+
+        // Re-declaring the SAME value also changes nothing → no bump.
+        clock.now = clock.now.addingTimeInterval(60)
+        let redeclared = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, metadata: ["k": .string("v")])),
+            host: host).result?.session
+        #expect(redeclared?.updatedAt == createdUpdatedAt)
+
+        // A real change DOES bump.
+        clock.now = clock.now.addingTimeInterval(60)
+        let changed = registry.handle(
+            request(.sessionsUpdate, .init(id: sid, metadata: ["k": .string("v2")])),
+            host: host).result?.session
+        #expect(changed?.updatedAt != createdUpdatedAt)
+    }
+
     @Test func archivedRecordIsNotRefreshedByRestartReconcile() {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

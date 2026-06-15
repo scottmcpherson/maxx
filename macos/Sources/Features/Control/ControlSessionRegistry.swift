@@ -634,21 +634,29 @@ final class ControlSessionRegistry {
             let validated = try ControlValidation.validateMetadata(metadata)
             var merged = session.metadata
             merged.merge(validated) { _, new in new }
-            session.metadata = try ControlValidation.validateMetadata(merged)
-            metadataChanged = true
-            changed = true
+            let normalized = try ControlValidation.validateMetadata(merged)
+            // Only a real change counts. An empty (`metadata: {}`) or value-identical
+            // merge changes nothing, so it must not bump `updated_at`, rewrite the
+            // registry, re-push the map, or emit audit events — that would refresh
+            // retention recency for a closed/restored record and break the no-op
+            // invariant. Treat it like an update carrying no metadata at all.
+            if normalized != session.metadata {
+                session.metadata = normalized
+                metadataChanged = true
+                changed = true
 
-            // Audit each provided key the same way `set-metadata` does, so a
-            // `watch`/`events` consumer observes update-driven metadata changes.
-            // `update` is a documented metadata-merge path; it must not be a
-            // silent, unobservable mutation.
-            let source = try ControlValidation.validateSource(params?.source)
-            let at = now()
-            let pid = liveSurface(of: session, host: host)?.pid
-            for key in validated.keys.sorted() {
-                record(
-                    &session,
-                    kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+                // Audit each provided key the same way `set-metadata` does, so a
+                // `watch`/`events` consumer observes update-driven metadata changes.
+                // `update` is a documented metadata-merge path; it must not be a
+                // silent, unobservable mutation.
+                let source = try ControlValidation.validateSource(params?.source)
+                let at = now()
+                let pid = liveSurface(of: session, host: host)?.pid
+                for key in validated.keys.sorted() {
+                    record(
+                        &session,
+                        kind: .metadata, name: key, source: source, createdAt: at, pid: pid)
+                }
             }
         }
 
