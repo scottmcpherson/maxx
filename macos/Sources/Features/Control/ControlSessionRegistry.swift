@@ -79,10 +79,21 @@ final class ControlSessionRegistry {
     // MARK: Persistence (MAX-5)
 
     /// Durable backing store, or nil for a purely in-memory registry. When set,
-    /// the registry rehydrates from it on init and writes the full session set
-    /// back on every mutation (and an explicit ``flush``). Injected so tests can
-    /// point it at a temp file (or omit it entirely).
+    /// the registry is rehydrated from it by its owner after the control directory
+    /// is validated, and writes the full session set back on every mutation (and an
+    /// explicit ``flush``). Injected so tests can point it at a temp file (or omit
+    /// it entirely).
     private let store: ControlSessionStore?
+
+    /// Whether writing to the store is permitted yet. The store lives in the
+    /// world-writable control directory, which the owner (``ControlServer``) must
+    /// validate before the registry touches it. Reads are gated by ``rehydrate``
+    /// being the sole reader; writes are gated by this flag, set when ``rehydrate``
+    /// runs (i.e. after `prepareDirectory()` secured the directory). Until then
+    /// ``persist`` is a no-op, so a ``flush`` on a startup that never validated the
+    /// directory cannot write a snapshot into — or clobber a registry in — an
+    /// unvalidated directory.
+    private var persistenceEnabled = false
 
     /// True once a write would clobber an existing registry file written by a
     /// newer build (an unsupported schema version). Set at rehydrate; while set,
@@ -171,6 +182,9 @@ final class ControlSessionRegistry {
     /// infers anything: each field is the verbatim persisted value.
     func rehydrate() {
         guard let store else { return }
+        // The owner validated the control directory before calling us, so the store
+        // is now safe to write as well as read.
+        persistenceEnabled = true
         let result = store.loadResult(now: now())
         // A newer build's file must not be overwritten by this (older) run.
         persistenceSuspended = result.preserveExistingFile
@@ -185,10 +199,11 @@ final class ControlSessionRegistry {
 
     /// Persist the current session set, if a store is configured. Called from the
     /// single mutation choke point (``store(_:)``), on observed lifecycle
-    /// transitions, and from ``flush``. A no-op without a store, or while
-    /// persistence is suspended to preserve a newer build's registry file.
+    /// transitions, and from ``flush``. A no-op without a store, before
+    /// ``rehydrate`` has enabled persistence (the directory is not yet validated),
+    /// or while persistence is suspended to preserve a newer build's registry file.
     private func persist() {
-        guard !persistenceSuspended else { return }
+        guard persistenceEnabled, !persistenceSuspended else { return }
         store?.save(Array(sessions.values), now: now())
     }
 
@@ -211,7 +226,11 @@ final class ControlSessionRegistry {
 
     /// Flush the current state to disk (e.g. on app termination), capturing the
     /// latest `lastSeenAt` values reconciliation has observed in memory. Safe to
-    /// call repeatedly; a no-op without a store.
+    /// call repeatedly; a no-op without a store, and — crucially — a no-op until
+    /// ``rehydrate`` has run. So a flush on app termination after a startup that
+    /// failed to validate the control directory (``ControlServer/start`` swallows
+    /// that failure, yet the app still retains the server) cannot write a snapshot
+    /// into, or clobber a registry in, the directory startup refused.
     func flush() {
         persist()
     }

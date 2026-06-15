@@ -376,6 +376,26 @@ struct ControlSessionPersistenceTests {
         #expect(registry.count == 1)  // Now, and only now, the file is read.
     }
 
+    @Test func flushBeforeRehydrationDoesNotClobberExistingRegistry() {
+        // Security ordering (MAX-5): if startup never validated the control
+        // directory, rehydrate() is never called and the registry stays empty. A
+        // flush on app termination must then be a no-op — writing the empty
+        // in-memory set would clobber an existing registry and bypass the directory
+        // safety check by writing into the very directory startup refused.
+        let url = tempStoreURL()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = ControlSessionStore(fileURL: url)
+        // A legitimate registry left by a prior, validated run.
+        store.save([makeSession(at: now)], now: now)
+
+        // Owner never called rehydrate() (e.g. prepareDirectory rejected the dir).
+        let registry = ControlSessionRegistry(now: { now }, store: store)
+        registry.flush()
+
+        // The existing file is intact, not overwritten with the empty set.
+        #expect(store.load(now: now).count == 1)
+    }
+
     // MARK: - Agent type declaration
 
     @Test func setAgentTypeUpdatesAndPersists() {

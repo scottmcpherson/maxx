@@ -595,7 +595,10 @@ check that gates the token and socket. The registry is loaded after that check,
 never in a constructor that runs before it, so a file another local user planted
 in an insecure directory is never decoded. The read is also size-capped (16 MiB,
 far above any retention-bounded registry) so a corrupt or oversized file is
-skipped rather than slurped whole at launch.
+skipped rather than slurped whole at launch. Writes are gated symmetrically: the
+registry persists nothing until that post-validation load has run, so a flush on
+a startup that refused the directory (an insecure/symlinked `MAXX_CONTROL_DIR`)
+cannot write a snapshot into — or clobber a registry in — the refused directory.
 
 **Restart rehydration.** On launch the registry loads its records. A restored
 record is **detached** from any live surface: it reads as `closed` with no `pid`

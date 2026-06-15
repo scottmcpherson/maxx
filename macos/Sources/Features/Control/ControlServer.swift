@@ -67,6 +67,11 @@ final class ControlServer {
     /// registry already persists on every mutation, so this is a best-effort
     /// final write. Must be called on the main thread (the registry is main-actor
     /// isolated), which app termination handlers are.
+    ///
+    /// Safe to call even if `start()` failed: the registry only persists once
+    /// ``ControlSessionRegistry/rehydrate`` has run, which `startThrowing()` does
+    /// only after `prepareDirectory()` validates the control directory. So a flush
+    /// after a refused/insecure directory writes nothing.
     func flush() {
         MainActor.assumeIsolated { registry.flush() }
     }
