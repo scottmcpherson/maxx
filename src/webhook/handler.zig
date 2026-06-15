@@ -457,8 +457,10 @@ test "valid hmac request launches the configured command" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    // The command is static (placeholders are forbidden there); the title
+    // templates from an explicit field so we still exercise substitution.
     const cfg = try cfgWith(alloc,
-        \\{"path":"/hooks/linear","source":"linear","command":"claude ${title}","caller":"trusted-automation","auth":{"mode":"hmac","secret_env":"S","header":"X-Sig","prefix":"sha256="}}
+        \\{"path":"/hooks/linear","source":"linear","command":"claude","title":"${title}","caller":"trusted-automation","auth":{"mode":"hmac","secret_env":"S","header":"X-Sig","prefix":"sha256="}}
     );
 
     // Sign the body the way a sender would.
@@ -488,7 +490,9 @@ test "valid hmac request launches the configured command" {
     try testing.expectEqual(@as(usize, 1), sender.requests.items.len);
     const sent = sender.requests.items[0];
     try testing.expect(std.mem.indexOf(u8, sent, "sessions.create") != null);
-    try testing.expect(std.mem.indexOf(u8, sent, "claude Webhook ingestion") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\"command\":\"claude\"") != null);
+    // The templated title resolved from the explicit event field.
+    try testing.expect(std.mem.indexOf(u8, sent, "\"title\":\"Webhook ingestion\"") != null);
     try testing.expect(std.mem.indexOf(u8, sent, "\"caller\":\"trusted-automation\"") != null);
     try testing.expect(std.mem.indexOf(u8, sent, "webhook_relay") != null);
 }
@@ -619,8 +623,10 @@ test "a templated field the payload lacks is 422" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    // The unresolved placeholder is in a templated field (title); the command
+    // itself may not carry placeholders.
     const cfg = try cfgWith(alloc,
-        \\{"path":"/h","source":"linear","command":"claude ${nonexistent.field}","auth":{"mode":"none"}}
+        \\{"path":"/h","source":"linear","command":"claude","title":"${nonexistent.field}","auth":{"mode":"none"}}
     );
     var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
     var secrets = SecretMap{ .entries = &.{} };
@@ -775,7 +781,7 @@ test "no-inference: webhook bait fields never reach the launch" {
     const alloc = arena.allocator();
 
     const cfg = try cfgWith(alloc,
-        \\{"path":"/h","source":"linear","command":"claude ${title}","title":"${title}","auth":{"mode":"none"}}
+        \\{"path":"/h","source":"linear","command":"claude","title":"${title}","auth":{"mode":"none"}}
     );
     // A payload stuffed with bait the adapter does not copy.
     const payload =

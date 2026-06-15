@@ -157,7 +157,21 @@ fn parseRoute(
 
     const command = jh.getNonEmptyString(obj, "command") orelse
         return fail(diag, alloc, "route \"{s}\" requires a \"command\"", .{path});
-    try checkTemplate(alloc, command, path, "command", diag);
+    // SECURITY: the control host runs the launch by shell-evaluating this string
+    // (`<command>; exit`), so a `${...}` placeholder would splice
+    // provider-controlled — and often attacker-influenceable — payload fields
+    // (an issue/PR title, a body) straight into a shell command. A validly-signed
+    // but hostile payload could then run arbitrary local commands. The command is
+    // operator-authored and trusted; the payload is data. Forbid placeholders in
+    // `command` and deliver the payload to it through templated `env` values
+    // (referenced as quoted shell variables, e.g. `claude "$ISSUE"`) or via
+    // `$MAXX_WEBHOOK_PAYLOAD_FILE` / the connector prompt — none of which the
+    // shell re-tokenizes. `title`/`cwd`/`group`/`env` may still template: none of
+    // them are shell-evaluated as a command.
+    if (std.mem.indexOf(u8, command, "${") != null)
+        return fail(diag, alloc, "route \"{s}\" command must not use ${{...}} placeholders " ++
+            "(payload values would be shell-evaluated); pass payload via env values or " ++
+            "$MAXX_WEBHOOK_PAYLOAD_FILE", .{path});
 
     const cwd = try dupOptTemplate(alloc, obj, "cwd", path, diag);
     const title = try dupOptTemplate(alloc, obj, "title", path, diag);
@@ -376,7 +390,7 @@ test "parses a minimal valid config with defaults" {
         \\    {
         \\      "path": "/hooks/linear",
         \\      "source": "linear",
-        \\      "command": "claude ${title}",
+        \\      "command": "claude",
         \\      "auth": { "mode": "hmac", "secret_env": "S", "header": "X-Sig", "prefix": "sha256=" }
         \\    }
         \\  ]
@@ -481,13 +495,27 @@ test "rejects invalid routes" {
     , "prompt_delivery must be");
 }
 
-test "rejects malformed template placeholders" {
+test "rejects malformed template placeholders (in a templated field)" {
+    // Placeholder *syntax* is validated for the templated fields (here, title).
     try expectFail(
-        \\{"routes":[{"path":"/h","source":"linear","command":"claude ${title","auth":{"mode":"none"}}]}
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","title":"claude ${title","auth":{"mode":"none"}}]}
     , "unterminated");
     try expectFail(
-        \\{"routes":[{"path":"/h","source":"linear","command":"claude ${}","auth":{"mode":"none"}}]}
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","title":"claude ${}","auth":{"mode":"none"}}]}
     , "empty ${}");
+}
+
+test "rejects ${...} placeholders in the command (shell-injection guard)" {
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"claude ${title}","auth":{"mode":"none"}}]}
+    , "must not use ${...} placeholders");
+    // A shell variable reference (no braces) is fine — it is not a Maxx placeholder.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseOk(arena.allocator(),
+        \\{"routes":[{"path":"/h","source":"linear","command":"codex resume --prompt-file $MAXX_WEBHOOK_PAYLOAD_FILE","auth":{"mode":"none"}}]}
+    );
+    try testing.expectEqualStrings("codex resume --prompt-file $MAXX_WEBHOOK_PAYLOAD_FILE", cfg.routes[0].command);
 }
 
 test "rejects duplicate paths" {

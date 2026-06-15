@@ -98,7 +98,7 @@ Each route:
 | ----------------- | -------- | -------------- | ------------------------------------------------------------------------ |
 | `path`            | yes      | —              | Exact request path that selects this route (must start with `/`).        |
 | `source`          | yes      | —              | Connector adapter that parses the payload (`linear`, `github`).          |
-| `command`         | yes      | —              | Command to run (templated with `${field}`).                              |
+| `command`         | yes      | —              | Command to run. **No `${...}` placeholders** (see security note below).  |
 | `title`           | no       | event title    | Tab title (templated).                                                   |
 | `cwd`             | no       | —              | Working directory (templated).                                           |
 | `env`             | no       | —              | Extra env entries `[{ "key", "value" }]` (values templated).             |
@@ -109,13 +109,26 @@ Each route:
 | `max_body_bytes`  | no       | global default | Per-route body cap.                                                      |
 | `auth`            | yes      | —              | Authentication (below).                                                  |
 
-`${field}` placeholders are filled **only** from explicit event fields (e.g.
-`${title}`, `${issue.identifier}`, `${repo.full_name}`, `${url}`). A required
-placeholder the payload does not provide fails the request (HTTP 422); use
-`${field?}` for an optional one. `caller` is deliberately not templated — a
-policy identity is a fixed deployment decision, never derived from an untrusted
-payload. See [connector adapters](./connector-adapters.md) for the field set each
-source provides and the templating rules.
+`${field}` placeholders in `title`, `cwd`, `group`, and `env` values are filled
+**only** from explicit event fields (e.g. `${title}`, `${issue.identifier}`,
+`${repo.full_name}`, `${url}`). A required placeholder the payload does not
+provide fails the request (HTTP 422); use `${field?}` for an optional one.
+`caller` is deliberately not templated — a policy identity is a fixed deployment
+decision, never derived from an untrusted payload. See
+[connector adapters](./connector-adapters.md) for the field set each source
+provides and the templating rules.
+
+> **Security: `command` must not contain `${...}` placeholders.** Maxx launches a
+> tab by shell-evaluating the command string, so interpolating a
+> provider-controlled field (an issue/PR title or body — values an attacker can
+> often set) directly into `command` would be a shell-injection vector even
+> behind a valid signature. The config validator rejects any `${` in `command`.
+> Get payload data to the command the safe way instead: put it in a templated
+> `env` value and reference it as a **quoted** shell variable
+> (`"command": "claude \"$ISSUE\"", "env": [{"key": "ISSUE", "value": "${title}"}]`)
+> — the shell does not re-tokenize an expanded variable — or read
+> `$MAXX_WEBHOOK_PAYLOAD_FILE` / the connector prompt. A plain `$VAR` (no braces)
+> in `command` is a normal shell reference and is left untouched.
 
 ### Authentication
 
