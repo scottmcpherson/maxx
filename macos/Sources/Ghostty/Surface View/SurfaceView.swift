@@ -1125,9 +1125,10 @@ extension Ghostty {
     ///
     /// Positioned in the top-left corner so it does not collide with the
     /// top-right read-only badge. It renders only what an agent explicitly
-    /// declared; Maxx never infers any of this from terminal output. Kept
-    /// visually separate from the process-lifecycle and inferred-activity UI so
-    /// it reads as agent-provided, not Maxx-derived.
+    /// declared; Maxx never infers any of this from terminal output (see
+    /// docs/no-inference.md). Kept visually separate from the process-lifecycle
+    /// and sidebar agent-activity indicators so it reads as agent-provided, not
+    /// Maxx-derived.
     struct AgentStateBadge: View {
         let declared: ControlDeclaredState
 

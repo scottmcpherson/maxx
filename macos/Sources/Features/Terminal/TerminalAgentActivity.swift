@@ -1,5 +1,29 @@
 import Foundation
 
+// Sidebar agent-activity status — the "automatic" Claude Code / Codex indicator.
+//
+// This is the no-inference rule applied to the sidebar (see docs/no-inference.md).
+// Every state here is an agent-declared fact or a mechanical terminal fact;
+// nothing is inferred from terminal output:
+//
+//   * Agent-declared: the agent CLI fires explicit hooks (e.g. Claude Code's
+//     `UserPromptSubmit` / `Stop` / `Notification`), the bundled
+//     `maxx-agent-hook` helper maps the explicit hook *event name* to a state
+//     and writes a structured JSON line, and the reducer below consumes that
+//     line. The reducer recognizes only a closed vocabulary of declared event
+//     names / state values; an unrecognized event yields no state (`nil`)
+//     rather than a guess. It never reads PTY contents or agent prose.
+//   * Mechanical: `derive(...)` also surfaces the terminal bell (BEL) and OSC
+//     9/4 progress. Those are terminal escape sequences the running program
+//     emits — mechanical facts Maxx observes as a terminal, attributed to
+//     "terminal", not a semantic claim about an agent's workflow.
+//
+// The reducer must not grow heuristics that derive workflow truth (complete /
+// blocked / tests passed / done) from text, timing, or names. The one
+// time-based transition (`expireRunningState`) is a display-hygiene bound, not
+// idle-time inference: it only clears a stale `running` spinner back to the
+// neutral `idle` baseline and can never assert completion.
+
 enum TerminalAgentActivityState: Equatable {
     case idle
     case running(agent: String)
@@ -347,6 +371,12 @@ struct TerminalAgentActivityReducer {
         return state
     }
 
+    /// Safety bound on a stale `running` indicator: if an agent declares
+    /// `running` and never closes the turn out with a further hook event, drop
+    /// the spinner back to the neutral `idle` baseline after `runningTTL`. This
+    /// is display hygiene, not idle-time inference — it never asserts completion
+    /// or any other workflow truth (it can only ever return `.idle`). See
+    /// docs/no-inference.md.
     mutating func expireRunningState(now: Date = Date()) -> TerminalAgentActivityState? {
         guard case .running = state,
               let runningStartedAt,

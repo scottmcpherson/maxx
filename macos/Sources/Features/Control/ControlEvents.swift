@@ -2,8 +2,13 @@ import Foundation
 
 // The lifecycle event/state model layered on top of the MAX-1 control API.
 //
+// This model is one instance of Maxx's no-inference rule: it shows mechanical
+// facts and agent-declared facts, never workflow truth Maxx derived itself. See
+// docs/no-inference.md for the canonical rule and docs/control-api.md for the
+// API.
+//
 // Two kinds of facts flow through this model, and the type names keep the
-// boundary explicit (see docs/control-api.md):
+// boundary explicit:
 //
 //   * Agent-declared semantic facts — states, events, and metadata an agent or
 //     orchestrator explicitly declares through the API. Maxx stores and replays
