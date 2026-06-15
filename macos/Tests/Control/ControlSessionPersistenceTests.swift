@@ -706,6 +706,39 @@ struct ControlSessionPersistenceTests {
         #expect(cleared?.updatedAt == createdUpdatedAt)
     }
 
+    @Test func redundantSetMetadataDoesNotBumpUpdatedAtOrAddEvent() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+
+        // First set is a real change: it bumps updated_at and records one event.
+        clock.now = clock.now.addingTimeInterval(60)
+        let first = registry.handle(
+            request(.sessionsSetMetadata, .init(id: sid, key: "k", value: "v")),
+            host: host).result?.session
+        let firstUpdatedAt = first?.updatedAt
+        let firstSeq = first?.lastEventSeq
+        #expect(firstSeq == 0)
+
+        // Re-setting the SAME key to the SAME value is a true no-op: updated_at and
+        // the audit event count must not move.
+        clock.now = clock.now.addingTimeInterval(60)
+        let again = registry.handle(
+            request(.sessionsSetMetadata, .init(id: sid, key: "k", value: "v")),
+            host: host).result?.session
+        #expect(again?.updatedAt == firstUpdatedAt)
+        #expect(again?.lastEventSeq == firstSeq)
+
+        // A genuine value change still bumps updated_at and appends an event.
+        clock.now = clock.now.addingTimeInterval(60)
+        let changed = registry.handle(
+            request(.sessionsSetMetadata, .init(id: sid, key: "k", value: "v2")),
+            host: host).result?.session
+        #expect(changed?.updatedAt != firstUpdatedAt)
+        #expect(changed?.lastEventSeq == 1)
+    }
+
     @Test func mutationResponseReflectsBumpedUpdatedAt() {
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
         let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)

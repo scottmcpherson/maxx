@@ -791,7 +791,15 @@ final class ControlSessionRegistry {
 
         var merged = session.metadata
         merged[key] = value
-        session.metadata = try ControlValidation.validateMetadata(merged)
+        let normalized = try ControlValidation.validateMetadata(merged)
+        // Setting a key to the value it already holds changes nothing: don't bump
+        // updatedAt, rewrite the registry, append an audit event, or re-push the
+        // unchanged map (matches update / remove-metadata / clear-metadata).
+        // Validation runs first so an invalid value is still rejected, not no-op'd.
+        guard normalized != session.metadata else {
+            return view(of: session, host: host)
+        }
+        session.metadata = normalized
         let handle = liveSurface(of: session, host: host)
         record(
             &session,
