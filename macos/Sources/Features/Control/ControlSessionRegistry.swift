@@ -551,6 +551,16 @@ final class ControlSessionRegistry {
                 session, name: "group.joined", message: group, group: group,
                 createdAt: session.createdAt, pid: pid)
         }
+        // A create-time parent edge (MAX-6) emits the same Maxx-owned `parent.set`
+        // mechanical event as the post-create `set-parent`, so a supervisor
+        // replaying `stream.watch --since 0` can reconstruct create-time parent
+        // edges from events (the `created` event carries no parent id). Mirrors the
+        // create-time `group.joined` above.
+        if let parentID = session.parentID {
+            recordMechanical(
+                session, name: "parent.set", message: parentID.uuidString,
+                group: session.group, createdAt: session.createdAt, pid: pid)
+        }
         // A create-time agent-type declaration is an explicit declared fact,
         // identical to `set-agent-type`: record it in the audit log (events /
         // watch) with its source so supervisors see it and it persists, rather than

@@ -1386,6 +1386,26 @@ struct ControlSessionRegistryTests {
         #expect(events.contains { $0.name == "parent.cleared" && $0.sourceKind == "maxx" })
     }
 
+    @Test func createWithParentEmitsParentSetStreamEvent() throws {
+        // A create-time parent edge must emit the same Maxx-owned `parent.set`
+        // mechanical event as `set-parent` (and as create-time `group.joined`), so
+        // a supervisor replaying `stream.watch --since 0` can reconstruct
+        // create-time parent edges from events rather than missing them until a
+        // later re-parent.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (parent, _) = makeSession(registry, host)
+        let child = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", parent: parent)), host: host)
+        #expect(child.result?.session?.parentID == parent)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let events = messages.compactMap { $0.event }
+        #expect(events.contains {
+            $0.name == "parent.set" && $0.message == parent && $0.sourceKind == "maxx"
+        })
+    }
+
     @Test func reParentingEmitsSingleParentSetForTheNewParent() throws {
         // A parent edge is single-valued, so re-parenting from P1 to P2 records one
         // `parent.set` carrying the new parent id — not a `parent.cleared` (the new
