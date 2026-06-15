@@ -183,6 +183,17 @@ pub fn dispatch(alloc: Allocator, in: DispatchInput, sender: Sender) Allocator.E
 
     // 1. Duplicate suppression, before any side effect.
     if (in.dedup) |store| {
+        // First, reject an unrecordable key up front. If the trigger/source/key
+        // exceed the dedup store's field caps, the post-launch `markSeen` would
+        // deterministically fail — leaving a launched tab whose dedup record is
+        // impossible, so every retry would spawn another. Fail now, before any
+        // create, so this known failure has no side effect (use --no-dedup if a
+        // source legitimately needs keys this large).
+        if (!DedupStore.recordable(in.trigger, in.event.source, key)) {
+            rec.error_code = "dedup_key_too_long";
+            rec.error_message = "trigger/source/dedup key exceeds the dedup store field caps";
+            return rec; // outcome stays .failed; nothing launched
+        }
         if (store.seen(in.trigger, in.event.source, key)) {
             rec.outcome = .duplicate;
             return rec;
@@ -419,12 +430,20 @@ fn parseResponse(alloc: Allocator, response: []const u8) !ParsedResponse {
 
 /// Write the resolved prompt to a temp file in `prompt_dir` (0600) and return
 /// its path. Used for `.file` delivery; the path rides in `MAXX_CONNECTOR_PROMPT_FILE`.
+///
+/// The filename is unique per launch — `maxx-prompt-<id>-<pid>-<nanos>.txt` — and
+/// created exclusively, so two invocations for the same event id (two triggers,
+/// or a retry before the first tab reads its prompt) never overwrite each other's
+/// file. Without this, an earlier tab could read a later launch's prompt.
 fn writePromptFile(alloc: Allocator, in: DispatchInput) ![]const u8 {
     const dir = in.prompt_dir orelse return error.NoPromptDir;
     const safe = try sanitizeForFilename(alloc, in.event.id);
-    const name = try std.fmt.allocPrint(alloc, "maxx-prompt-{s}.txt", .{safe});
+    const name = try std.fmt.allocPrint(alloc, "maxx-prompt-{s}-{d}-{d}.txt", .{
+        safe, std.c.getpid(), std.time.nanoTimestamp(),
+    });
     const path = try std.fs.path.join(alloc, &.{ dir, name });
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
+    // Exclusive create: never silently overwrite an existing prompt file.
+    const file = try std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 });
     defer file.close();
     try file.writeAll(in.request.prompt.?);
     return path;
@@ -847,9 +866,64 @@ test "file delivery writes a temp file and injects the path env" {
     try testing.expect(std.mem.indexOf(u8, sent, "MAXX_CONNECTOR_PROMPT_FILE=") != null);
     // The prompt content itself is in the file, not the request.
     try testing.expect(std.mem.indexOf(u8, sent, "Work on MAX-8") == null);
-    // The temp file exists and holds the prompt.
-    const written = try td.dir.readFileAlloc(alloc, "maxx-prompt-evt-1.txt", 4096);
+    // The temp file path is unique per launch; read it back from the request env
+    // entry (we cannot predict the pid/nanos suffix) and confirm it holds the prompt.
+    const prompt_path = try promptFilePathFromRequest(alloc, sent);
+    const written = try std.fs.cwd().readFileAlloc(alloc, prompt_path, 4096);
     try testing.expectEqualStrings("Work on MAX-8", written);
+    // The name carries the unique components and the runner prefix the sweep matches.
+    const base = std.fs.path.basename(prompt_path);
+    try testing.expect(std.mem.startsWith(u8, base, "maxx-prompt-evt-1-"));
+    try testing.expect(std.mem.endsWith(u8, base, ".txt"));
+}
+
+/// Pull the `MAXX_CONNECTOR_PROMPT_FILE` path out of a serialized create request.
+fn promptFilePathFromRequest(alloc: Allocator, request: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, request, .{});
+    const env = parsed.object.get("params").?.object.get("env").?.array;
+    const prefix = "MAXX_CONNECTOR_PROMPT_FILE=";
+    for (env.items) |e| {
+        if (std.mem.startsWith(u8, e.string, prefix)) return e.string[prefix.len..];
+    }
+    return error.NotFound;
+}
+
+test "dispatch rejects an unrecordable dedup key before launching" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ base, "seen.json" });
+    var store = try DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+
+    const ev = try linearEvent(alloc);
+    const req = try connector.resolve(alloc, .{ .command = "claude" }, ev, .{});
+
+    const huge = try alloc.alloc(u8, DedupStore.max_key_len + 1);
+    @memset(huge, 'k');
+
+    var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    const rec = try dispatch(alloc, .{
+        .trigger = "t",
+        .trigger_type = .webhook_relay,
+        .event = ev,
+        .request = req,
+        .token = "tok",
+        .received_at = "2026-06-15T00:00:00Z",
+        .dedup_key = huge,
+        .dedup = &store,
+    }, sender.sender());
+
+    // Rejected up front: no create was sent, so the deterministic dedup failure
+    // has no side effect (no duplicate-tab-on-retry).
+    try testing.expectEqual(Outcome.failed, rec.outcome);
+    try testing.expectEqualStrings("dedup_key_too_long", rec.error_code.?);
+    try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
+    try testing.expectEqual(@as(usize, 0), store.count());
 }
 
 test "sweepStalePromptFiles removes only stale runner prompt files" {

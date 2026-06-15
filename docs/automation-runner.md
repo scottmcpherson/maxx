@@ -86,6 +86,11 @@ that still reports the same id — is suppressed instead of launching twice.
   runner cannot tell a retry from a new event and will act once per id. This is
   documented best-effort, never a guess — disable it with `--no-dedup` if a source
   is unsuitable.
+- A `key`/trigger/source longer than the dedup store's field caps could never be
+  recorded, so (with dedup enabled) the runner **rejects it up front** — before
+  any launch — rather than spawn a tab whose dedup record is impossible and would
+  re-fire on every retry. Use `--no-dedup` if a source legitimately needs keys
+  that large.
 
 Only a **successful** launch is recorded as seen, so a transient failure (a denied
 policy, an unreachable socket) can be retried. The store is bounded on the write
@@ -121,12 +126,13 @@ The resolved prompt reaches the launched command per `--prompt-delivery`:
   launch itself is still recorded (the tab exists; re-firing would duplicate it),
   so re-deliver the prompt explicitly with `sessions action <id> --action input`
   rather than re-running the trigger.
-- `file` — the runner writes the prompt to a `0600` temp file
-  (`maxx-prompt-<event-id>.txt` in the control directory) and injects its path as
-  `MAXX_CONNECTOR_PROMPT_FILE` at create time. The file must outlive the runner
-  process (the launched agent reads it asynchronously), so the runner cannot
-  delete its own; instead each `.file` run best-effort sweeps prompt files left by
-  previous runs once they age past ~1 day.
+- `file` — the runner writes the prompt to a `0600` temp file (a per-launch
+  unique `maxx-prompt-<event-id>-<pid>-<nanos>.txt` in the control directory,
+  created exclusively so concurrent launches never overwrite each other) and
+  injects its path as `MAXX_CONNECTOR_PROMPT_FILE` at create time. The file must
+  outlive the runner process (the launched agent reads it asynchronously), so the
+  runner cannot delete its own; instead each `.file` run best-effort sweeps prompt
+  files left by previous runs once they age past ~1 day.
 
 ## Visibility and control
 

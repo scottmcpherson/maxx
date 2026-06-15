@@ -211,6 +211,14 @@ pub const MarkError = error{
     FieldTooLong,
 } || Allocator.Error;
 
+/// Whether a record with these field lengths could ever be persisted (i.e.
+/// `markSeen` would accept it). Callers validate up front — before launching —
+/// so an unrecordable key fails with no side effect, rather than launching a tab
+/// whose dedup record is impossible (which would re-launch on every retry).
+pub fn recordable(trigger: []const u8, source: []const u8, key: []const u8) bool {
+    return trigger.len <= max_trigger_len and source.len <= max_source_len and key.len <= max_key_len;
+}
+
 /// Record `(trigger, source, key)` as fired at `at`. No-op if already present
 /// (idempotent — a retry never refreshes recency or grows the file). Rejects
 /// over-long fields, enforces the count bound, and marks the store dirty so
