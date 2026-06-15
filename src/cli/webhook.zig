@@ -319,21 +319,10 @@ fn runServe(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
             continue;
         };
 
+        // Dedup persistence happens inside the handler (before it acknowledges a
+        // launch) via the injected persister, so a 200 is never returned with a
+        // non-durable key. Here we only do best-effort temp-file housekeeping.
         if (result) |res| {
-            // Persist any newly-recorded dedup state.
-            if (res.persist_dedup) {
-                if (store) |*s| {
-                    const cutoff_s = std.time.timestamp() - DedupStore.default_max_age_s;
-                    if (cutoff_s > 0) {
-                        var buf: [32]u8 = undefined;
-                        s.pruneOlderThan(runner.epochToIso(&buf, @intCast(cutoff_s)));
-                    }
-                    s.save() catch |err| switch (err) {
-                        error.ReadOnly => {},
-                        else => log.warn("could not persist dedup state to {s}: {s}", .{ state_path, @errorName(err) }),
-                    };
-                }
-            }
             // Sweep stale temp files whenever a launch was attempted (launched or
             // failed) — a failed `.file`-delivery launch can leave a connector
             // prompt file behind, and this is the only place a long-lived listener
@@ -348,6 +337,27 @@ fn runServe(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
         if (cmd.once) return 0;
     }
 }
+
+/// Prunes (by age) and durably saves the dedup store. Wired into the handler as
+/// `Deps.persist` so the save runs before a launch is acknowledged. A newer
+/// on-disk schema (`error.ReadOnly`) is intentional fail-open, not a failure;
+/// any other error propagates so the handler can surface it on the response.
+const DedupPersister = struct {
+    store: *DedupStore,
+
+    fn persist(ctx: *anyopaque) anyerror!void {
+        const self: *DedupPersister = @ptrCast(@alignCast(ctx));
+        const cutoff_s = std.time.timestamp() - DedupStore.default_max_age_s;
+        if (cutoff_s > 0) {
+            var buf: [32]u8 = undefined;
+            self.store.pruneOlderThan(runner.epochToIso(&buf, @intCast(cutoff_s)));
+        }
+        self.store.save() catch |err| switch (err) {
+            error.ReadOnly => {},
+            else => return err,
+        };
+    }
+};
 
 /// How long a single client may stall a read or write before the (single-thread)
 /// serve loop gives up on it and closes the connection. Bounds a Slowloris-style
@@ -454,6 +464,10 @@ fn handleConnection(
     var sender = SocketSender{ .socket_path = try control_client.socketPath(alloc, dir) };
     const received_at = try runner.nowIso(alloc);
 
+    // The handler persists the dedup store (before acknowledging a launch) through
+    // this persister, when a store is present.
+    var persister: ?DedupPersister = if (store) |s| .{ .store = s } else null;
+
     const res = try webhook.handle(alloc, cfg, .{
         .method = method,
         .path = path,
@@ -468,6 +482,8 @@ fn handleConnection(
         .prompt_dir = dir,
         .secret = Secrets.resolve,
         .secret_ctx = secrets,
+        .persist = if (persister != null) DedupPersister.persist else null,
+        .persist_ctx = if (persister) |*p| p else undefined,
     });
 
     try respond(&request, res.response.status, res.response.body);

@@ -205,7 +205,11 @@ retries are safe — while distinct events for the same issue/PR still launch.
 Without a `dedup_header` (or when a request omits it) dedup is **off** and every
 request launches: the adapters set `event.id` to the _object_ id (the issue/PR),
 so keying on it would wrongly drop later legitimate events for the same object.
-The store is bounded by count, age, and size.
+The store is bounded by count, age, and size. The new dedup entry is persisted
+**before** the launch is acknowledged; if the store cannot be written (e.g.
+disk-full), the launch still returns `200` (the tab exists) but carries a
+`"warning":"dedup_not_persisted"` and logs the failure, rather than silently
+acking a key that would not survive a restart.
 
 **Logging.** Each request logs one redacted line (method, path, status, outcome,
 source, event id, session id, error code) under the `webhook` scope. The body,

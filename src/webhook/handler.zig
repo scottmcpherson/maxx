@@ -98,6 +98,15 @@ pub const Deps = struct {
     /// production and by a fixed map in tests.
     secret: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
     secret_ctx: *anyopaque = undefined,
+    /// Durably persist the dedup store. Called by the handler *before* it
+    /// acknowledges a launch that recorded a new dedup entry, so a successful
+    /// `200` is never returned with a non-durable dedup key (which, after a
+    /// listener restart, could let the same delivery re-launch). A returned error
+    /// is surfaced as a `warning` on the otherwise-successful response rather than
+    /// silently logged. Null disables persistence (e.g. tests use the in-memory
+    /// store directly). Only invoked when `dedup` is active for the request.
+    persist: ?*const fn (ctx: *anyopaque) anyerror!void = null,
+    persist_ctx: *anyopaque = undefined,
 
     fn secretFor(self: Deps, name: []const u8) ?[]const u8 {
         return self.secret(self.secret_ctx, name);
@@ -108,11 +117,9 @@ pub const Deps = struct {
 pub const Result = struct {
     response: Response,
     /// Present when a dispatch occurred (launched/duplicate/failed); used for
-    /// logging. Absent for transport/auth rejections.
+    /// logging and to decide temp-file housekeeping. Absent for transport/auth
+    /// rejections.
     record: ?runner.ActivityRecord = null,
-    /// True when a launch recorded new dedup state, so the serve loop should
-    /// persist it.
-    persist_dedup: bool = false,
 };
 
 /// Handle one already-received request against the route registry. Performs the
@@ -258,16 +265,27 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         // an issue: the tab exists, so the provider should not retry. The detail
         // is logged and surfaced in the body for visibility.
         .launched => blk: {
+            // Persist the just-recorded dedup entry BEFORE acknowledging, so a
+            // 200 is never returned with a non-durable key. A persist failure is
+            // surfaced as a warning (the tab launched, so this stays a 200 — a
+            // 5xx would trigger a provider retry and a second tab).
+            var warning: ?[]const u8 = rec.error_code;
+            if (dedup_store != null) {
+                if (deps.persist) |p| {
+                    p(deps.persist_ctx) catch |err| {
+                        log.warn("webhook {s}: dedup persist failed: {s}", .{ route.path, @errorName(err) });
+                        if (warning == null) warning = "dedup_not_persisted";
+                    };
+                }
+            }
             var fields: std.ArrayList(Field) = .empty;
             try fields.append(alloc, ok());
             try fields.append(alloc, kv("outcome", "launched"));
             try fields.append(alloc, kvOpt("session_id", rec.session_id));
-            if (rec.error_code) |c| try fields.append(alloc, kv("warning", c));
+            if (warning) |w| try fields.append(alloc, kv("warning", w));
             break :blk .{
                 .response = try jsonResp(alloc, 200, fields.items),
                 .record = rec,
-                // Only a launch that actually recorded a dedup entry needs a save.
-                .persist_dedup = dedup_store != null,
             };
         },
         .duplicate => .{
@@ -451,6 +469,17 @@ const RecordingSender = struct {
     }
     fn sender(self: *RecordingSender) runner.Sender {
         return .{ .ctx = self, .sendFn = sendImpl };
+    }
+};
+
+/// A dedup persister for tests: counts calls and can be made to fail.
+const CountingPersister = struct {
+    calls: usize = 0,
+    fail: bool = false,
+    fn persist(ctx: *anyopaque) anyerror!void {
+        const self: *CountingPersister = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        if (self.fail) return error.DiskFull;
     }
 };
 
@@ -754,6 +783,63 @@ test "a redelivered delivery id is suppressed; a new id launches" {
     try testing.expectEqual(@as(u16, 200), r3.response.status);
     try testing.expect(std.mem.indexOf(u8, r3.response.body, "launched") != null);
     try testing.expectEqual(@as(usize, 1), s3.requests.items.len);
+}
+
+test "a dedup launch persists before acknowledging; a persist failure is surfaced" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ base, "seen.json" });
+    var store = try runner.DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","dedup_header":"X-Delivery","auth":{"mode":"none"}}
+    );
+    var secrets = SecretMap{ .entries = &.{} };
+
+    // A successful persist: launched, persister called once, no warning.
+    var ok_p = CountingPersister{};
+    var s1 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    var d1 = makeDeps(&s1, &secrets);
+    d1.dedup = &store;
+    d1.persist = CountingPersister.persist;
+    d1.persist_ctx = &ok_p;
+    const r1 = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D1" }},
+        .body = linear_payload,
+    }, d1);
+    try testing.expectEqual(@as(u16, 200), r1.response.status);
+    try testing.expect(std.mem.indexOf(u8, r1.response.body, "\"outcome\":\"launched\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r1.response.body, "warning") == null);
+    try testing.expectEqual(@as(usize, 1), ok_p.calls);
+
+    // A failing persist on a NEW delivery: still 200 launched (the tab exists),
+    // but the non-durable dedup is surfaced as a warning rather than hidden.
+    var bad_p = CountingPersister{ .fail = true };
+    var s2 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    var d2 = makeDeps(&s2, &secrets);
+    d2.dedup = &store;
+    d2.persist = CountingPersister.persist;
+    d2.persist_ctx = &bad_p;
+    const r2 = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D2" }},
+        .body = linear_payload,
+    }, d2);
+    try testing.expectEqual(@as(u16, 200), r2.response.status);
+    try testing.expect(std.mem.indexOf(u8, r2.response.body, "\"outcome\":\"launched\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r2.response.body, "dedup_not_persisted") != null);
+    try testing.expectEqual(@as(usize, 1), bad_p.calls);
 }
 
 test "without a configured delivery header, repeated deliveries each launch" {
