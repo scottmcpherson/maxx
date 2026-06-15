@@ -62,6 +62,13 @@ pub const Route = struct {
     /// Name of the env var holding the secret/HMAC key. Required (and resolved at
     /// serve time) for `.token`/`.hmac`; null for `.none`.
     secret_env: ?[]const u8 = null,
+    /// Request header carrying a per-DELIVERY id used as the duplicate-suppression
+    /// key (e.g. `X-GitHub-Delivery`, `Linear-Delivery`). When set, redeliveries
+    /// of the *same* delivery are suppressed; distinct events for the same
+    /// issue/PR are not. When null (the default), dedup is disabled for the route:
+    /// the adapter's `event.id` is the object id, so keying on it would wrongly
+    /// drop a later legitimate event for the same object.
+    dedup_header: ?[]const u8 = null,
 
     /// Build the connector launch template this route resolves to.
     pub fn template(self: Route) Template.LaunchTemplate {
@@ -81,6 +88,18 @@ pub const Route = struct {
 bind: []const u8 = default_bind,
 /// Configured routes. At least one is required.
 routes: []const Route = &.{},
+
+/// The largest per-route body cap across all routes. The serve loop reads a
+/// request body up to this bound (then the matched route's specific cap is
+/// enforced post-auth), so the read limit never depends on the request path —
+/// an unauthenticated caller cannot probe route existence via the size check.
+pub fn maxBodyCap(self: Config) usize {
+    var m: usize = 0;
+    for (self.routes) |r| {
+        if (r.max_body_bytes > m) m = r.max_body_bytes;
+    }
+    return if (m == 0) default_max_body_bytes else m;
+}
 
 pub const Error = error{InvalidConfig} || Allocator.Error;
 
@@ -193,6 +212,11 @@ fn parseRoute(
 
     const max_body_bytes = try readMaxBody(alloc, obj, global_max, "max_body_bytes", diag);
 
+    const dedup_header: ?[]const u8 = if (jh.getNonEmptyString(obj, "dedup_header")) |d|
+        try alloc.dupe(u8, d)
+    else
+        null;
+
     const route_auth, const secret_env = try parseAuth(alloc, obj, path, bind_loopback, diag);
 
     return .{
@@ -209,6 +233,7 @@ fn parseRoute(
         .max_body_bytes = max_body_bytes,
         .auth = route_auth,
         .secret_env = secret_env,
+        .dedup_header = dedup_header,
     };
 }
 
@@ -432,6 +457,7 @@ test "parses all optional route fields" {
         \\      "prompt_delivery": "file",
         \\      "trigger": "gh-issues",
         \\      "max_body_bytes": 4096,
+        \\      "dedup_header": "X-GitHub-Delivery",
         \\      "env": [{ "key": "K", "value": "${source}" }],
         \\      "auth": { "mode": "token", "secret_env": "T", "header": "Authorization", "prefix": "Bearer " }
         \\    }
@@ -450,6 +476,7 @@ test "parses all optional route fields" {
     try testing.expectEqual(@as(usize, 1), r.env.len);
     try testing.expectEqualStrings("K", r.env[0].key);
     try testing.expectEqual(auth.Mode.token, r.auth.mode);
+    try testing.expectEqualStrings("X-GitHub-Delivery", r.dedup_header.?);
 }
 
 fn expectFail(bytes: []const u8, needle: []const u8) !void {

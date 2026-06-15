@@ -415,32 +415,26 @@ fn handleConnection(
         });
     }
 
-    const route = routeFor(cfg, path);
-
-    // No route: reply 404 without reading a body.
-    if (route == null) {
-        try respond(&request, 404, "{\"ok\":false,\"error\":\"unknown_route\"}");
-        log.info("webhook {s} {s} -> 404 unknown_route", .{ method, path });
-        return null;
-    }
-    const r = route.?;
-
-    // Reject an over-cap body by its declared length before reading anything.
+    // Bound the body read by the GLOBAL cap (largest route cap), never the
+    // matched route's cap — the read limit must not depend on the path, or an
+    // unauthenticated caller could probe route existence via the size check. The
+    // handler enforces the matched route's specific cap post-auth, and routes
+    // unknown paths to a uniform 401.
+    const cap = cfg.maxBodyCap();
     if (content_length) |clen| {
-        if (clen > r.max_body_bytes) {
+        if (clen > cap) {
             try respond(&request, 413, "{\"ok\":false,\"error\":\"payload_too_large\"}");
             log.info("webhook {s} {s} -> 413 payload_too_large", .{ method, path });
             return null;
         }
     }
 
-    // Read the body, bounded by the route cap (+1 to detect an over-cap stream).
     var body_buf: [body_buf_size]u8 = undefined;
     const body_reader = request.readerExpectContinue(&body_buf) catch |err| {
         log.warn("webhook {s} {s}: body reader: {s}", .{ method, path, @errorName(err) });
         return null;
     };
-    const body = body_reader.allocRemaining(alloc, .limited(r.max_body_bytes + 1)) catch |err| switch (err) {
+    const body = body_reader.allocRemaining(alloc, .limited(cap + 1)) catch |err| switch (err) {
         error.StreamTooLong => {
             try respond(&request, 413, "{\"ok\":false,\"error\":\"payload_too_large\"}");
             log.info("webhook {s} {s} -> 413 payload_too_large", .{ method, path });
@@ -503,13 +497,6 @@ fn respond(request: *std.http.Server.Request, status: u16, body: []const u8) !vo
     }) catch |err| {
         log.warn("respond failed: {s}", .{@errorName(err)});
     };
-}
-
-fn routeFor(cfg: Config, path: []const u8) ?Config.Route {
-    for (cfg.routes) |r| {
-        if (std.mem.eql(u8, r.path, path)) return r;
-    }
-    return null;
 }
 
 /// The path portion of a request target (query string stripped).

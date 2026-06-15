@@ -107,6 +107,7 @@ Each route:
 | `group`           | no       | —              | Supervisor group label (templated).                                      |
 | `trigger`         | no       | `path`         | Display name recorded as the trigger.                                    |
 | `max_body_bytes`  | no       | global default | Per-route body cap.                                                      |
+| `dedup_header`    | no       | —              | Request header carrying a per-delivery id for dedup (see below).         |
 | `auth`            | yes      | —              | Authentication (below).                                                  |
 
 `${field}` placeholders in `title`, `cwd`, `group`, and `env` values are filled
@@ -179,21 +180,32 @@ secret:
 | Status | When                                                                                                              |
 | ------ | ----------------------------------------------------------------------------------------------------------------- |
 | `200`  | Launched (`{"ok":true,"outcome":"launched","session_id":…}`) or a suppressed duplicate (`"outcome":"duplicate"`). |
-| `401`  | Missing or invalid signature/token.                                                                               |
-| `404`  | No route matches the path (other routes are not revealed).                                                        |
-| `405`  | Method is not `POST`.                                                                                             |
-| `413`  | Body exceeds the route's cap.                                                                                     |
-| `415`  | `Content-Type` is not `application/json`.                                                                         |
+| `401`  | Missing/invalid signature **or an unknown route** (the two are intentionally indistinguishable — see below).      |
+| `405`  | Method is not `POST` (only returned once the caller is authenticated).                                            |
+| `413`  | Body exceeds the route's cap (post-auth) or the global read cap.                                                  |
+| `415`  | `Content-Type` is not `application/json` (post-auth).                                                             |
 | `422`  | A required template field was absent from the payload.                                                            |
 | `400`  | Payload is not valid JSON / not a supported event.                                                                |
 | `500`  | Server-side problem (e.g. a configured secret is unavailable).                                                    |
 | `502`  | The launch was attempted but the Control API rejected it.                                                         |
 
-**Duplicate suppression.** Each launch is keyed on the adapter's explicit event
-id (per `trigger` + `source`) in a persistent store
-(`<control-dir>/webhook-seen.json`, override with `--state-file`, disable with
-`--no-dedup`). A redelivered event returns `200 duplicate` and launches nothing,
-so a provider's retries are safe. The store is bounded by count, age, and size.
+**Route privacy.** Authentication runs _before_ any route-specific rejection, and
+an unknown path returns the **same** `401` as a known path with a bad/missing
+signature. So an unauthenticated caller cannot enumerate configured routes (which
+may encode provider/project names or act as part of a tunnel secret); the
+finer-grained `405`/`415`/`413`/`200` codes appear only after the caller proves
+the route's secret. Use `+webhook validate` to see your own routes.
+
+**Duplicate suppression.** Webhook dedup keys on a **per-delivery id** read from a
+route-configured `dedup_header` (e.g. `"dedup_header": "X-GitHub-Delivery"` or
+`"Linear-Delivery"`), persisted in `<control-dir>/webhook-seen.json` (override
+with `--state-file`, disable globally with `--no-dedup`). A redelivery of the
+**same** delivery id returns `200 duplicate` and launches nothing, so provider
+retries are safe — while distinct events for the same issue/PR still launch.
+Without a `dedup_header` (or when a request omits it) dedup is **off** and every
+request launches: the adapters set `event.id` to the _object_ id (the issue/PR),
+so keying on it would wrongly drop later legitimate events for the same object.
+The store is bounded by count, age, and size.
 
 **Logging.** Each request logs one redacted line (method, path, status, outcome,
 source, event id, session id, error code) under the `webhook` scope. The body,

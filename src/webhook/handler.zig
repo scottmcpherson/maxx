@@ -120,20 +120,18 @@ pub const Result = struct {
 /// optional activity record. Only allocation failure propagates; every other
 /// failure becomes a response.
 pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator.Error!Result {
-    // 1. Route on the exact path. An unknown path reveals nothing about which
-    //    routes exist.
+    // 1. Route on the exact path. An unknown path is answered EXACTLY like an
+    //    authentication failure (a uniform 401) so an unauthenticated caller
+    //    cannot enumerate which routes are configured — route paths may encode
+    //    provider/project names or be treated as part of a tunnel secret.
     const route = routeFor(cfg, req.path) orelse
-        return plain(try jsonResp(alloc, 404, &.{kv("error", "unknown_route")}));
+        return plain(try unauthorized(alloc));
 
-    // 2. Transport guardrails.
-    if (!std.ascii.eqlIgnoreCase(req.method, "POST"))
-        return plain(try jsonResp(alloc, 405, &.{kv("error", "method_not_allowed")}));
-    if (!isJsonContentType(req.content_type))
-        return plain(try jsonResp(alloc, 415, &.{kv("error", "unsupported_media_type")}));
-    if (req.body.len > route.max_body_bytes)
-        return plain(try jsonResp(alloc, 413, &.{kv("error", "payload_too_large")}));
-
-    // 3. Authenticate against the raw body before anything interprets it.
+    // 2. Authenticate BEFORE any route-specific rejection. A known route with a
+    //    bad/missing signature returns the same 401 as an unknown path, so route
+    //    existence is never disclosed until the caller proves the secret. (The
+    //    secret-unavailable 500 is unreachable in production: `serve` fails closed
+    //    at startup if a route's secret env is unset.)
     const secret: []const u8 = if (route.auth.mode == .none) "" else blk: {
         const name = route.secret_env orelse
             return plain(try jsonResp(alloc, 500, &.{kv("error", "secret_unavailable")}));
@@ -145,9 +143,18 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         .ok => {},
         .missing_signature, .bad_signature => {
             log.warn("webhook {s}: unauthorized request rejected", .{route.path});
-            return plain(try jsonResp(alloc, 401, &.{kv("error", "unauthorized")}));
+            return plain(try unauthorized(alloc));
         },
     }
+
+    // 3. Transport guardrails. Only an authenticated caller reaches these, so the
+    //    finer-grained status codes do not leak route existence.
+    if (!std.ascii.eqlIgnoreCase(req.method, "POST"))
+        return plain(try jsonResp(alloc, 405, &.{kv("error", "method_not_allowed")}));
+    if (!isJsonContentType(req.content_type))
+        return plain(try jsonResp(alloc, 415, &.{kv("error", "unsupported_media_type")}));
+    if (req.body.len > route.max_body_bytes)
+        return plain(try jsonResp(alloc, 413, &.{kv("error", "payload_too_large")}));
 
     // 4. Parse the opaque payload with the configured adapter (validated to
     //    exist at config time).
@@ -178,12 +185,31 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         error.OutOfMemory => return error.OutOfMemory,
     };
 
-    const key = event.id;
+    // Duplicate suppression is keyed on a per-DELIVERY id taken from a
+    // route-configured request header (e.g. `X-GitHub-Delivery` /
+    // `Linear-Delivery`). It suppresses provider RETRIES of the same delivery —
+    // never distinct events for the same issue/PR. Dedup is OFF unless the route
+    // configures `dedup_header` AND the request carries it: the adapter's
+    // `event.id` is the OBJECT id (issue/PR), so keying on it would wrongly drop a
+    // later legitimate event for the same object.
+    var dedup_store: ?*runner.DedupStore = null;
+    var dedup_key: ?[]const u8 = null;
+    if (deps.dedup) |store| {
+        if (route.dedup_header) |dh| {
+            if (req.header(dh)) |dv| {
+                if (dv.len > 0) {
+                    dedup_store = store;
+                    dedup_key = dv;
+                }
+            }
+        }
+    }
 
     // 6a. Short-circuit a known duplicate before writing any payload file, so a
     //     redelivery storm cannot leave orphan temp files. `runner.dispatch`
     //     re-checks dedup authoritatively for the non-duplicate path.
-    if (deps.dedup) |store| {
+    if (dedup_store) |store| {
+        const key = dedup_key.?;
         if (runner.DedupStore.recordable(route.trigger, event.source, key) and
             store.seen(route.trigger, event.source, key))
         {
@@ -214,7 +240,8 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         .request = launch,
         .token = deps.token,
         .received_at = deps.received_at,
-        .dedup = deps.dedup,
+        .dedup = dedup_store,
+        .dedup_key = dedup_key,
         .prompt_dir = deps.prompt_dir,
     }, deps.sender);
 
@@ -239,7 +266,8 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
             break :blk .{
                 .response = try jsonResp(alloc, 200, fields.items),
                 .record = rec,
-                .persist_dedup = true,
+                // Only a launch that actually recorded a dedup entry needs a save.
+                .persist_dedup = dedup_store != null,
             };
         },
         .duplicate => .{
@@ -367,6 +395,12 @@ fn ok() Field {
 
 fn plain(response: Response) Result {
     return .{ .response = response };
+}
+
+/// The uniform 401 used for BOTH an unknown route and an authentication failure,
+/// so the two are indistinguishable to an unauthenticated caller.
+fn unauthorized(alloc: Allocator) Allocator.Error!Response {
+    return jsonResp(alloc, 401, &.{kv("error", "unauthorized")});
 }
 
 fn jsonResp(alloc: Allocator, status: u16, fields: []const Field) Allocator.Error!Response {
@@ -497,24 +531,41 @@ test "valid hmac request launches the configured command" {
     try testing.expect(std.mem.indexOf(u8, sent, "webhook_relay") != null);
 }
 
-test "unknown route is 404 and launches nothing" {
+test "unknown route is indistinguishable from an auth failure (401)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    // A real route that requires auth, so the unknown-route 401 can be compared
+    // byte-for-byte against the known-route auth-failure 401.
     const cfg = try cfgWith(alloc,
-        \\{"path":"/hooks/linear","source":"linear","command":"c","auth":{"mode":"none"}}
+        \\{"path":"/hooks/linear","source":"linear","command":"c","auth":{"mode":"hmac","secret_env":"S","header":"X-Sig","prefix":"sha256="}}
     );
-    var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
-    var secrets = SecretMap{ .entries = &.{} };
-    const res = try handle(alloc, cfg, .{
+    var secrets = SecretMap{ .entries = &.{.{ .name = "S", .value = "topsecret" }} };
+
+    var s1 = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    const unknown = try handle(alloc, cfg, .{
         .method = "POST",
         .path = "/nope",
         .content_type = "application/json",
         .body = linear_payload,
-    }, makeDeps(&sender, &secrets));
-    try testing.expectEqual(@as(u16, 404), res.response.status);
-    try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
-    try testing.expect(res.record == null);
+    }, makeDeps(&s1, &secrets));
+    try testing.expectEqual(@as(u16, 401), unknown.response.status);
+    try testing.expectEqual(@as(usize, 0), s1.requests.items.len);
+    try testing.expect(unknown.record == null);
+
+    // A known route with a bad signature returns the identical 401 body, so the
+    // configured path cannot be distinguished by an unauthenticated probe.
+    var s2 = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    const known_bad = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/hooks/linear",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Sig", .value = "sha256=deadbeef" }},
+        .body = linear_payload,
+    }, makeDeps(&s2, &secrets));
+    try testing.expectEqual(@as(u16, 401), known_bad.response.status);
+    try testing.expectEqualStrings(unknown.response.body, known_bad.response.body);
+    try testing.expectEqual(@as(usize, 0), s2.requests.items.len);
 }
 
 test "wrong method and content type are rejected before any launch" {
@@ -641,7 +692,7 @@ test "a templated field the payload lacks is 422" {
     try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
 }
 
-test "duplicate delivery is suppressed and returns 200 duplicate" {
+test "a redelivered delivery id is suppressed; a new id launches" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -653,29 +704,86 @@ test "duplicate delivery is suppressed and returns 200 duplicate" {
     var store = try runner.DedupStore.open(testing.allocator, path);
     defer store.deinit();
 
+    // Dedup keys on a configured per-delivery header, NOT the object id.
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","dedup_header":"X-Delivery","auth":{"mode":"none"}}
+    );
+    var secrets = SecretMap{ .entries = &.{} };
+
+    // First delivery (id D1) launches.
+    var s1 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    var d1 = makeDeps(&s1, &secrets);
+    d1.dedup = &store;
+    const r1 = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D1" }},
+        .body = linear_payload,
+    }, d1);
+    try testing.expectEqual(@as(u16, 200), r1.response.status);
+    try testing.expect(std.mem.indexOf(u8, r1.response.body, "launched") != null);
+
+    // A RETRY of D1 (same delivery, same object) is suppressed: no control request.
+    var s2 = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    var d2 = makeDeps(&s2, &secrets);
+    d2.dedup = &store;
+    const r2 = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D1" }},
+        .body = linear_payload,
+    }, d2);
+    try testing.expectEqual(@as(u16, 200), r2.response.status);
+    try testing.expect(std.mem.indexOf(u8, r2.response.body, "duplicate") != null);
+    try testing.expectEqual(@as(usize, 0), s2.requests.items.len);
+
+    // A DIFFERENT delivery (id D2) for the same object/payload still launches —
+    // distinct events for the same issue/PR are not treated as duplicates.
+    var s3 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    var d3 = makeDeps(&s3, &secrets);
+    d3.dedup = &store;
+    const r3 = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D2" }},
+        .body = linear_payload,
+    }, d3);
+    try testing.expectEqual(@as(u16, 200), r3.response.status);
+    try testing.expect(std.mem.indexOf(u8, r3.response.body, "launched") != null);
+    try testing.expectEqual(@as(usize, 1), s3.requests.items.len);
+}
+
+test "without a configured delivery header, repeated deliveries each launch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ base, "seen.json" });
+    var store = try runner.DedupStore.open(testing.allocator, path);
+    defer store.deinit();
+
+    // No dedup_header: the object-id default would be wrong, so dedup is off.
     const cfg = try cfgWith(alloc,
         \\{"path":"/h","source":"linear","command":"c","auth":{"mode":"none"}}
     );
     var secrets = SecretMap{ .entries = &.{} };
-
     const req: Request = .{ .method = "POST", .path = "/h", .content_type = "application/json", .body = linear_payload };
 
-    // First delivery launches.
-    var s1 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
-    var d1 = makeDeps(&s1, &secrets);
-    d1.dedup = &store;
-    const r1 = try handle(alloc, cfg, req, d1);
-    try testing.expectEqual(@as(u16, 200), r1.response.status);
-    try testing.expect(std.mem.indexOf(u8, r1.response.body, "launched") != null);
-
-    // Second delivery of the same event id is suppressed: no control request.
-    var s2 = RecordingSender{ .alloc = alloc, .responses = &.{} };
-    var d2 = makeDeps(&s2, &secrets);
-    d2.dedup = &store;
-    const r2 = try handle(alloc, cfg, req, d2);
-    try testing.expectEqual(@as(u16, 200), r2.response.status);
-    try testing.expect(std.mem.indexOf(u8, r2.response.body, "duplicate") != null);
-    try testing.expectEqual(@as(usize, 0), s2.requests.items.len);
+    for (0..2) |_| {
+        var s = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+        var d = makeDeps(&s, &secrets);
+        d.dedup = &store;
+        const r = try handle(alloc, cfg, req, d);
+        try testing.expectEqual(@as(u16, 200), r.response.status);
+        try testing.expect(std.mem.indexOf(u8, r.response.body, "launched") != null);
+        try testing.expectEqual(@as(usize, 1), s.requests.items.len);
+    }
 }
 
 test "failed launch maps to 502" {
