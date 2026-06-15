@@ -467,4 +467,43 @@ struct ControlSessionPersistenceTests {
         #expect(updated?.updatedAt != createdAt)
         #expect(updated?.createdAt == createdAt)
     }
+
+    @Test func noOpUpdateDoesNotBumpUpdatedAt() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry, host) = makeRegistry(url: tempStoreURL(), clock: clock)
+        let created = registry.handle(request(.sessionsCreate, .init()), host: host)
+        let sid = created.result?.session?.sessionID
+        let createdUpdatedAt = created.result?.session?.updatedAt
+
+        // An update carrying neither status nor metadata is a no-op and must not
+        // advance updated_at or rewrite the registry.
+        clock.now = clock.now.addingTimeInterval(60)
+        let updated = registry.handle(
+            request(.sessionsUpdate, .init(id: sid)), host: host).result?.session
+        #expect(updated?.updatedAt == createdUpdatedAt)
+    }
+
+    @Test func archivedRecordIsNotRefreshedByRestartReconcile() {
+        let url = tempStoreURL()
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry1, host1) = makeRegistry(url: url, clock: clock)
+        let created = registry1.handle(request(.sessionsCreate, .init()), host: host1)
+        let sid = created.result?.session?.sessionID
+        clock.now = clock.now.addingTimeInterval(10)
+        let archived = registry1.handle(
+            request(.sessionsArchive, .init(id: sid)), host: host1).result?.session
+        #expect(archived?.lifecycle == "archived")
+        let archivedUpdatedAt = archived?.updatedAt
+
+        // Restart a day later. The first list() reconcile must NOT treat the
+        // archived record as a lifecycle transition (its rehydrated baseline is
+        // `archived`, matching what lifecycle(of:) computes), so updated_at — and
+        // thus retention recency — is preserved rather than refreshed every launch.
+        clock.now = clock.now.addingTimeInterval(60 * 60 * 24)
+        let (registry2, host2) = makeRegistry(url: url, clock: clock)
+        let listed = registry2.handle(
+            request(.sessionsList, .init()), host: host2).result?.sessions?.first
+        #expect(listed?.lifecycle == "archived")
+        #expect(listed?.updatedAt == archivedUpdatedAt)
+    }
 }

@@ -145,17 +145,21 @@ final class ControlSessionRegistry {
     /// Load persisted records into the in-memory registry on launch (MAX-5).
     ///
     /// Restored records are marked so the UI can tell a record from a previous
-    /// run apart from a live one, and their `lastObservedLifecycle` is set to
-    /// `closed`: their surfaces no longer exist (the app and its PTYs restarted),
-    /// so their lifecycle already computes as `closed` and reconciliation must not
-    /// emit a spurious `closed` event for each on first poll. No event bus
-    /// entries are replayed — the cross-resource cursor is per-run by design.
-    /// Nothing here infers anything: each field is the verbatim persisted value.
+    /// run apart from a live one, and their `lastObservedLifecycle` is baselined
+    /// to the lifecycle they will compute with no live surface — `archived` for an
+    /// archived record, otherwise `closed`. This matches `lifecycle(of:)` exactly,
+    /// so the first reconcile after launch sees no transition and does NOT stamp a
+    /// fresh `updatedAt` (which would otherwise refresh retention recency on every
+    /// restart and keep archived records from ever aging out). No event bus entries
+    /// are replayed — the cross-resource cursor is per-run by design. Nothing here
+    /// infers anything: each field is the verbatim persisted value.
     private func rehydrate() {
         guard let store else { return }
         for var session in store.load(now: now()) {
             session.restoredFromPreviousRun = true
-            session.lastObservedLifecycle = ControlLifecycle.closed.rawValue
+            session.lastObservedLifecycle = session.archived
+                ? ControlLifecycle.archived.rawValue
+                : ControlLifecycle.closed.rawValue
             sessions[session.id] = session
         }
     }
@@ -544,8 +548,10 @@ final class ControlSessionRegistry {
                 "only 'status' and 'metadata' may be updated")
         }
 
+        var changed = false
         if let status = try ControlValidation.validateStatus(params?.status) {
             session.status = status
+            changed = true
         }
 
         var metadataChanged = false
@@ -557,6 +563,7 @@ final class ControlSessionRegistry {
             merged.merge(validated) { _, new in new }
             session.metadata = try ControlValidation.validateMetadata(merged)
             metadataChanged = true
+            changed = true
 
             // Audit each provided key the same way `set-metadata` does, so a
             // `watch`/`events` consumer observes update-driven metadata changes.
@@ -572,7 +579,12 @@ final class ControlSessionRegistry {
             }
         }
 
-        store(&session)
+        // An update carrying neither status nor metadata is a no-op (and is
+        // ungated by policy precisely because it changes nothing): don't bump
+        // updatedAt, rewrite the registry, or re-push an unchanged map.
+        if changed {
+            store(&session)
+        }
         if metadataChanged {
             pushMetadata(session, to: host.surface(for: session.surfaceID))
         }
