@@ -262,8 +262,8 @@ pub fn dispatch(alloc: Allocator, in: DispatchInput, sender: Sender) Allocator.E
     // push (step 5) does not undo the create, so we still record the event; the
     // failure is surfaced loudly instead (`error_code` set above + a non-zero CLI
     // exit), and the operator re-delivers the prompt explicitly with
-    // `sessions action <id> --action input` rather than re-firing the trigger and
-    // duplicating the tab.
+    // `sessions action <id> --action submit` rather than re-firing the trigger
+    // and duplicating the tab.
     if (in.dedup) |store| {
         store.markSeen(in.trigger, in.event.source, key, in.received_at) catch |err| {
             if (rec.error_code == null) {
@@ -278,7 +278,7 @@ pub fn dispatch(alloc: Allocator, in: DispatchInput, sender: Sender) Allocator.E
 }
 
 /// Deliver the resolved prompt to a freshly-created session over stdin via a
-/// `sessions.action input` request, then inspect the result. The follow-up is
+/// `sessions.action submit` request, then inspect the result. The follow-up is
 /// attributed to the SAME policy `caller` as the create (so a restricted source
 /// cannot be evaluated as the trusted local source for the `input:send`
 /// capability), and a denied/failed delivery (`ok:false`, a socket error, or an
@@ -303,7 +303,7 @@ fn deliverStdinPrompt(
         return;
     }) {
         .ok => {},
-        // The server rejected the input (e.g. unauthorized / confirmation_required
+        // The server rejected the submit (e.g. unauthorized / confirmation_required
         // / already_ended). The tab launched but the prompt was not delivered.
         .err => |e| setPromptError(rec, e.code, e.message orelse "prompt delivery rejected"),
     }
@@ -337,10 +337,10 @@ fn buildCreateRequest(
     return out.toOwnedSlice();
 }
 
-/// Build a `sessions.action` request that types `input` into `session_id`. The
-/// optional `caller` attributes the action to the same policy source as the
-/// create, so the `input:send` capability is evaluated against that source rather
-/// than defaulting to the trusted local source.
+/// Build a `sessions.action` request that pastes `input` into `session_id` and
+/// sends Enter. The optional `caller` attributes the action to the same policy
+/// source as the create, so the `input:send` capability is evaluated against
+/// that source rather than defaulting to the trusted local source.
 fn buildInputRequest(
     alloc: Allocator,
     token: []const u8,
@@ -377,7 +377,7 @@ fn writeInputRequest(
         try json.write(c);
     }
     try json.objectField("action");
-    try json.write("input");
+    try json.write("submit");
     try json.objectField("input");
     try json.write(input);
     try json.endObject();
@@ -791,7 +791,7 @@ test "dry-run resolves and dedup-checks but never sends or records" {
     try testing.expect(!store.seen("t", "linear", "evt-1"));
 }
 
-test "stdin delivery sends a follow-up input action" {
+test "stdin delivery sends a follow-up submit action" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -800,7 +800,7 @@ test "stdin delivery sends a follow-up input action" {
     const req = try connector.resolve(alloc, .{
         .command = "codex",
         .prompt_delivery = .stdin,
-        // A restricted policy source: the follow-up input must be attributed to it.
+        // A restricted policy source: the follow-up submit must be attributed to it.
         .caller = "trusted-automation",
     }, ev, .{});
 
@@ -825,18 +825,18 @@ test "stdin delivery sends a follow-up input action" {
     try testing.expectEqual(@as(usize, 2), sender.requests.items.len);
     // The create request must NOT carry the prompt for stdin delivery.
     try testing.expect(std.mem.indexOf(u8, sender.requests.items[0], "Work on MAX-8") == null);
-    // The follow-up is a sessions.action input carrying the prompt AND the same
+    // The follow-up is a sessions.action submit carrying the prompt AND the same
     // policy caller as the create (so input:send is evaluated against that source,
     // not the trusted local source).
     const second = sender.requests.items[1];
     try testing.expect(std.mem.indexOf(u8, second, "sessions.action") != null);
-    try testing.expect(std.mem.indexOf(u8, second, "\"action\":\"input\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "\"action\":\"submit\"") != null);
     try testing.expect(std.mem.indexOf(u8, second, "Work on MAX-8") != null);
     try testing.expect(std.mem.indexOf(u8, second, "SID-9") != null);
     try testing.expect(std.mem.indexOf(u8, second, "\"caller\":\"trusted-automation\"") != null);
 }
 
-test "stdin delivery surfaces a rejected input without claiming success" {
+test "stdin delivery surfaces a rejected submit without claiming success" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -855,7 +855,7 @@ test "stdin delivery surfaces a rejected input without claiming success" {
         .caller = "trusted-automation",
     }, ev, .{});
 
-    // The create succeeds, but the policy denies the follow-up input.
+    // The create succeeds, but the policy denies the follow-up submit.
     var sender = RecordingSender{
         .alloc = alloc,
         .responses = &.{

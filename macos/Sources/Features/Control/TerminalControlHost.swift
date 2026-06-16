@@ -147,6 +147,13 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         view.surfaceModel?.sendText(text)
     }
 
+    func submitInput(_ text: String) {
+        guard let surface = view.surfaceModel else { return }
+        surface.sendText(text)
+        surface.sendKeyEvent(.init(key: .enter, action: .press))
+        surface.sendKeyEvent(.init(key: .enter, action: .release))
+    }
+
     @discardableResult
     func interrupt(signal: Int32?) -> Bool {
         // Nothing to interrupt once the process has exited or the surface model

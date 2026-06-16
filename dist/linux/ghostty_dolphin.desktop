@@ -7,4 +7,4 @@ Actions=RunGhosttyDir
 [Desktop Action RunGhosttyDir]
 Name=Open Maxx Here
 Icon=com.mitchellh.ghostty
-Exec=ghostty +new-window --working-directory=%F
+Exec=maxx +new-window --working-directory=%F

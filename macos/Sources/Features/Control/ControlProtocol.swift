@@ -32,7 +32,7 @@ enum ControlMethod: String, Codable {
     /// Update caller-owned metadata/status only. (`PATCH /sessions/{id}`)
     case sessionsUpdate = "sessions.update"
 
-    /// Send a constrained action: focus, input, interrupt, cancel, close.
+    /// Send a constrained action: focus, input, submit, interrupt, cancel, close.
     /// (`POST /sessions/{id}/actions`)
     case sessionsAction = "sessions.action"
 

@@ -221,7 +221,8 @@ const ParseError = error{
 ///   * `sessions cancel <session_id>`: cancel/close a session (idempotent).
 ///
 ///   * `sessions action <session_id> --action <name>`: send a constrained
-///     action — `focus`, `input` (with `--input <text>`), `interrupt`
+///     action — `focus`, `input` (with `--input <text>`), `submit`
+///     (with `--input <text>`, then Enter), `interrupt`
 ///     (optionally `--signal SIGTERM`), `cancel`, or `close`.
 ///
 /// Lifecycle control verbs (the `maxxctl` half of the surface — Maxx runtime
@@ -1784,6 +1785,25 @@ test "parseCommand action with --as caller and --confirm" {
     try testing.expectEqualStrings("input", cmd.action.?);
     try testing.expectEqualStrings("local-prompt", cmd.caller.?);
     try testing.expect(cmd.confirm);
+}
+
+test "parseCommand action submit with input" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions action ID-1 --action submit --input hi",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .action);
+    try testing.expectEqualStrings("ID-1", cmd.id.?);
+    try testing.expectEqualStrings("submit", cmd.action.?);
+    try testing.expectEqualStrings("hi", cmd.input.?);
 }
 
 test "buildRequest carries caller and confirm" {

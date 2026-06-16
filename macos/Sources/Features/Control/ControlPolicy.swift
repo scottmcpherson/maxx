@@ -543,7 +543,7 @@ enum ControlPolicyMapping {
         case .sessionsAction:
             switch params?.action ?? "" {
             case "focus": return .tabsFocus
-            case "input": return .inputSend
+            case "input", "submit": return .inputSend
             case "interrupt": return .keysPress
             case "cancel", "close": return .tabsClose
             default: return nil

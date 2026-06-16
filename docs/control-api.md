@@ -194,8 +194,7 @@ a separate audit entry.
 
 ## CLI
 
-The `ghostty`/`maxx` binary ships a `+control` action that handles the token and
-socket for you:
+The app CLI ships a `+control` action that handles the token and socket for you.
 
 ```bash
 maxx +control sessions create \
@@ -213,9 +212,13 @@ maxx +control sessions get <session_id>
 maxx +control sessions list
 maxx +control sessions update <session_id> --status waiting_for_review
 maxx +control sessions action <session_id> --action focus
-maxx +control sessions action <session_id> --action input --input $'echo hi\n'
+maxx +control sessions action <session_id> --action input --input 'echo hi'
+maxx +control sessions action <session_id> --action submit --input 'echo hi'
 maxx +control sessions cancel <session_id>
 ```
+
+`input` is paste-only. Use `submit` when the line must execute immediately; it
+pastes the supplied input and then sends an Enter key press/release.
 
 ### Lifecycle control (`maxxctl` half)
 
@@ -444,7 +447,7 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.get`              | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
 | `sessions.list`             | `GET /control/v1/sessions`                     | List control sessions; optional `metadata_filter`, `parent`/`group` filters.        |
 | `sessions.update`           | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only (metadata merges).                     |
-| `sessions.action`           | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
+| `sessions.action`           | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `submit`, `interrupt` (`signal`), `cancel`, `close`.              |
 | `sessions.wait`             | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
 | `sessions.watch`            | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
 | `sessions.archive`          | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
