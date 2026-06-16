@@ -108,6 +108,7 @@ Each route:
 | `trigger`         | no       | `path`         | Display name recorded as the trigger.                                    |
 | `max_body_bytes`  | no       | global default | Per-route body cap.                                                      |
 | `dedup_header`    | no       | —              | Request header carrying a per-delivery id for dedup (see below).         |
+| `predicates`      | no       | —              | Exact checks over explicit adapter fields (see below).                   |
 | `auth`            | yes      | —              | Authentication (below).                                                  |
 
 `${field}` placeholders in `title`, `cwd`, `group`, and `env` values are filled
@@ -130,6 +131,59 @@ provides and the templating rules.
 > — the shell does not re-tokenize an expanded variable — or read
 > `$MAXX_WEBHOOK_PAYLOAD_FILE` / the connector prompt. A plain `$VAR` (no braces)
 > in `command` is a normal shell reference and is left untouched.
+
+### Predicates
+
+`predicates` is an array of exact checks over fields copied by the configured
+connector adapter. All predicates must match. Each predicate object has a
+non-empty `field` and exactly one operation:
+
+| Operation     | Value type | Meaning                                      |
+| ------------- | ---------- | -------------------------------------------- |
+| `equals`      | string     | Field must be a string exactly equal to it.  |
+| `equals_bool` | boolean    | Field must be a boolean exactly equal to it. |
+| `present`     | `true`     | Field must be present with any value.        |
+
+Predicates run after authentication and adapter parsing, before template
+resolution, raw-payload temp-file writes, duplicate suppression, or launch. A
+mismatch returns `{"ok":true,"outcome":"filtered","field":...}` and performs no
+launch side effects. Comparisons are structured field comparisons, not regexes
+over raw payload text.
+
+Linear issue route that launches only when the payload explicitly carries the
+Todo state:
+
+```json
+{
+  "path": "/hooks/linear-todo",
+  "source": "linear",
+  "command": "codex resume --prompt-file $MAXX_WEBHOOK_PAYLOAD_FILE",
+  "title": "${issue.identifier}: ${title}",
+  "predicates": [
+    { "field": "action", "equals": "update" },
+    { "field": "issue.state.name", "equals": "Todo" }
+  ],
+  "auth": { "mode": "hmac", "secret_env": "LINEAR_SECRET", "header": "X-Webhook-Signature", "prefix": "sha256=" }
+}
+```
+
+GitHub route that launches cleanup only when a pull request payload explicitly
+says it was merged:
+
+```json
+{
+  "path": "/hooks/github-pr-merged",
+  "source": "github",
+  "command": "codex run cleanup-merged-pr",
+  "title": "Merged PR #${number}: ${title}",
+  "predicates": [
+    { "field": "object.type", "equals": "pull_request" },
+    { "field": "action", "equals": "closed" },
+    { "field": "pull_request.merged", "equals_bool": true }
+  ],
+  "auth": { "mode": "hmac", "secret_env": "GITHUB_SECRET", "header": "X-Hub-Signature-256", "prefix": "sha256=" }
+}
+```
 
 ### Authentication
 
@@ -179,7 +233,7 @@ secret:
 
 | Status | When                                                                                                              |
 | ------ | ----------------------------------------------------------------------------------------------------------------- |
-| `200`  | Launched (`{"ok":true,"outcome":"launched","session_id":…}`) or a suppressed duplicate (`"outcome":"duplicate"`). |
+| `200`  | Launched (`{"ok":true,"outcome":"launched","session_id":…}`), suppressed duplicate (`"outcome":"duplicate"`), or filtered predicate mismatch (`"outcome":"filtered"`). |
 | `401`  | Missing/invalid signature **or an unknown route** (the two are intentionally indistinguishable — see below).      |
 | `405`  | Method is not `POST` (only returned once the caller is authenticated).                                            |
 | `413`  | Body exceeds the route's cap (post-auth) or the global read cap.                                                  |
@@ -210,6 +264,10 @@ The store is bounded by count, age, and size. The new dedup entry is persisted
 disk-full), the launch still returns `200` (the tab exists) but carries a
 `"warning":"dedup_not_persisted"` and logs the failure, rather than silently
 acking a key that would not survive a restart.
+
+**Predicate filtering.** A filtered request does not resolve templates, write
+`MAXX_WEBHOOK_PAYLOAD_FILE`, check or record dedup state, or send a Control API
+request. It still logs an activity line with `outcome=filtered`.
 
 **Logging.** Each request logs one redacted line (method, path, status, outcome,
 source, event id, session id, error code) under the `webhook` scope. The body,

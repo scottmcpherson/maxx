@@ -8,7 +8,8 @@
 //! workflow intent: the adapter never reads branch names, paths, or process
 //! state to decide meaning. It copies only fields the payload states explicitly
 //! (title, number, url, body, repo full name) and assembles the prompt from
-//! them. See the no-inference contract in `Adapter.zig`.
+//! them, including the pull request `merged` boolean when GitHub states it
+//! explicitly. See the no-inference contract in `Adapter.zig`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -68,6 +69,10 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
         j.getString(repo, "full_name")
     else
         null;
+    const merged = if (std.mem.eql(u8, event_type, "pull_request"))
+        j.getBool(obj, "merged")
+    else
+        null;
 
     var event: TriggerEvent = .{
         .source = adapter.name,
@@ -79,8 +84,15 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     };
 
     try event.putField(alloc, "action", action);
+    try event.putField(alloc, "object.type", event_type);
     try event.putField(alloc, "repo.full_name", repo_full_name);
     try event.putField(alloc, "number", number);
+    if (std.mem.eql(u8, event_type, "pull_request")) {
+        try event.putField(alloc, "pull_request.number", number);
+        try event.putBoolField(alloc, "pull_request.merged", merged);
+    } else if (std.mem.eql(u8, event_type, "issue")) {
+        try event.putField(alloc, "issue.number", number);
+    }
 
     return event;
 }
@@ -135,7 +147,8 @@ const pr_fixture =
     \\    "number": 7,
     \\    "title": "Add connector adapter layer",
     \\    "body": "Implements MAX-10.",
-    \\    "html_url": "https://github.com/maxx/maxx/pull/7"
+    \\    "html_url": "https://github.com/maxx/maxx/pull/7",
+    \\    "merged": true
     \\  },
     \\  "repository": { "full_name": "maxx/maxx" }
     \\}
@@ -153,9 +166,11 @@ test "github: parses an issue webhook" {
     try testing.expectEqualStrings("issue", ev.type);
     try testing.expectEqualStrings("Crash when opening a tab", ev.title);
     try testing.expectEqualStrings("https://github.com/maxx/maxx/issues/42", ev.url.?);
-    try testing.expectEqualStrings("42", ev.fields.get("number").?);
-    try testing.expectEqualStrings("maxx/maxx", ev.fields.get("repo.full_name").?);
-    try testing.expectEqualStrings("opened", ev.fields.get("action").?);
+    try testing.expectEqualStrings("issue", ev.fields.get("object.type").?.string);
+    try testing.expectEqualStrings("42", ev.fields.get("number").?.string);
+    try testing.expectEqualStrings("42", ev.fields.get("issue.number").?.string);
+    try testing.expectEqualStrings("maxx/maxx", ev.fields.get("repo.full_name").?.string);
+    try testing.expectEqualStrings("opened", ev.fields.get("action").?.string);
     try testing.expect(std.mem.indexOf(u8, ev.prompt.?, "#42") != null);
 }
 
@@ -169,7 +184,10 @@ test "github: parses a pull_request webhook and prefers it over issue subset" {
     try testing.expectEqualStrings("pull_request", ev.type);
     try testing.expectEqualStrings("Add connector adapter layer", ev.title);
     try testing.expectEqualStrings("https://github.com/maxx/maxx/pull/7", ev.url.?);
-    try testing.expectEqualStrings("7", ev.fields.get("number").?);
+    try testing.expectEqualStrings("pull_request", ev.fields.get("object.type").?.string);
+    try testing.expectEqualStrings("7", ev.fields.get("number").?.string);
+    try testing.expectEqualStrings("7", ev.fields.get("pull_request.number").?.string);
+    try testing.expectEqual(true, ev.fields.get("pull_request.merged").?.bool);
 }
 
 test "github: falls back to numeric id when node_id absent" {

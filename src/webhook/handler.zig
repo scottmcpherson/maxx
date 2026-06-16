@@ -21,9 +21,11 @@
 //!   4. **Parse** — the configured connector adapter turns the opaque body into
 //!      a `TriggerEvent` (400 on malformed/unsupported payloads). Maxx reads only
 //!      the explicit fields the adapter copies; it never interprets meaning.
-//!   5. **Resolve** — the route's launch template against the event (422 when the
+//!   5. **Filter** — exact configured predicates over explicit adapter fields;
+//!      mismatches return `filtered` without launch side effects.
+//!   6. **Resolve** — the route's launch template against the event (422 when the
 //!      payload lacks a templated field).
-//!   6. **Launch** — `runner.dispatch`: suppress duplicates, send
+//!   7. **Launch** — `runner.dispatch`: suppress duplicates, send
 //!      `sessions.create` with the injected capability token, deliver the prompt
 //!      and the raw payload file. The outcome (launched / duplicate / failed) is
 //!      mapped to a status code and a tiny JSON body that never echoes the
@@ -116,9 +118,9 @@ pub const Deps = struct {
 /// The result of handling one request.
 pub const Result = struct {
     response: Response,
-    /// Present when a dispatch occurred (launched/duplicate/failed); used for
-    /// logging and to decide temp-file housekeeping. Absent for transport/auth
-    /// rejections.
+    /// Present when an event reached route-specific activity
+    /// (launched/duplicate/failed/filtered); used for logging and temp-file
+    /// housekeeping. Absent for transport/auth rejections.
     record: ?runner.ActivityRecord = null,
 };
 
@@ -176,7 +178,21 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         return plain(try jsonResp(alloc, 400, &.{ kv("error", "invalid_payload"), kv("detail", detail) }));
     };
 
-    // 5. Resolve the route's launch template against the explicit event fields.
+    // 5. Predicate filtering is exact and side-effect-free. It runs after
+    // authentication + adapter parsing, but before template resolution, dedup,
+    // raw-payload temp files, or Control API sends.
+    if (connector.Predicate.firstMismatch(route.predicates, event)) |mismatch| {
+        return .{
+            .response = try jsonResp(alloc, 200, &.{
+                ok(),
+                kv("outcome", "filtered"),
+                kv("field", mismatch.field),
+            }),
+            .record = filteredRecord(route, event, deps.received_at),
+        };
+    }
+
+    // 6. Resolve the route's launch template against the explicit event fields.
     var diag: Template.Diagnostic = .{};
     const resolved = connector.resolve(alloc, route.template(), event, .{
         .launched_at = deps.received_at,
@@ -212,7 +228,7 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         }
     }
 
-    // 6a. Short-circuit a known duplicate before writing any payload file, so a
+    // 7a. Short-circuit a known duplicate before writing any payload file, so a
     //     redelivery storm cannot leave orphan temp files. `runner.dispatch`
     //     re-checks dedup authoritatively for the non-duplicate path.
     if (dedup_store) |store| {
@@ -228,7 +244,7 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         }
     }
 
-    // 6b. Deliver the raw payload as a temp file the command can read.
+    // 7b. Deliver the raw payload as a temp file the command can read.
     var launch = resolved;
     var payload_path: ?[]const u8 = null;
     if (deps.prompt_dir) |dir| {
@@ -239,7 +255,7 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         launch.env = try appendEnv(alloc, resolved.env, .{ .key = payload_file_env_var, .value = payload_path.? });
     }
 
-    // 6c. Launch through the existing runner/Control-API pipeline.
+    // 7c. Launch through the existing runner/Control-API pipeline.
     const rec = try runner.dispatch(alloc, .{
         .trigger = route.trigger,
         .trigger_type = .webhook_relay,
@@ -302,6 +318,8 @@ pub fn handle(alloc: Allocator, cfg: Config, req: Request, deps: Deps) Allocator
         },
         // The webhook handler never dry-runs.
         .dry_run => unreachable,
+        // Filtered requests return before runner.dispatch.
+        .filtered => unreachable,
     };
 }
 
@@ -337,6 +355,20 @@ fn baseRecord(route: Config.Route, event: connector.TriggerEvent, resolved: conn
         .command = resolved.command,
         .title = resolved.title,
         .outcome = outcome,
+    };
+}
+
+fn filteredRecord(route: Config.Route, event: connector.TriggerEvent, at: []const u8) runner.ActivityRecord {
+    return .{
+        .trigger = route.trigger,
+        .trigger_type = .webhook_relay,
+        .received_at = at,
+        .source = event.source,
+        .event_id = event.id,
+        .dedup_key = "",
+        .command = route.command,
+        .title = event.title,
+        .outcome = .filtered,
     };
 }
 
@@ -499,6 +531,22 @@ const ok_response = "{\"ok\":true,\"result\":{\"session\":{\"session_id\":\"SID-
 
 const linear_payload =
     \\{"action":"update","type":"Issue","data":{"id":"evt-1","identifier":"MAX-9","title":"Webhook ingestion","url":"https://linear.app/x/MAX-9"}}
+;
+
+const linear_todo_payload =
+    \\{"action":"update","type":"Issue","data":{"id":"evt-1","identifier":"MAX-9","title":"Webhook ingestion","url":"https://linear.app/x/MAX-9","state":{"id":"state-todo","name":"Todo"}}}
+;
+
+const linear_done_payload =
+    \\{"action":"update","type":"Issue","data":{"id":"evt-1","identifier":"MAX-9","title":"Webhook ingestion","url":"https://linear.app/x/MAX-9","state":{"id":"state-done","name":"Done"}}}
+;
+
+const github_pr_merged_payload =
+    \\{"action":"closed","pull_request":{"id":99,"node_id":"PR_1","number":7,"title":"Cleanup","html_url":"https://github.com/o/r/pull/7","merged":true},"repository":{"full_name":"o/r"}}
+;
+
+const github_pr_unmerged_payload =
+    \\{"action":"closed","pull_request":{"id":99,"node_id":"PR_1","number":7,"title":"Cleanup","html_url":"https://github.com/o/r/pull/7","merged":false},"repository":{"full_name":"o/r"}}
 ;
 
 fn cfgWith(alloc: Allocator, route_json: []const u8) !Config {
@@ -718,6 +766,154 @@ test "a templated field the payload lacks is 422" {
     }, makeDeps(&sender, &secrets));
     try testing.expectEqual(@as(u16, 422), res.response.status);
     try testing.expect(std.mem.indexOf(u8, res.response.body, "nonexistent.field") != null);
+    try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
+}
+
+test "matching linear predicate launches only Todo payloads" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","equals":"Todo"}],"auth":{"mode":"none"}}
+    );
+    var sender = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    var secrets = SecretMap{ .entries = &.{} };
+    const res = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .body = linear_todo_payload,
+    }, makeDeps(&sender, &secrets));
+
+    try testing.expectEqual(@as(u16, 200), res.response.status);
+    try testing.expect(std.mem.indexOf(u8, res.response.body, "\"outcome\":\"launched\"") != null);
+    try testing.expectEqual(@as(usize, 1), sender.requests.items.len);
+}
+
+test "predicate mismatch filters before resolve dedup payload file or launch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const dir = try td.dir.realpathAlloc(alloc, ".");
+    const state_path = try std.fs.path.join(alloc, &.{ dir, "seen.json" });
+    var store = try runner.DedupStore.open(testing.allocator, state_path);
+    defer store.deinit();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","title":"${missing.required}","dedup_header":"X-Delivery","predicates":[{"field":"issue.state.name","equals":"Todo"}],"auth":{"mode":"none"}}
+    );
+    var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    var secrets = SecretMap{ .entries = &.{} };
+    var persister = CountingPersister{};
+    var deps = makeDeps(&sender, &secrets);
+    deps.prompt_dir = dir;
+    deps.dedup = &store;
+    deps.persist = CountingPersister.persist;
+    deps.persist_ctx = &persister;
+
+    const res = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .headers = &.{.{ .name = "X-Delivery", .value = "D1" }},
+        .body = linear_done_payload,
+    }, deps);
+
+    try testing.expectEqual(@as(u16, 200), res.response.status);
+    try testing.expect(std.mem.indexOf(u8, res.response.body, "\"outcome\":\"filtered\"") != null);
+    try testing.expect(std.mem.indexOf(u8, res.response.body, "issue.state.name") != null);
+    try testing.expectEqual(runner.Outcome.filtered, res.record.?.outcome);
+    try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
+    try testing.expectEqual(@as(usize, 0), store.count());
+    try testing.expectEqual(@as(usize, 0), persister.calls);
+
+    var it = td.dir.iterate();
+    while (try it.next()) |entry| {
+        try testing.expect(!std.mem.startsWith(u8, entry.name, payload_file_prefix));
+    }
+}
+
+test "missing predicate field filters without launching" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","equals":"Todo"}],"auth":{"mode":"none"}}
+    );
+    var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    var secrets = SecretMap{ .entries = &.{} };
+    const res = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .body = linear_payload,
+    }, makeDeps(&sender, &secrets));
+
+    try testing.expectEqual(@as(u16, 200), res.response.status);
+    try testing.expect(std.mem.indexOf(u8, res.response.body, "\"outcome\":\"filtered\"") != null);
+    try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
+}
+
+test "boolean predicate filters GitHub pull requests by merged flag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"github","command":"c","predicates":[{"field":"object.type","equals":"pull_request"},{"field":"pull_request.merged","equals_bool":true}],"auth":{"mode":"none"}}
+    );
+    var secrets = SecretMap{ .entries = &.{} };
+
+    var s1 = RecordingSender{ .alloc = alloc, .responses = &.{ok_response} };
+    const merged = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .body = github_pr_merged_payload,
+    }, makeDeps(&s1, &secrets));
+    try testing.expectEqual(@as(u16, 200), merged.response.status);
+    try testing.expect(std.mem.indexOf(u8, merged.response.body, "\"outcome\":\"launched\"") != null);
+    try testing.expectEqual(@as(usize, 1), s1.requests.items.len);
+
+    var s2 = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    const unmerged = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .body = github_pr_unmerged_payload,
+    }, makeDeps(&s2, &secrets));
+    try testing.expectEqual(@as(u16, 200), unmerged.response.status);
+    try testing.expect(std.mem.indexOf(u8, unmerged.response.body, "\"outcome\":\"filtered\"") != null);
+    try testing.expectEqual(@as(usize, 0), s2.requests.items.len);
+}
+
+test "no-inference: predicate ignores bait fields the adapter did not copy" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cfg = try cfgWith(alloc,
+        \\{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","equals":"Todo"}],"auth":{"mode":"none"}}
+    );
+    const bait_payload =
+        \\{"action":"update","type":"Issue","data":{"id":"evt-1","identifier":"MAX-9","title":"Safe Title","state":"Todo","branch":"LEAK_BRANCH"}}
+    ;
+    var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
+    var secrets = SecretMap{ .entries = &.{} };
+    const res = try handle(alloc, cfg, .{
+        .method = "POST",
+        .path = "/h",
+        .content_type = "application/json",
+        .body = bait_payload,
+    }, makeDeps(&sender, &secrets));
+
+    try testing.expectEqual(@as(u16, 200), res.response.status);
+    try testing.expect(std.mem.indexOf(u8, res.response.body, "\"outcome\":\"filtered\"") != null);
     try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
 }
 

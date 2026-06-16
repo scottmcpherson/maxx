@@ -36,6 +36,15 @@ pub fn getObject(obj: Object, name: []const u8) ?Object {
     };
 }
 
+/// The boolean value of `obj[name]`, or null if absent / not a bool.
+pub fn getBool(obj: Object, name: []const u8) ?bool {
+    const v = obj.get(name) orelse return null;
+    return switch (v) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
 /// A numeric field rendered as a string (e.g. an issue/PR number), or null if
 /// absent / not a number. The result is allocated with `alloc`.
 pub fn getNumberAsString(alloc: Allocator, obj: Object, name: []const u8) Allocator.Error!?[]const u8 {
@@ -78,6 +87,8 @@ test "getString and getObject read explicit fields" {
     try testing.expect(getString(obj, "flag") == null); // wrong type
     try testing.expectEqualStrings("Hi", getNonEmptyString(obj, "title").?);
     try testing.expectEqualStrings("v", getObject(obj, "nested").?.get("key").?.string);
+    try testing.expectEqual(true, getBool(obj, "flag").?);
+    try testing.expect(getBool(obj, "title") == null);
     try testing.expectEqualStrings("42", (try getNumberAsString(alloc, obj, "n")).?);
     try testing.expect((try getNumberAsString(alloc, obj, "title")) == null);
 }

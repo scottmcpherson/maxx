@@ -127,11 +127,11 @@ infers nothing; positive fixtures prove explicit declarations still render.
 - `src/agent_hook/main.zig` (`agent hook state normalization`) — prose, PR
   URLs, and branch-like strings normalize to no state.
 - `src/connector/connector.zig` (`no-inference: adapters surface only explicit
-fields`) — connector payloads stuffed with bait (branch, head ref, labels,
-  state, assignees, paths) never leak into the event, prompt, provenance
-  metadata, caller, group, or the emitted `sessions.create` request; only
-  explicitly copied fields and templated group values from explicit event fields
-  appear.
+fields`) — connector payloads stuffed with uncopied bait (branch, head ref,
+  labels, plain state strings, assignees, paths) never leak into the event,
+  prompt, provenance metadata, caller, group, or the emitted `sessions.create`
+  request; only explicitly copied fields and templated group values from
+  explicit event fields appear.
 - `src/runner/runner.zig` (`no-inference: only explicit fields and reserved
   provenance reach the request`) — the automation trigger runner dispatches a
   payload stuffed with bait and asserts none of it reaches the `sessions.create`

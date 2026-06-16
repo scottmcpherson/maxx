@@ -3,9 +3,10 @@
 //! Parses a Linear webhook/event payload (the canonical
 //! `{ type, action, data: { ... }, url }` envelope Linear delivers) into a
 //! normalized `TriggerEvent`. It copies only fields Linear states explicitly —
-//! issue id, title, identifier, url, description, team key — and assembles the
-//! prompt by concatenating them. It assigns no Maxx meaning to "issue": the word
-//! is just a label on a bag of payload fields. See the no-inference contract in
+//! issue id, title, identifier, url, description, team key, action, and
+//! structured workflow state fields — and assembles the prompt by concatenating
+//! them. It assigns no Maxx meaning to "issue" or "state": those words are just
+//! labels on a bag of payload fields. See the no-inference contract in
 //! `Adapter.zig`.
 
 const std = @import("std");
@@ -62,6 +63,7 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     const description = j.getString(data, "description");
     const action = j.getString(root, "action");
     const team_key = if (j.getObject(data, "team")) |team| j.getString(team, "key") else null;
+    const state = j.getObject(data, "state");
 
     var event: TriggerEvent = .{
         .source = adapter.name,
@@ -73,9 +75,15 @@ fn parse(alloc: Allocator, payload: []const u8) Adapter.Error!TriggerEvent {
     };
 
     try event.putField(alloc, "action", action);
+    try event.putField(alloc, "issue.id", id);
     try event.putField(alloc, "issue.identifier", identifier);
     try event.putField(alloc, "issue.url", url);
     try event.putField(alloc, "team.key", team_key);
+    if (state) |s| {
+        try event.putField(alloc, "issue.state.id", j.getString(s, "id"));
+        try event.putField(alloc, "issue.state.name", j.getString(s, "name"));
+        try event.putField(alloc, "issue.state.type", j.getString(s, "type"));
+    }
 
     return event;
 }
@@ -117,7 +125,8 @@ const fixture =
     \\    "title": "Implement connector adapter layer",
     \\    "description": "Build a connector adapter layer.",
     \\    "url": "https://linear.app/maxx/issue/MAX-10/implement-connector-adapter-layer",
-    \\    "team": { "key": "MAX", "name": "Maxx" }
+    \\    "team": { "key": "MAX", "name": "Maxx" },
+    \\    "state": { "id": "state-todo", "name": "Todo", "type": "unstarted" }
     \\  },
     \\  "url": "https://linear.app/maxx/issue/MAX-10/implement-connector-adapter-layer"
     \\}
@@ -138,9 +147,12 @@ test "linear: parses a representative issue webhook" {
         "https://linear.app/maxx/issue/MAX-10/implement-connector-adapter-layer",
         ev.url.?,
     );
-    try testing.expectEqualStrings("MAX-10", ev.fields.get("issue.identifier").?);
-    try testing.expectEqualStrings("MAX", ev.fields.get("team.key").?);
-    try testing.expectEqualStrings("create", ev.fields.get("action").?);
+    try testing.expectEqualStrings("e8f3c1a2-0000-4444-8888-000000000010", ev.fields.get("issue.id").?.string);
+    try testing.expectEqualStrings("MAX-10", ev.fields.get("issue.identifier").?.string);
+    try testing.expectEqualStrings("MAX", ev.fields.get("team.key").?.string);
+    try testing.expectEqualStrings("create", ev.fields.get("action").?.string);
+    try testing.expectEqualStrings("Todo", ev.fields.get("issue.state.name").?.string);
+    try testing.expectEqualStrings("state-todo", ev.fields.get("issue.state.id").?.string);
 
     // The prompt is just explicit fields concatenated.
     try testing.expect(std.mem.indexOf(u8, ev.prompt.?, "MAX-10") != null);

@@ -44,6 +44,7 @@ job — not inference of intent from runtime state.
 | ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------- |
 | `Adapter`                    | `src/connector/Adapter.zig`              | The source-adapter interface.                                          |
 | `TriggerEvent`               | `src/connector/Event.zig`                | Normalized, source-agnostic event of explicit fields.                  |
+| `Predicate`                  | `src/connector/Predicate.zig`            | Exact checks over explicit event fields before launch side effects.    |
 | `LaunchTemplate` / `resolve` | `src/connector/Template.zig`             | Per-connector launch config and its resolution into a `LaunchRequest`. |
 | `linear`, `github`           | `src/connector/linear.zig`, `github.zig` | Starter adapters.                                                      |
 
@@ -92,7 +93,37 @@ The normalized event. Every field is an explicit value copied from the payload:
 | `title`  | Human-facing tab title.                                       |
 | `url`    | Canonical source URL, when the payload provides one.          |
 | `prompt` | Prompt/context text, assembled from explicit fields.          |
-| `fields` | Extra explicit fields, dotted keys (e.g. `issue.identifier`). |
+| `fields` | Extra explicit string or boolean fields, dotted keys (e.g. `issue.identifier`). |
+
+`lookup` renders fields as strings for template placeholders. Predicate
+evaluation uses the typed value, so `equals_bool` only matches a boolean field;
+a string value `"true"` is not treated as boolean `true`.
+
+## Built-in adapter fields
+
+The built-in adapters expose these extra fields when the payload explicitly
+provides them. Missing or wrong-typed fields stay absent.
+
+| Source   | Field                     | Type    | Source payload field                                      |
+| -------- | ------------------------- | ------- | --------------------------------------------------------- |
+| `linear` | `action`                  | string  | top-level `action`                                        |
+| `linear` | `issue.id`                | string  | `data.id`                                                 |
+| `linear` | `issue.identifier`        | string  | `data.identifier`                                         |
+| `linear` | `issue.url`               | string  | `data.url`, falling back to top-level `url`               |
+| `linear` | `issue.state.id`          | string  | `data.state.id`                                           |
+| `linear` | `issue.state.name`        | string  | `data.state.name`                                         |
+| `linear` | `issue.state.type`        | string  | `data.state.type`                                         |
+| `linear` | `team.key`                | string  | `data.team.key`                                           |
+| `github` | `action`                  | string  | top-level `action`                                        |
+| `github` | `object.type`             | string  | structural object key: `issue` or `pull_request`          |
+| `github` | `repo.full_name`          | string  | `repository.full_name`                                    |
+| `github` | `number`                  | string  | object `number`                                           |
+| `github` | `issue.number`            | string  | `issue.number` for issue payloads                         |
+| `github` | `pull_request.number`     | string  | `pull_request.number` for pull request payloads           |
+| `github` | `pull_request.merged`     | boolean | `pull_request.merged`, only when present as a JSON bool    |
+
+These are copied fields, not workflow interpretations. For example, a route may
+compare `issue.state.name` to `Todo`, but Maxx does not decide what Todo means.
 
 ## Launch templates
 
