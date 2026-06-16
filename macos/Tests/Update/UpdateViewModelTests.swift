@@ -26,6 +26,23 @@ struct UpdateViewModelTests {
         #expect(viewModel.text == "Checking for Updates…")
     }
 
+    @Test func testBeginCheckingShowsImmediateFeedbackAndDismissesOnCancel() {
+        let viewModel = UpdateViewModel()
+        var didCancel = false
+
+        viewModel.beginChecking {
+            didCancel = true
+        }
+
+        #expect(viewModel.text == "Checking for Updates…")
+        #expect(viewModel.state.isIdle == false)
+
+        viewModel.state.cancel()
+
+        #expect(didCancel)
+        #expect(viewModel.state.isIdle)
+    }
+
     @Test func testDownloadingTextWithKnownLength() {
         let viewModel = UpdateViewModel()
         viewModel.state = .downloading(.init(cancel: {}, expectedLength: 1000, progress: 500))

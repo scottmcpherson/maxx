@@ -94,19 +94,32 @@ class UpdateController {
     @objc func checkForUpdates() {
         // If we're already idle, then just check for updates immediately.
         if viewModel.state == .idle {
-            updater.checkForUpdates()
+            userDriver.showOptimisticUserInitiatedUpdateCheck()
+            checkForUpdatesPreservingFeedback()
             return
         }
 
         // If we're not idle then we need to cancel any prior state.
         installCancellable?.cancel()
         viewModel.state.cancel()
+        userDriver.showOptimisticUserInitiatedUpdateCheck()
 
         // The above will take time to settle, so we delay the check for some time.
         // The 100ms is arbitrary and I'd rather not, but we have to wait more than
         // one loop tick it seems.
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
-            self?.updater.checkForUpdates()
+            self?.checkForUpdatesPreservingFeedback()
+        }
+    }
+
+    private func checkForUpdatesPreservingFeedback() {
+        updater.checkForUpdates()
+
+        // Some Sparkle paths can return before `showUserInitiatedUpdateCheck`
+        // publishes the real cancellable state. Keep the sidebar responsive
+        // unless Sparkle already moved us to a concrete update state.
+        if viewModel.state == .idle {
+            userDriver.showOptimisticUserInitiatedUpdateCheck()
         }
     }
 

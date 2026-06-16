@@ -131,8 +131,8 @@ jobs:
 
           if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_CERTIFICATE_NAME:-}" ]]; then
             echo "Developer ID certificate secrets are not configured; using ad-hoc signing."
-            echo "MOSTTLY_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "MOSTTLY_NOTARIZE=0" >> "$GITHUB_ENV"
+            echo "MAXX_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "MAXX_NOTARIZE=0" >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -143,14 +143,14 @@ jobs:
           security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
 
-          echo "MOSTTLY_SIGNING_IDENTITY=$MACOS_CERTIFICATE_NAME" >> "$GITHUB_ENV"
-          echo "MOSTTLY_NOTARIZE=1" >> "$GITHUB_ENV"
+          echo "MAXX_SIGNING_IDENTITY=$MACOS_CERTIFICATE_NAME" >> "$GITHUB_ENV"
+          echo "MAXX_NOTARIZE=1" >> "$GITHUB_ENV"
 
       - name: Codesign app
         run: |
           set -euo pipefail
           APP="macos/build/Release/Maxx.app"
-          IDENTITY="${MOSTTLY_SIGNING_IDENTITY:--}"
+          IDENTITY="${MAXX_SIGNING_IDENTITY:--}"
 
           if [[ "$IDENTITY" == "-" ]]; then
             /usr/bin/codesign --force --deep --sign - "$APP"
@@ -201,12 +201,12 @@ jobs:
             -format UDZO \
             Maxx.dmg
 
-          if [[ "${MOSTTLY_SIGNING_IDENTITY:--}" != "-" ]]; then
-            /usr/bin/codesign --force --sign "$MOSTTLY_SIGNING_IDENTITY" --timestamp Maxx.dmg
+          if [[ "${MAXX_SIGNING_IDENTITY:--}" != "-" ]]; then
+            /usr/bin/codesign --force --sign "$MAXX_SIGNING_IDENTITY" --timestamp Maxx.dmg
           fi
 
       - name: Notarize DMG
-        if: env.MOSTTLY_NOTARIZE == '1'
+        if: env.MAXX_NOTARIZE == '1'
         env:
           APPLE_NOTARIZATION_ISSUER: ${{ secrets.MOSTTLY_APPLE_NOTARIZATION_ISSUER }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.MOSTTLY_APPLE_NOTARIZATION_KEY_ID }}
@@ -260,22 +260,22 @@ jobs:
 
       - name: Generate Sparkle appcast
         env:
-          MOSTTLY_SPARKLE_PRIVATE_KEY: ${{ secrets.MOSTTLY_SPARKLE_PRIVATE_KEY }}
-          MOSTTLY_VERSION: ${{ steps.meta.outputs.version }}
-          MOSTTLY_BUILD: ${{ steps.meta.outputs.build }}
-          MOSTTLY_RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-          MOSTTLY_COMMIT: ${{ steps.meta.outputs.commit }}
+          MAXX_SPARKLE_PRIVATE_KEY: ${{ secrets.MOSTTLY_SPARKLE_PRIVATE_KEY }}
+          MAXX_VERSION: ${{ steps.meta.outputs.version }}
+          MAXX_BUILD: ${{ steps.meta.outputs.build }}
+          MAXX_RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          MAXX_COMMIT: ${{ steps.meta.outputs.commit }}
         run: |
           set -euo pipefail
 
-          if [[ -z "${MOSTTLY_SPARKLE_PRIVATE_KEY:-}" ]]; then
+          if [[ -z "${MAXX_SPARKLE_PRIVATE_KEY:-}" ]]; then
             echo "MOSTTLY_SPARKLE_PRIVATE_KEY GitHub secret is required to generate appcast.xml" >&2
             exit 1
           fi
 
-          printf '%s' "$MOSTTLY_SPARKLE_PRIVATE_KEY" > signing.key
+          printf '%s' "$MAXX_SPARKLE_PRIVATE_KEY" > signing.key
           sign_update -f signing.key Maxx.dmg > sign_update.txt
-          MOSTTLY_COMMIT_LONG="$(git rev-parse HEAD)" python3 ./dist/macos/update_appcast_maxx.py
+          MAXX_COMMIT_LONG="$(git rev-parse HEAD)" python3 ./dist/macos/update_appcast_maxx.py
           rm signing.key sign_update.txt
 
       - name: Create or update GitHub release

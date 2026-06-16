@@ -5,11 +5,12 @@ Expected files in the current directory:
     - sign_update.txt: output from Sparkle's sign_update tool for Maxx.dmg
 
 Expected environment variables:
-    - MOSTTLY_VERSION: CFBundleShortVersionString, for example 0.1.0
-    - MOSTTLY_BUILD: CFBundleVersion, monotonically increasing build number
-    - MOSTTLY_RELEASE_TAG: GitHub release tag, for example maxx-v0.1.0
-    - MOSTTLY_COMMIT: short commit hash
-    - MOSTTLY_COMMIT_LONG: full commit hash
+    - MAXX_VERSION: CFBundleShortVersionString, for example 0.1.0
+    - MAXX_BUILD: CFBundleVersion, monotonically increasing build number
+    - MAXX_RELEASE_TAG: GitHub release tag, for example maxx-v0.1.0
+    - MAXX_COMMIT: short commit hash
+    - MAXX_COMMIT_LONG: full commit hash
+      Legacy MOSTTLY_* names are also accepted for local release scripts.
 
 Outputs appcast.xml in the current directory.
 """
@@ -46,16 +47,20 @@ def sub(parent, tag, text):
     return elem
 
 
+def required_env(name, legacy_name):
+    return os.environ.get(name) or os.environ[legacy_name]
+
+
 ET.register_namespace("sparkle", SPARKLE_NS)
 
 now = datetime.now(timezone.utc)
 pubdate_format = "%a, %d %b %Y %H:%M:%S %z"
 
-version = os.environ["MOSTTLY_VERSION"]
-build = os.environ["MOSTTLY_BUILD"]
-tag = os.environ["MOSTTLY_RELEASE_TAG"]
-commit = os.environ["MOSTTLY_COMMIT"]
-commit_long = os.environ["MOSTTLY_COMMIT_LONG"]
+version = required_env("MAXX_VERSION", "MOSTTLY_VERSION")
+build = required_env("MAXX_BUILD", "MOSTTLY_BUILD")
+tag = required_env("MAXX_RELEASE_TAG", "MOSTTLY_RELEASE_TAG")
+commit = required_env("MAXX_COMMIT", "MOSTTLY_COMMIT")
+commit_long = required_env("MAXX_COMMIT_LONG", "MOSTTLY_COMMIT_LONG")
 
 release_url = f"{REPO}/releases/tag/{tag}"
 download_url = f"{REPO}/releases/download/{tag}/Maxx.dmg"

@@ -5,6 +5,16 @@ import Sparkle
 class UpdateViewModel: ObservableObject {
     @Published var state: UpdateState = .idle
 
+    func beginChecking(cancel: @escaping () -> Void = {}) {
+        state = .checking(.init(cancel: { [weak self] in
+            cancel()
+            guard let self else { return }
+            if case .checking = state {
+                state = .idle
+            }
+        }))
+    }
+
     /// The text to display for the current update state.
     /// Returns an empty string for idle state, progress percentages for downloading/extracting,
     /// or descriptive text for other states.
