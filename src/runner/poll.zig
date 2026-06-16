@@ -216,7 +216,6 @@ pub fn runCheckInterruptible(
             return .{ .idle = code };
         },
         else => {
-            stdout.deinit(alloc);
             return error.AbnormalExit;
         },
     }
@@ -376,6 +375,28 @@ test "interruptible check preserves output size failures" {
             null,
             .{},
             3,
+            .{ .ctx = &stopper, .shouldStopFn = NeverStop.shouldStop },
+        ),
+    );
+}
+
+test "interruptible check frees stdout once on abnormal exit" {
+    const NeverStop = struct {
+        fn shouldStop(_: *anyopaque) bool {
+            return false;
+        }
+    };
+
+    var stopper: u8 = 0;
+    const argv = shellArgv("printf 'allocated'; kill -TERM $$");
+    try testing.expectError(
+        error.AbnormalExit,
+        runCheckInterruptible(
+            testing.allocator,
+            &argv,
+            null,
+            .{},
+            default_max_output,
             .{ .ctx = &stopper, .shouldStopFn = NeverStop.shouldStop },
         ),
     );

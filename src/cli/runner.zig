@@ -383,7 +383,7 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
     // A dry-run never mutates on-disk state.
     if (!cmd.dry_run) {
         if (store) |*s| {
-            _ = persistDedupStore(s, state_path, &rec);
+            persistDedupStore(s, state_path, &rec) catch {};
         }
         // Sweep prompt temp files left by previous `.file`-delivery runs.
         if (cmd.prompt_delivery == .file) {
@@ -419,11 +419,10 @@ fn runPollWatch(base_alloc: Allocator, config_alloc: Allocator, cmd: Command, st
         try stderr.print("error: requires --source (linear or github)\n", .{});
         return 1;
     };
-    const command = cmd.command orelse {
+    _ = cmd.command orelse {
         try stderr.print("error: requires --command\n", .{});
         return 1;
     };
-    _ = command;
     const adapter = connector.adapterByName(source) orelse {
         try stderr.print("error: unknown connector source '{s}'\n", .{source});
         return 1;
@@ -491,10 +490,10 @@ fn runPollWatch(base_alloc: Allocator, config_alloc: Allocator, cmd: Command, st
     }
 
     if (store) |*s| {
-        if (persistDedupStore(s, state_path, null)) {
+        persistDedupStore(s, state_path, null) catch {
             try stderr.print("error: could not persist dedup state to {s}\n", .{state_path});
             return 1;
-        }
+        };
     }
     return 0;
 }
@@ -697,7 +696,7 @@ fn runPollCycle(
 
     if (!cmd.dry_run) {
         if (store) |s| {
-            _ = persistDedupStore(s, state_path, &rec);
+            persistDedupStore(s, state_path, &rec) catch {};
         }
         if (cmd.prompt_delivery == .file) {
             runner.sweepStalePromptFiles(dir, runner.default_prompt_file_ttl_s, std.time.timestamp());
@@ -712,7 +711,9 @@ fn runPollCycle(
     };
 }
 
-fn persistDedupStore(store: *DedupStore, state_path: []const u8, rec: ?*runner.ActivityRecord) bool {
+const PersistDedupError = error{PersistFailed};
+
+fn persistDedupStore(store: *DedupStore, state_path: []const u8, rec: ?*runner.ActivityRecord) PersistDedupError!void {
     // Time-bound retention before persisting, so the file stays bounded by age
     // as well as count. The store never reads the clock; we pass it.
     const cutoff_s = std.time.timestamp() - DedupStore.default_max_age_s;
@@ -723,7 +724,7 @@ fn persistDedupStore(store: *DedupStore, state_path: []const u8, rec: ?*runner.A
     store.save() catch |err| switch (err) {
         // A newer-schema file present means suppression is intentionally
         // fail-open and we must not clobber it — not an error to report.
-        error.ReadOnly => return false,
+        error.ReadOnly => return,
         // Any other save failure means the seen-marker was NOT persisted. Surface
         // it on the activity record when one exists so the operator is not
         // falsely told the firing was durable.
@@ -735,11 +736,10 @@ fn persistDedupStore(store: *DedupStore, state_path: []const u8, rec: ?*runner.A
                 }
             }
             log.warn("could not persist dedup state to {s}: {}", .{ state_path, err });
-            return true;
+            return error.PersistFailed;
         },
     };
     store.compactIfNeeded() catch {};
-    return false;
 }
 
 const PollFailureRecordInput = struct {
@@ -1362,7 +1362,7 @@ test "persistDedupStore saves dirty state for shutdown path" {
         var store = try DedupStore.open(testing.allocator, path);
         defer store.deinit();
         try store.markSeen("linear-poll", "linear", "MAX-19", "2026-06-16T00:00:00Z");
-        try testing.expect(!persistDedupStore(&store, path, null));
+        try persistDedupStore(&store, path, null);
     }
 
     {
