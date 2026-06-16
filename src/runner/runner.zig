@@ -652,6 +652,55 @@ test "dispatch suppresses a duplicate before sending" {
     try testing.expectEqual(@as(usize, 0), s2.requests.items.len);
 }
 
+test "dispatch suppresses duplicate poll event after dedup store reopen" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ base, "seen.json" });
+
+    const ev = try linearEvent(alloc);
+    const req = try connector.resolve(alloc, .{ .command = "claude" }, ev, .{});
+    const ok_resp = "{\"ok\":true,\"result\":{\"session\":{\"session_id\":\"SID-1\"}}}";
+
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        var sender = RecordingSender{ .alloc = alloc, .responses = &.{ok_resp} };
+        const rec = try dispatch(alloc, .{
+            .trigger = "linear-poll",
+            .trigger_type = .poll,
+            .event = ev,
+            .request = req,
+            .token = "tok",
+            .received_at = "2026-06-16T00:00:00Z",
+            .dedup = &store,
+        }, sender.sender());
+        try testing.expectEqual(Outcome.launched, rec.outcome);
+        try store.save();
+    }
+
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        var sender = RecordingSender{ .alloc = alloc, .responses = &.{} };
+        const rec = try dispatch(alloc, .{
+            .trigger = "linear-poll",
+            .trigger_type = .poll,
+            .event = ev,
+            .request = req,
+            .token = "tok",
+            .received_at = "2026-06-16T00:01:00Z",
+            .dedup = &store,
+        }, sender.sender());
+        try testing.expectEqual(Outcome.duplicate, rec.outcome);
+        try testing.expectEqual(@as(usize, 0), sender.requests.items.len);
+    }
+}
+
 test "dispatch failure is visible and not recorded as seen" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

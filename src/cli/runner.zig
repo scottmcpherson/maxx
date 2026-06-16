@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Action = @import("../cli.zig").ghostty.Action;
@@ -37,6 +38,7 @@ const ParseError = error{
     UnknownFlag,
     InvalidPromptDelivery,
     InvalidTriggerType,
+    InvalidInterval,
     InvalidEnv,
     InvalidFireOn,
     InvalidPredicate,
@@ -67,6 +69,10 @@ const Command = struct {
     check: ?[]const u8 = null,
     check_cwd: ?[]const u8 = null,
     fire_on: std.ArrayList(u8) = .empty,
+    interval_ms: ?u64 = null,
+    max_backoff_ms: ?u64 = null,
+    watch: bool = false,
+    fail_fast: bool = false,
     no_dedup: bool = false,
     dry_run: bool = false,
     json: bool = false,
@@ -110,9 +116,12 @@ const Command = struct {
 ///   * `poll`: run a configured check and fire only when it exits with a
 ///     configured code. The check's stdout is the event payload. Flags: `--check
 ///     <shell-command>` (required), `--fire-on <code[,code...]>` (default `0`),
-///     `--check-cwd <path>`, plus all the `run` action/resolve flags. The check's
-///     output is never parsed for meaning — only its exit code decides whether to
-///     fire.
+///     `--check-cwd <path>`, plus all the `run` action/resolve flags. By default
+///     `poll` remains one-shot. Add `--interval <duration>` (or `--watch`, which
+///     uses 60s) to keep polling until SIGINT/SIGTERM; failures are reported as
+///     structured records and retried with bounded backoff unless `--fail-fast`
+///     is set. The check's output is never parsed for meaning — only its exit
+///     code decides whether to fire.
 ///
 ///   * `list-seen`: print the recorded duplicate-suppression entries as JSON.
 ///     Flags: `--state-file <path>`.
@@ -156,6 +165,10 @@ pub fn run(alloc: Allocator) !u8 {
             try stderr.print("error: --trigger-type expects script or webhook_relay\n", .{});
             return 1;
         },
+        error.InvalidInterval => {
+            try stderr.print("error: --interval/--max-backoff expect a duration like 30s, 500ms, 5m, or 1h\n", .{});
+            return 1;
+        },
         error.InvalidEnv => {
             try stderr.print("error: --env expects KEY=VALUE\n", .{});
             return 1;
@@ -177,7 +190,10 @@ pub fn run(alloc: Allocator) !u8 {
 
     return switch (cmd.verb) {
         .run => try runDispatch(arena_alloc, cmd, .{ .poll = false }, stderr),
-        .poll => try runDispatch(arena_alloc, cmd, .{ .poll = true }, stderr),
+        .poll => if (cmd.watch or cmd.interval_ms != null)
+            try runPollWatch(alloc, arena_alloc, cmd, stderr)
+        else
+            try runDispatch(arena_alloc, cmd, .{ .poll = true }, stderr),
         .@"list-seen" => try runListSeen(arena_alloc, cmd, stderr),
     };
 }
@@ -367,30 +383,7 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
     // A dry-run never mutates on-disk state.
     if (!cmd.dry_run) {
         if (store) |*s| {
-            // Time-bound retention before persisting, so the file stays bounded by
-            // age as well as count. The store never reads the clock; we pass it.
-            const cutoff_s = std.time.timestamp() - DedupStore.default_max_age_s;
-            if (cutoff_s > 0) {
-                var buf: [32]u8 = undefined;
-                s.pruneOlderThan(runner.epochToIso(&buf, @intCast(cutoff_s)));
-            }
-            s.save() catch |err| switch (err) {
-                // A newer-schema file present means suppression is intentionally
-                // fail-open and we must not clobber it — not an error to report.
-                error.ReadOnly => {},
-                // Any other save failure means the seen-marker was NOT persisted:
-                // this one-shot runner is about to exit, so a retry/redelivery
-                // would launch another visible tab. Surface it on the record and
-                // exit non-zero so the operator is not falsely told it was
-                // recorded. (Only set if a delivery error was not already noted.)
-                else => {
-                    if (rec.error_code == null) {
-                        rec.error_code = "dedup_save_failed";
-                        rec.error_message = @errorName(err);
-                    }
-                    log.warn("could not persist dedup state to {s}: {}", .{ state_path, err });
-                },
-            };
+            persistDedupStore(s, state_path, &rec) catch {};
         }
         // Sweep prompt temp files left by previous `.file`-delivery runs.
         if (cmd.prompt_delivery == .file) {
@@ -411,11 +404,493 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
     };
 }
 
+const default_poll_interval_ms: u64 = 60_000;
+const poll_sleep_quantum_ms: u64 = 250;
+
+var poll_shutdown_requested = std.atomic.Value(bool).init(false);
+
+const PollCycleResult = enum {
+    ok,
+    failed,
+};
+
+fn runPollWatch(base_alloc: Allocator, config_alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
+    const source = cmd.source orelse {
+        try stderr.print("error: requires --source (linear or github)\n", .{});
+        return 1;
+    };
+    _ = cmd.command orelse {
+        try stderr.print("error: requires --command\n", .{});
+        return 1;
+    };
+    const adapter = connector.adapterByName(source) orelse {
+        try stderr.print("error: unknown connector source '{s}'\n", .{source});
+        return 1;
+    };
+    _ = cmd.check orelse {
+        try stderr.print("error: poll requires --check\n", .{});
+        return 1;
+    };
+
+    const interval_ms = cmd.interval_ms orelse default_poll_interval_ms;
+    const max_backoff_ms = cmd.max_backoff_ms orelse runner.poll.defaultMaxBackoffMs(interval_ms);
+
+    const dir = control_client.controlDir(config_alloc) catch |err| {
+        try stderr.print("error: could not resolve control directory: {}\n", .{err});
+        return 1;
+    };
+    const state_path = cmd.state_file orelse try std.fmt.allocPrint(config_alloc, "{s}/runner-seen.json", .{dir});
+    var store: ?DedupStore = if (cmd.no_dedup) null else DedupStore.open(base_alloc, state_path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.Unreadable => {
+            try stderr.print(
+                "error: could not read dedup state file at {s}\n" ++
+                    "Fix its permissions, point --state-file elsewhere, or pass --no-dedup.\n",
+                .{state_path},
+            );
+            return 1;
+        },
+    };
+    defer if (store) |*s| s.deinit();
+
+    poll_shutdown_requested.store(false, .seq_cst);
+    var signal_guard = PollSignalGuard.install();
+    defer signal_guard.deinit();
+
+    var backoff = runner.poll.FailureBackoff.init(interval_ms, max_backoff_ms);
+    while (!pollShutdownRequested()) {
+        var cycle_arena = ArenaAllocator.init(base_alloc);
+        const result = runPollCycle(
+            cycle_arena.allocator(),
+            cmd,
+            source,
+            adapter,
+            dir,
+            state_path,
+            if (store) |*s| s else null,
+        ) catch |err| {
+            cycle_arena.deinit();
+            return err;
+        };
+        cycle_arena.deinit();
+
+        const delay_ms: u64 = switch (result) {
+            .ok => blk: {
+                backoff.recordSuccess();
+                break :blk interval_ms;
+            },
+            .failed => blk: {
+                if (cmd.fail_fast) return 1;
+                break :blk backoff.nextDelayMs();
+            },
+        };
+
+        if (pollShutdownRequested()) break;
+        sleepInterruptibly(delay_ms);
+    }
+
+    if (store) |*s| {
+        persistDedupStore(s, state_path, null) catch {
+            try stderr.print("error: could not persist dedup state to {s}\n", .{state_path});
+            return 1;
+        };
+    }
+    return 0;
+}
+
+fn runPollCycle(
+    alloc: Allocator,
+    cmd: Command,
+    source: []const u8,
+    adapter: connector.Adapter,
+    dir: []const u8,
+    state_path: []const u8,
+    store: ?*DedupStore,
+) !PollCycleResult {
+    const command = cmd.command.?;
+    const check = cmd.check.?;
+    const trigger_name = cmd.trigger orelse source;
+    const received_at = try runner.nowIso(alloc);
+    const fire_on: []const u8 = if (cmd.fire_on.items.len > 0) cmd.fire_on.items else &.{0};
+
+    const payload = blk: {
+        const argv = runner.poll.shellArgv(check);
+        var stop_ctx: u8 = 0;
+        const outcome = runner.poll.runCheckInterruptible(
+            alloc,
+            &argv,
+            cmd.check_cwd,
+            .{ .fire_on = fire_on },
+            runner.poll.default_max_output,
+            .{ .ctx = &stop_ctx, .shouldStopFn = pollShouldStop },
+        ) catch |err| switch (err) {
+            error.Canceled => return .ok,
+            error.SpawnFailed => {
+                try printPollFailureRecord(alloc, .{
+                    .trigger = trigger_name,
+                    .received_at = received_at,
+                    .source = source,
+                    .error_code = "check_spawn_failed",
+                    .error_message = "could not run check command",
+                });
+                return .failed;
+            },
+            error.AbnormalExit => {
+                try printPollFailureRecord(alloc, .{
+                    .trigger = trigger_name,
+                    .received_at = received_at,
+                    .source = source,
+                    .error_code = "check_abnormal_exit",
+                    .error_message = "check command did not exit normally",
+                });
+                return .failed;
+            },
+            error.OutputTooLarge => {
+                try printPollFailureRecord(alloc, .{
+                    .trigger = trigger_name,
+                    .received_at = received_at,
+                    .source = source,
+                    .error_code = "check_output_too_large",
+                    .error_message = "check stdout exceeded the runner payload limit",
+                });
+                return .failed;
+            },
+            error.OutOfMemory => return err,
+        };
+        switch (outcome) {
+            .idle => |code| {
+                try printPollIdleRecord(alloc, cmd, source, received_at, code);
+                return .ok;
+            },
+            .fired => |p| break :blk p,
+        }
+    };
+
+    const event = adapter.parse(alloc, payload) catch |err| switch (err) {
+        error.InvalidPayload => {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .error_code = "adapter_invalid_payload",
+                .error_message = "payload is not a JSON object",
+            });
+            return .failed;
+        },
+        error.MissingField => {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .error_code = "adapter_missing_field",
+                .error_message = "a required field is missing",
+            });
+            return .failed;
+        },
+        error.UnsupportedEventType => {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .error_code = "adapter_unsupported_event_type",
+                .error_message = "the payload's event type is not supported",
+            });
+            return .failed;
+        },
+        error.OutOfMemory => return err,
+    };
+
+    const dedup_key = cmd.dedup_key orelse event.id;
+    if (connector.Predicate.firstMismatch(cmd.predicates.items, event) != null) {
+        try printRecord(alloc, filteredRecord(.{
+            .trigger = trigger_name,
+            .trigger_type = .poll,
+            .received_at = received_at,
+            .event = event,
+            .dedup_key = dedup_key,
+            .command = command,
+        }));
+        return .ok;
+    }
+
+    const template: Template.LaunchTemplate = .{
+        .command = command,
+        .cwd = cmd.cwd,
+        .title = cmd.title,
+        .env = cmd.env.items,
+        .prompt_delivery = cmd.prompt_delivery,
+        .caller = cmd.caller,
+        .group = cmd.group,
+    };
+
+    var diag: Template.Diagnostic = .{};
+    const request = connector.resolve(alloc, template, event, .{
+        .launched_at = received_at,
+        .diag = &diag,
+    }) catch |err| switch (err) {
+        error.MissingField => {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .event_id = event.id,
+                .dedup_key = dedup_key,
+                .command = command,
+                .title = event.title,
+                .error_code = "template_missing_field",
+                .error_message = diag.field,
+            });
+            return .failed;
+        },
+        error.MalformedTemplate => {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .event_id = event.id,
+                .dedup_key = dedup_key,
+                .command = command,
+                .title = event.title,
+                .error_code = "template_malformed",
+                .error_message = diag.field,
+            });
+            return .failed;
+        },
+        error.OutOfMemory => return err,
+    };
+
+    var token: []const u8 = "";
+    var socket_path: []const u8 = "";
+    if (!cmd.dry_run) {
+        const token_path = try control_client.tokenPath(alloc, dir);
+        token = control_client.readToken(alloc, token_path) catch {
+            try printPollFailureRecord(alloc, .{
+                .trigger = trigger_name,
+                .received_at = received_at,
+                .source = source,
+                .event_id = event.id,
+                .dedup_key = dedup_key,
+                .command = command,
+                .title = request.title,
+                .error_code = "control_token_unreadable",
+                .error_message = token_path,
+            });
+            return .failed;
+        };
+        socket_path = try control_client.socketPath(alloc, dir);
+    }
+
+    var sock = SocketSender{ .socket_path = socket_path };
+    var rec = try runner.dispatch(alloc, .{
+        .trigger = trigger_name,
+        .trigger_type = .poll,
+        .event = event,
+        .request = request,
+        .token = token,
+        .received_at = received_at,
+        .dedup_key = cmd.dedup_key,
+        .dedup = store,
+        .prompt_dir = dir,
+        .dry_run = cmd.dry_run,
+    }, sock.sender());
+
+    if (!cmd.dry_run) {
+        if (store) |s| {
+            persistDedupStore(s, state_path, &rec) catch {};
+        }
+        if (cmd.prompt_delivery == .file) {
+            runner.sweepStalePromptFiles(dir, runner.default_prompt_file_ttl_s, std.time.timestamp());
+        }
+    }
+
+    try printRecord(alloc, rec);
+    return switch (rec.outcome) {
+        .failed => .failed,
+        .launched => if (rec.error_code == null) .ok else .failed,
+        .duplicate, .dry_run, .filtered => .ok,
+    };
+}
+
+const PersistDedupError = error{PersistFailed};
+
+fn persistDedupStore(store: *DedupStore, state_path: []const u8, rec: ?*runner.ActivityRecord) PersistDedupError!void {
+    // Time-bound retention before persisting, so the file stays bounded by age
+    // as well as count. The store never reads the clock; we pass it.
+    const cutoff_s = std.time.timestamp() - DedupStore.default_max_age_s;
+    if (cutoff_s > 0) {
+        var buf: [32]u8 = undefined;
+        store.pruneOlderThan(runner.epochToIso(&buf, @intCast(cutoff_s)));
+    }
+    store.save() catch |err| switch (err) {
+        // A newer-schema file present means suppression is intentionally
+        // fail-open and we must not clobber it — not an error to report.
+        error.ReadOnly => return,
+        // Any other save failure means the seen-marker was NOT persisted. Surface
+        // it on the activity record when one exists so the operator is not
+        // falsely told the firing was durable.
+        else => {
+            if (rec) |r| {
+                if (r.error_code == null) {
+                    r.error_code = "dedup_save_failed";
+                    r.error_message = @errorName(err);
+                }
+            }
+            log.warn("could not persist dedup state to {s}: {}", .{ state_path, err });
+            return error.PersistFailed;
+        },
+    };
+    store.compactIfNeeded() catch {};
+}
+
+const PollFailureRecordInput = struct {
+    trigger: []const u8,
+    received_at: []const u8,
+    source: []const u8,
+    error_code: []const u8,
+    error_message: ?[]const u8 = null,
+    check_exit_code: ?u8 = null,
+    event_id: ?[]const u8 = null,
+    dedup_key: ?[]const u8 = null,
+    command: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+};
+
+fn printPollFailureRecord(alloc: Allocator, in: PollFailureRecordInput) !void {
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
+    try json.beginObject();
+    try json.objectField("trigger");
+    try json.write(in.trigger);
+    try json.objectField("trigger_type");
+    try json.write("poll");
+    try json.objectField("received_at");
+    try json.write(in.received_at);
+    try json.objectField("source");
+    try json.write(in.source);
+    if (in.event_id) |v| {
+        try json.objectField("event_id");
+        try json.write(v);
+    }
+    if (in.dedup_key) |v| {
+        try json.objectField("dedup_key");
+        try json.write(v);
+    }
+    if (in.command) |v| {
+        try json.objectField("command");
+        try json.write(v);
+    }
+    if (in.title) |v| {
+        try json.objectField("title");
+        try json.write(v);
+    }
+    try json.objectField("outcome");
+    try json.write("failed");
+    if (in.check_exit_code) |v| {
+        try json.objectField("check_exit_code");
+        try json.write(v);
+    }
+    try json.objectField("error_code");
+    try json.write(in.error_code);
+    if (in.error_message) |v| {
+        try json.objectField("error_message");
+        try json.write(v);
+    }
+    try json.endObject();
+
+    var out_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&out_buf);
+    const stdout = &stdout_writer.interface;
+    try stdout.writeAll(out.written());
+    try stdout.writeAll("\n");
+    try stdout.flush();
+}
+
+fn printPollIdleRecord(alloc: Allocator, cmd: Command, source: []const u8, received_at: []const u8, code: u8) !void {
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
+    try json.beginObject();
+    try json.objectField("trigger");
+    try json.write(cmd.trigger orelse source);
+    try json.objectField("trigger_type");
+    try json.write("poll");
+    try json.objectField("received_at");
+    try json.write(received_at);
+    try json.objectField("source");
+    try json.write(source);
+    try json.objectField("outcome");
+    try json.write("idle");
+    try json.objectField("check_exit_code");
+    try json.write(code);
+    try json.endObject();
+
+    var out_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&out_buf);
+    const stdout = &stdout_writer.interface;
+    try stdout.writeAll(out.written());
+    try stdout.writeAll("\n");
+    try stdout.flush();
+}
+
+fn sleepInterruptibly(ms: u64) void {
+    var remaining_ns = ms * std.time.ns_per_ms;
+    const quantum_ns = poll_sleep_quantum_ms * std.time.ns_per_ms;
+    while (remaining_ns > 0 and !pollShutdownRequested()) {
+        const chunk = @min(remaining_ns, quantum_ns);
+        std.Thread.sleep(chunk);
+        remaining_ns -= chunk;
+    }
+}
+
+fn pollShutdownRequested() bool {
+    return poll_shutdown_requested.load(.seq_cst);
+}
+
+fn pollShouldStop(_: *anyopaque) bool {
+    return pollShutdownRequested();
+}
+
+fn pollSignalHandler(_: i32) callconv(.c) void {
+    poll_shutdown_requested.store(true, .seq_cst);
+}
+
+const PollSignalGuard = struct {
+    old_int: ?std.posix.Sigaction = null,
+    old_term: ?std.posix.Sigaction = null,
+
+    fn install() PollSignalGuard {
+        var guard: PollSignalGuard = .{};
+        if (comptime builtin.os.tag == .windows) return guard;
+
+        const p = std.posix;
+        var sa: p.Sigaction = .{
+            .handler = .{ .handler = pollSignalHandler },
+            .mask = p.sigemptyset(),
+            .flags = 0,
+        };
+
+        var old_int: p.Sigaction = undefined;
+        var old_term: p.Sigaction = undefined;
+        p.sigaction(p.SIG.INT, &sa, &old_int);
+        p.sigaction(p.SIG.TERM, &sa, &old_term);
+        guard.old_int = old_int;
+        guard.old_term = old_term;
+        return guard;
+    }
+
+    fn deinit(self: *PollSignalGuard) void {
+        if (comptime builtin.os.tag == .windows) return;
+        const p = std.posix;
+        if (self.old_int) |*old| p.sigaction(p.SIG.INT, old, null);
+        if (self.old_term) |*old| p.sigaction(p.SIG.TERM, old, null);
+    }
+};
+
 const FilteredRecordInput = struct {
     trigger: []const u8,
     trigger_type: runner.TriggerType,
     received_at: []const u8,
     event: connector.TriggerEvent,
+    dedup_key: []const u8 = "",
     command: []const u8,
 };
 
@@ -426,7 +901,7 @@ fn filteredRecord(in: FilteredRecordInput) runner.ActivityRecord {
         .received_at = in.received_at,
         .source = in.event.source,
         .event_id = in.event.id,
-        .dedup_key = "",
+        .dedup_key = in.dedup_key,
         .command = in.command,
         .title = in.event.title,
         .outcome = .filtered,
@@ -583,6 +1058,13 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.check_cwd = v;
         } else if (try flagValue(alloc, arg, iter, "--fire-on")) |v| {
             try parseFireOn(alloc, &cmd, v);
+        } else if (try flagValue(alloc, arg, iter, "--interval")) |v| {
+            cmd.interval_ms = parseDurationMs(v) orelse return error.InvalidInterval;
+            if (cmd.interval_ms.? == 0) return error.InvalidInterval;
+            cmd.watch = true;
+        } else if (try flagValue(alloc, arg, iter, "--max-backoff")) |v| {
+            cmd.max_backoff_ms = parseDurationMs(v) orelse return error.InvalidInterval;
+            if (cmd.max_backoff_ms.? == 0) return error.InvalidInterval;
         } else if (try flagValue(alloc, arg, iter, "--prompt-delivery")) |v| {
             cmd.prompt_delivery = std.meta.stringToEnum(Template.PromptDelivery, v) orelse
                 return error.InvalidPromptDelivery;
@@ -601,6 +1083,10 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.no_dedup = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             cmd.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--watch")) {
+            cmd.watch = true;
+        } else if (std.mem.eql(u8, arg, "--fail-fast")) {
+            cmd.fail_fast = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             cmd.json = true;
         } else {
@@ -635,6 +1121,27 @@ fn parseFireOn(alloc: Allocator, cmd: *Command, v: []const u8) ParseError!void {
         try cmd.fire_on.append(alloc, code);
     }
     if (cmd.fire_on.items.len == 0) return error.InvalidFireOn;
+}
+
+/// Parse a human duration into milliseconds. Accepts a bare integer (seconds) or
+/// an integer with a `ms`/`s`/`m`/`h` suffix. Returns null on anything else.
+fn parseDurationMs(s: []const u8) ?u64 {
+    const max_ms: u64 = 24 * 3_600_000;
+
+    const t = std.mem.trim(u8, s, &std.ascii.whitespace);
+    if (t.len == 0) return null;
+
+    var num_end: usize = 0;
+    while (num_end < t.len and std.ascii.isDigit(t[num_end])) : (num_end += 1) {}
+    if (num_end == 0) return null;
+
+    const value = std.fmt.parseInt(u64, t[0..num_end], 10) catch return null;
+    const unit = t[num_end..];
+
+    const mult: u64 = if (unit.len == 0) 1000 // bare number = seconds
+        else if (std.mem.eql(u8, unit, "ms")) 1 else if (std.mem.eql(u8, unit, "s")) 1000 else if (std.mem.eql(u8, unit, "m")) 60_000 else if (std.mem.eql(u8, unit, "h")) 3_600_000 else return null;
+
+    return @min(value *| mult, max_ms);
 }
 
 /// If `arg` matches `name` (`--name=value` or `--name value`), return the value,
@@ -720,6 +1227,41 @@ test "parseCommand poll with fire-on list" {
     try testing.expect(cmd.dry_run);
 }
 
+test "parseCommand poll watch interval and backoff flags" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "runner poll --source linear --command claude --check ./check.sh --interval 60s --max-backoff 5m --fail-fast",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .poll);
+    try testing.expect(cmd.watch);
+    try testing.expect(cmd.fail_fast);
+    try testing.expectEqual(@as(u64, 60_000), cmd.interval_ms.?);
+    try testing.expectEqual(@as(u64, 300_000), cmd.max_backoff_ms.?);
+}
+
+test "parseCommand poll watch without interval uses default later" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "runner poll --source linear --command claude --check ./check.sh --watch",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.watch);
+    try testing.expect(cmd.interval_ms == null);
+}
+
 test "parseCommand rejects trigger-type poll for run" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -747,6 +1289,16 @@ test "parseCommand rejects bad fire-on and unknown flag" {
         var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "runner run --bogus");
         defer iter.deinit();
         try testing.expectError(error.UnknownFlag, parseCommand(alloc, &iter));
+    }
+    {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "runner poll --interval nope");
+        defer iter.deinit();
+        try testing.expectError(error.InvalidInterval, parseCommand(alloc, &iter));
+    }
+    {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "runner poll --interval 0ms");
+        defer iter.deinit();
+        try testing.expectError(error.InvalidInterval, parseCommand(alloc, &iter));
     }
 }
 
@@ -782,5 +1334,40 @@ test "parseCommand surfaces help and unknown verbs" {
         var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "runner frobnicate");
         defer iter.deinit();
         try testing.expectError(error.UnknownVerb, parseCommand(alloc, &iter));
+    }
+}
+
+test "parseDurationMs parses runner interval units" {
+    try testing.expectEqual(@as(?u64, 30_000), parseDurationMs("30"));
+    try testing.expectEqual(@as(?u64, 500), parseDurationMs("500ms"));
+    try testing.expectEqual(@as(?u64, 45_000), parseDurationMs("45s"));
+    try testing.expectEqual(@as(?u64, 300_000), parseDurationMs("5m"));
+    try testing.expectEqual(@as(?u64, 3_600_000), parseDurationMs("1h"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs("abc"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs("10x"));
+    try testing.expectEqual(@as(?u64, null), parseDurationMs(""));
+}
+
+test "persistDedupStore saves dirty state for shutdown path" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var td = testing.tmpDir(.{});
+    defer td.cleanup();
+    const base = try td.dir.realpathAlloc(arena, ".");
+    const path = try std.fs.path.join(arena, &.{ base, "seen.json" });
+
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        try store.markSeen("linear-poll", "linear", "MAX-19", "2026-06-16T00:00:00Z");
+        try persistDedupStore(&store, path, null);
+    }
+
+    {
+        var store = try DedupStore.open(testing.allocator, path);
+        defer store.deinit();
+        try testing.expect(store.seen("linear-poll", "linear", "MAX-19"));
     }
 }
