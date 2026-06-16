@@ -1128,6 +1128,9 @@ extension Ghostty {
             if status == errSecSuccess {
                 return bytes.map { String(format: "%02x", $0) }.joined()
             }
+            Ghostty.logger.fault(
+                "SecRandomCopyBytes failed while generating agent registration token: \(status)"
+            )
             return UUID().uuidString.replacingOccurrences(of: "-", with: "")
                 + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         }

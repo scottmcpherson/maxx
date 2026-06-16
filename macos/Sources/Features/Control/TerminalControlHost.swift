@@ -83,7 +83,7 @@ final class TerminalControlHost: ControlSessionHost {
         guard let view = Self.allSurfaceViews.first(where: { $0.id == surfaceID }) else {
             return nil
         }
-        guard Self.constantTimeEquals(view.agentRegistrationToken, token) else {
+        guard Self.timingSafeEquals(view.agentRegistrationToken, token) else {
             return nil
         }
         return TerminalSurfaceHandle(view: view)
@@ -97,17 +97,26 @@ final class TerminalControlHost: ControlSessionHost {
             .flatMap { $0.surfaceTree.root?.leaves() ?? [] }
     }
 
-    private static func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
-        let a = Array(lhs.utf8)
-        let b = Array(rhs.utf8)
-        let count = max(a.count, b.count)
-        var diff = a.count ^ b.count
-        for index in 0..<count {
-            let left = index < a.count ? a[index] : 0
-            let right = index < b.count ? b[index] : 0
-            diff |= Int(left ^ right)
+    private static func timingSafeEquals(_ expected: String, _ supplied: String) -> Bool {
+        let expectedBytes = Array(expected.utf8)
+        let suppliedBytes = Array(supplied.utf8)
+        guard !expectedBytes.isEmpty else { return suppliedBytes.isEmpty }
+
+        var paddedSupplied = [UInt8](repeating: 0, count: expectedBytes.count)
+        let copyCount = min(suppliedBytes.count, expectedBytes.count)
+        for index in 0..<copyCount {
+            paddedSupplied[index] = suppliedBytes[index]
         }
-        return diff == 0
+
+        let bytesMatch = expectedBytes.withUnsafeBytes { expectedBuffer in
+            paddedSupplied.withUnsafeBytes { suppliedBuffer in
+                timingsafe_bcmp(
+                    expectedBuffer.baseAddress!,
+                    suppliedBuffer.baseAddress!,
+                    expectedBytes.count) == 0
+            }
+        }
+        return bytesMatch && suppliedBytes.count == expectedBytes.count
     }
 }
 
