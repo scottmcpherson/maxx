@@ -1,3 +1,10 @@
+---
+layout: doc
+title: Maxx Connector Adapter Layer
+description: Adapter contracts for Linear, GitHub, and other explicit event sources.
+section: reference
+---
+
 # Maxx Connector Adapter Layer
 
 The connector adapter layer lets configured external trigger sources — starting
@@ -5,7 +12,7 @@ with **Linear** and **GitHub** — turn a structured event payload into a visibl
 Maxx tab launch, while keeping Maxx strictly a terminal-native runtime/control
 plane. Maxx owns visible tab orchestration and process launch; it never reasons
 about the workflow. The connector layer is the thin, typed seam between an
-external system's payload and the [Control API](./control-api.md)'s tab-launch
+external system's payload and the [Control API](control-api.html)'s tab-launch
 primitive.
 
 A connector turns _“this event happened in Linear/GitHub”_ into _“open a visible
@@ -85,14 +92,14 @@ input:
 
 The normalized event. Every field is an explicit value copied from the payload:
 
-| Field    | Meaning                                                       |
-| -------- | ------------------------------------------------------------- |
-| `source` | Connector name (`linear`, `github`).                          |
-| `id`     | Stable source id for the event (provenance/de-dup).           |
-| `type`   | The source's own event/trigger type, verbatim.                |
-| `title`  | Human-facing tab title.                                       |
-| `url`    | Canonical source URL, when the payload provides one.          |
-| `prompt` | Prompt/context text, assembled from explicit fields.          |
+| Field    | Meaning                                                                         |
+| -------- | ------------------------------------------------------------------------------- |
+| `source` | Connector name (`linear`, `github`).                                            |
+| `id`     | Stable source id for the event (provenance/de-dup).                             |
+| `type`   | The source's own event/trigger type, verbatim.                                  |
+| `title`  | Human-facing tab title.                                                         |
+| `url`    | Canonical source URL, when the payload provides one.                            |
+| `prompt` | Prompt/context text, assembled from explicit fields.                            |
 | `fields` | Extra explicit string or boolean fields, dotted keys (e.g. `issue.identifier`). |
 
 `lookup` renders fields as strings for template placeholders. Predicate
@@ -104,23 +111,23 @@ a string value `"true"` is not treated as boolean `true`.
 The built-in adapters expose these extra fields when the payload explicitly
 provides them. Missing or wrong-typed fields stay absent.
 
-| Source   | Field                     | Type    | Source payload field                                      |
-| -------- | ------------------------- | ------- | --------------------------------------------------------- |
-| `linear` | `action`                  | string  | top-level `action`                                        |
-| `linear` | `issue.id`                | string  | `data.id`                                                 |
-| `linear` | `issue.identifier`        | string  | `data.identifier`                                         |
-| `linear` | `issue.url`               | string  | `data.url`, falling back to top-level `url`               |
-| `linear` | `issue.state.id`          | string  | `data.state.id`                                           |
-| `linear` | `issue.state.name`        | string  | `data.state.name`                                         |
-| `linear` | `issue.state.type`        | string  | `data.state.type`                                         |
-| `linear` | `team.key`                | string  | `data.team.key`                                           |
-| `github` | `action`                  | string  | top-level `action`                                        |
-| `github` | `object.type`             | string  | structural object key: `issue` or `pull_request`          |
-| `github` | `repo.full_name`          | string  | `repository.full_name`                                    |
-| `github` | `number`                  | string  | object `number`                                           |
-| `github` | `issue.number`            | string  | `issue.number` for issue payloads                         |
-| `github` | `pull_request.number`     | string  | `pull_request.number` for pull request payloads           |
-| `github` | `pull_request.merged`     | boolean | `pull_request.merged`, only when present as a JSON bool    |
+| Source   | Field                 | Type    | Source payload field                                    |
+| -------- | --------------------- | ------- | ------------------------------------------------------- |
+| `linear` | `action`              | string  | top-level `action`                                      |
+| `linear` | `issue.id`            | string  | `data.id`                                               |
+| `linear` | `issue.identifier`    | string  | `data.identifier`                                       |
+| `linear` | `issue.url`           | string  | `data.url`, falling back to top-level `url`             |
+| `linear` | `issue.state.id`      | string  | `data.state.id`                                         |
+| `linear` | `issue.state.name`    | string  | `data.state.name`                                       |
+| `linear` | `issue.state.type`    | string  | `data.state.type`                                       |
+| `linear` | `team.key`            | string  | `data.team.key`                                         |
+| `github` | `action`              | string  | top-level `action`                                      |
+| `github` | `object.type`         | string  | structural object key: `issue` or `pull_request`        |
+| `github` | `repo.full_name`      | string  | `repository.full_name`                                  |
+| `github` | `number`              | string  | object `number`                                         |
+| `github` | `issue.number`        | string  | `issue.number` for issue payloads                       |
+| `github` | `pull_request.number` | string  | `pull_request.number` for pull request payloads         |
+| `github` | `pull_request.merged` | boolean | `pull_request.merged`, only when present as a JSON bool |
 
 These are copied fields, not workflow interpretations. For example, a route may
 compare `issue.state.name` to `Todo`, but Maxx does not decide what Todo means.
@@ -165,7 +172,7 @@ Two optional fields make a resolved launch complete for an autonomous
 webhook-runner flow, so the runner injects **only** the per-call capability
 token and never has to splice fields into the JSON:
 
-- **`caller`** — the [capability-policy](./control-api.md#capability-policy)
+- **`caller`** — the [capability-policy](control-api.html#capability-policy)
   source the launch is attributed to (e.g. `trusted-automation`), emitted as
   `params.caller`. Without it, a connector launch runs as the trusted
   first-party local source — usually wrong for a webhook origin, which should
@@ -189,7 +196,7 @@ token and never has to splice fields into the JSON:
   configured policy source such as `linear-webhook` granted **both**
   `tabs:spawn` and `groups:create`
   (the default first-party local source already holds both). See the
-  [configured policy sources](./control-api.md#configured-policy-sources).
+  [configured policy sources](control-api.html#configured-policy-sources).
 
 ## Resolution and provenance
 
@@ -250,7 +257,7 @@ band. `launch.params` alone is therefore not sufficient.
 ## The runner
 
 This layer **resolves** a launch; it does not **execute** one. Execution is the
-[automation trigger runner](./automation-runner.md) (`maxx +runner`) — kept
+[automation trigger runner](automation-runner.html) (`maxx +runner`) — kept
 separate so the resolution logic stays pure and exhaustively testable. The runner
 owns: injecting the per-call capability token into the control request, sending
 `sessions.create` to a running Maxx, delivering the prompt for `stdin`/`file`

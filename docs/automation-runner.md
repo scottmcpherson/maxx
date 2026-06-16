@@ -1,14 +1,21 @@
+---
+layout: doc
+title: Maxx Automation Trigger Runner
+description: Runner behavior for explicit events that launch visible Maxx tabs.
+section: reference
+---
+
 # Maxx Automation Trigger Runner
 
 The automation trigger runner is the small, local-first piece that **executes** a
 configured action in a visible Maxx tab when an external trigger arrives. It is
-the execution counterpart to the [connector adapter layer](./connector-adapters.md):
+the execution counterpart to the [connector adapter layer](connector-adapters.html):
 the connector layer _resolves_ a structured payload into a `sessions.create`
 control request and stops there on purpose; the runner _runs_ it.
 
 Maxx stays the visible terminal-native runtime/control plane, never the workflow
 brain. The runner receives an explicit event, launches an explicit command or
-prompt in a normal visible tab through the [Control API](./control-api.md), and
+prompt in a normal visible tab through the [Control API](control-api.html), and
 records what happened. It assigns no workflow meaning to anything.
 
 ## The product boundary
@@ -43,11 +50,11 @@ Every trigger, regardless of type, flows through one pipeline mirroring
 The trigger type is **provenance only** — it is recorded and displayed, but never
 changes how the action is selected.
 
-| Type            | How the payload arrives                                                                                   |
-| --------------- | -------------------------------------------------------------------------------------------------------- |
+| Type            | How the payload arrives                                                                                                    |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `poll`          | A configured **check command** runs; it fires only when its exit code matches the contract, and its stdout is the payload. |
-| `script`        | A local process calls `maxx +runner run` with a concrete payload on stdin or in a file.                  |
-| `webhook_relay` | A local relay endpoint/client delivers an event and pipes it into `maxx +runner run`.                    |
+| `script`        | A local process calls `maxx +runner run` with a concrete payload on stdin or in a file.                                    |
+| `webhook_relay` | A local relay endpoint/client delivers an event and pipes it into `maxx +runner run`.                                      |
 
 `script` and `webhook_relay` are identical to the runner (a payload arrives); they
 differ only in the recorded provenance, so an operator can see where an event
@@ -329,7 +336,7 @@ pass `--dedup-key <key>` from the surrounding runner configuration.
 > pairing `--as trusted-automation` with `--group` is rejected (`unauthorized`,
 > no tab spawned). A grouped webhook launch needs a configured policy source
 > such as `linear-webhook` granted both capabilities. See
-> [configured policy sources](./control-api.md#configured-policy-sources).
+> [configured policy sources](control-api.html#configured-policy-sources).
 
 ## Relationship to the connector layer
 

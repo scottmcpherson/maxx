@@ -1,3 +1,10 @@
+---
+layout: doc
+title: Maxx Control API
+description: Local token-authenticated control surface for Maxx tabs and sessions.
+section: reference
+---
+
 # Maxx Control API
 
 The Maxx Control API is a **local, token-authenticated** control surface that
@@ -45,7 +52,7 @@ declared through an explicit API call, hook event, or metadata field). It never
 derives **workflow truth** — _complete_, _blocked_, _tests passed_, _PR created_
 — from incidental signals. This is the no-inference rule; the canonical
 statement, the allowed/prohibited sources, and the tests that lock it down live
-in [`no-inference.md`](no-inference.md).
+in [no-inference rule](no-inference.html).
 
 ## Transport & trust boundary
 
@@ -755,7 +762,7 @@ live in-memory audit log is never trimmed; only the on-disk copy is bounded.
 more. A record whose mechanical fields (command, cwd, title) happen to read like
 completion signals never comes back with a guessed `workflow_state`, `summary`, or
 `agent_type` — only explicitly declared facts survive, verbatim. See
-[`no-inference.md`](no-inference.md).
+[no-inference rule](no-inference.html).
 
 ## The structured event stream contract (MAX-7)
 

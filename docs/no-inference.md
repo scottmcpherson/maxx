@@ -1,3 +1,10 @@
+---
+layout: doc
+title: The No-Inference Rule
+description: Maxx's product boundary for mechanical facts and agent-declared facts.
+section: explanation
+---
+
 # The No-Inference Rule
 
 **Maxx is the visible terminal-native runtime/control plane, not the workflow
@@ -88,7 +95,7 @@ audited, and shown verbatim. They are intentionally separate from the
 Maxx-owned `lifecycle` and from the free-form `status`, so the UI presents them
 as agent-provided rather than Maxx-derived (the badge popover literally says
 "Reported by the agent — not derived by Maxx"). See
-[`control-api.md`](control-api.md).
+[Control API](control-api.html).
 
 ### The hook event pipeline (sidebar agent-activity)
 
@@ -127,7 +134,7 @@ infers nothing; positive fixtures prove explicit declarations still render.
 - `src/agent_hook/main.zig` (`agent hook state normalization`) — prose, PR
   URLs, and branch-like strings normalize to no state.
 - `src/connector/connector.zig` (`no-inference: adapters surface only explicit
-fields`) — connector payloads stuffed with uncopied bait (branch, head ref,
+  fields`) — connector payloads stuffed with uncopied bait (branch, head ref,
   labels, plain state strings, assignees, paths) never leak into the event,
   prompt, provenance metadata, caller, group, or the emitted `sessions.create`
   request; only explicitly copied fields and templated group values from
