@@ -1,18 +1,25 @@
+---
+layout: doc
+title: Maxx Webhook Ingestion
+description: Local webhook listener behavior for explicit external events.
+section: reference
+---
+
 # Maxx Webhook Ingestion
 
 Webhook ingestion is a small, local-first HTTP listener that turns an external
 webhook into a visible Maxx tab launch. It is the network front door to the same
-pipeline the [automation trigger runner](./automation-runner.md) exposes for
+pipeline the [automation trigger runner](automation-runner.html) exposes for
 polling and local scripts: a request is parsed by a configured
-[connector adapter](./connector-adapters.md) and launched through the
-[Control API](./control-api.md).
+[connector adapter](connector-adapters.html) and launched through the
+[Control API](control-api.html).
 
 Maxx stays the visible terminal-native runtime/control plane, never the workflow
 brain. The listener accepts a request only on an explicitly configured route,
 validates the transport, parses the opaque payload with the route's configured
 adapter, and launches exactly the configured command. Maxx never decides what a
 Linear/GitHub/CI event _means_ — the route mapping and the launched command own
-that. See [the no-inference rule](./no-inference.md).
+that. See [the no-inference rule](no-inference.html).
 
 ## The product boundary
 
@@ -58,7 +65,7 @@ that. See [the no-inference rule](./no-inference.md).
 
    ```sh
    export MAXX_WEBHOOK_SECRET=$(openssl rand -hex 32)
-   ghostty +webhook serve --config webhook.json
+   maxx +webhook serve --config webhook.json
    # maxx webhook listening on http://127.0.0.1:8787 (1 route(s))
    ```
 
@@ -118,7 +125,7 @@ Each route:
 provide fails the request (HTTP 422); use `${field?}` for an optional one.
 `caller` is deliberately not templated — a policy identity is a fixed deployment
 decision, never derived from an untrusted payload. See
-[connector adapters](./connector-adapters.md) for the field set each source
+[connector adapters](connector-adapters.html) for the field set each source
 provides and the templating rules.
 
 > **Security: `command` must not contain `${...}` placeholders.** Maxx launches a
@@ -164,7 +171,12 @@ Todo state:
     { "field": "action", "equals": "update" },
     { "field": "issue.state.name", "equals": "Todo" }
   ],
-  "auth": { "mode": "hmac", "secret_env": "LINEAR_SECRET", "header": "X-Webhook-Signature", "prefix": "sha256=" }
+  "auth": {
+    "mode": "hmac",
+    "secret_env": "LINEAR_SECRET",
+    "header": "X-Webhook-Signature",
+    "prefix": "sha256="
+  }
 }
 ```
 
@@ -182,7 +194,12 @@ says it was merged:
     { "field": "action", "equals": "closed" },
     { "field": "pull_request.merged", "equals_bool": true }
   ],
-  "auth": { "mode": "hmac", "secret_env": "GITHUB_SECRET", "header": "X-Hub-Signature-256", "prefix": "sha256=" }
+  "auth": {
+    "mode": "hmac",
+    "secret_env": "GITHUB_SECRET",
+    "header": "X-Hub-Signature-256",
+    "prefix": "sha256="
+  }
 }
 ```
 
@@ -232,17 +249,17 @@ means.
 The listener answers with a tiny JSON body that never echoes the payload or any
 secret:
 
-| Status | When                                                                                                              |
-| ------ | ----------------------------------------------------------------------------------------------------------------- |
+| Status | When                                                                                                                                                                   |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `200`  | Launched (`{"ok":true,"outcome":"launched","session_id":…}`), suppressed duplicate (`"outcome":"duplicate"`), or filtered predicate mismatch (`"outcome":"filtered"`). |
-| `401`  | Missing/invalid signature **or an unknown route** (the two are intentionally indistinguishable — see below).      |
-| `405`  | Method is not `POST` (only returned once the caller is authenticated).                                            |
-| `413`  | Body exceeds the route's cap (post-auth) or the global read cap.                                                  |
-| `415`  | `Content-Type` is not `application/json` (post-auth).                                                             |
-| `422`  | A required template field was absent from the payload.                                                            |
-| `400`  | Payload is not valid JSON / not a supported event.                                                                |
-| `500`  | Server-side problem (e.g. a configured secret is unavailable).                                                    |
-| `502`  | The launch was attempted but the Control API rejected it.                                                         |
+| `401`  | Missing/invalid signature **or an unknown route** (the two are intentionally indistinguishable — see below).                                                           |
+| `405`  | Method is not `POST` (only returned once the caller is authenticated).                                                                                                 |
+| `413`  | Body exceeds the route's cap (post-auth) or the global read cap.                                                                                                       |
+| `415`  | `Content-Type` is not `application/json` (post-auth).                                                                                                                  |
+| `422`  | A required template field was absent from the payload.                                                                                                                 |
+| `400`  | Payload is not valid JSON / not a supported event.                                                                                                                     |
+| `500`  | Server-side problem (e.g. a configured secret is unavailable).                                                                                                         |
+| `502`  | The launch was attempted but the Control API rejected it.                                                                                                              |
 
 **Route privacy.** Authentication runs _before_ any route-specific rejection, and
 an unknown path returns the **same** `401` as a known path with a bad/missing
@@ -299,9 +316,9 @@ just another HTTP client that must present a valid signature.
 
 ## Relationship to `+runner` and `+connector`
 
-- [`+connector resolve`](./connector-adapters.md) turns a payload into a
+- [`+connector resolve` command](connector-adapters.html) turns a payload into a
   `sessions.create` request and stops (pure, offline).
-- [`+runner`](./automation-runner.md) executes one event from a poll check or a
+- [`+runner` command](automation-runner.html) executes one event from a poll check or a
   local script.
 - `+webhook serve` is the long-lived HTTP front end: it authenticates and reads
   a request, then dispatches through the **same** runner pipeline — same dedup,

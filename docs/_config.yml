@@ -1,0 +1,7 @@
+title: Maxx Documentation
+description: Documentation for Maxx, an unofficial Ghostty fork for parallel coding-agent workflows.
+url: "https://maxx.sh"
+baseurl: ""
+
+exclude:
+  - README.md

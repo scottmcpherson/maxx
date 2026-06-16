@@ -12,6 +12,8 @@
 <p align="center">
   <a href="#download">Download</a>
   ·
+  <a href="https://maxx.sh/docs/">Docs</a>
+  ·
   <a href="#whats-different">What's Different</a>
   ·
   <a href="#agent-tab-control">Agent Tab Control</a>
@@ -135,16 +137,16 @@ These builds are produced from `maxx-v*` release tags and are signed + notarized
 
 ## Platform and Agent Status
 
-| Area | Status |
-| --- | --- |
-| macOS sidebar tabs/sessions | Supported |
-| macOS sidebar agent statuses | Supported |
-| macOS agent tab control skill | Supported for Claude Code and Codex |
-| Linux/GTK sidebar agent statuses | Not exposed in the UI yet |
-| Claude Code status integration | Supported automatically |
-| Codex status integration | Supported automatically |
-| X.ai CLI status integration | In progress |
-| Gemini CLI status integration | In progress |
+| Area                             | Status                              |
+| -------------------------------- | ----------------------------------- |
+| macOS sidebar tabs/sessions      | Supported                           |
+| macOS sidebar agent statuses     | Supported                           |
+| macOS agent tab control skill    | Supported for Claude Code and Codex |
+| Linux/GTK sidebar agent statuses | Not exposed in the UI yet           |
+| Claude Code status integration   | Supported automatically             |
+| Codex status integration         | Supported automatically             |
+| X.ai CLI status integration      | In progress                         |
+| Gemini CLI status integration    | In progress                         |
 
 The underlying hook event pipeline is shared infrastructure. Other CLIs can use
 that pipeline, but only Claude Code and Codex currently have built-in status
@@ -152,51 +154,68 @@ integration.
 
 ## Documentation
 
-Most general terminal behavior, configuration, and platform documentation comes
-from upstream Ghostty:
+Maxx-specific documentation is maintained in this repository and published from
+the existing GitHub Pages site root:
+
+- [Maxx documentation](https://maxx.sh/docs/)
+- [Getting started](https://maxx.sh/docs/getting-started/)
+- [How-to guides](https://maxx.sh/docs/how-to/)
+- [Reference](https://maxx.sh/docs/reference/)
+- [Explanation](https://maxx.sh/docs/explanation/)
+
+Most general terminal behavior, configuration, and platform documentation still
+comes from upstream Ghostty:
 
 - [Ghostty documentation](https://ghostty.org/docs)
 - [Upstream Ghostty repository](https://github.com/ghostty-org/ghostty)
 - [About Ghostty](https://ghostty.org/docs/about)
 
-Fork-specific behavior is documented in this repository as it diverges from
-upstream.
+Fork-specific behavior should be documented in this repository as it diverges
+from upstream. Do not make a wiki or external notes source the canonical docs.
 
 ## Building from Source
 
 Maxx follows the upstream Ghostty build system:
 
 ```shell
-zig build
+./tools/zig build
 ```
 
 On macOS, if you do not need to build the app bundle while working on shared
 code, this is faster:
 
 ```shell
-zig build -Demit-macos-app=false
+./tools/zig build -Demit-macos-app=false
 ```
 
 Run Zig tests with:
 
 ```shell
-zig build test
+./tools/zig build test
 ```
 
 Prefer targeted tests while developing:
 
 ```shell
-zig build test -Dtest-filter=<test name>
+./tools/zig build test -Dtest-filter=<test name>
 ```
 
-See [HACKING.md](HACKING.md) for upstream development details and
+Launch a dev build with:
+
+```shell
+./tools/zig build run
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the Maxx contributor workflow,
+[HACKING.md](HACKING.md) for upstream development details, and
 [AGENTS.md](AGENTS.md) for local agent workflow notes.
 
 ## Contributing
 
 For changes specific to Maxx, open issues or pull requests against
 this fork. For behavior that also affects upstream Ghostty, check the upstream
-[Contributing to Ghostty](CONTRIBUTING.md) guidance and consider whether the
+[Contributing to Ghostty](https://github.com/ghostty-org/ghostty/blob/main/CONTRIBUTING.md)
+guidance and consider whether the
 change belongs upstream first.
 
 ## Upstream Ghostty
