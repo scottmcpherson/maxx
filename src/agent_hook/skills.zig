@@ -31,7 +31,6 @@ const legacy_ownership_markers = [_][]const u8{
 /// leave stale copies behind.
 const legacy_tabs_skill_dir_names = [_][]const u8{
     "madmaxx-tabs",
-    "mosttly-tabs",
 };
 
 /// A bundled skill: the directory it installs into, its embedded `SKILL.md`
@@ -386,52 +385,4 @@ test "install migrates legacy-named skill dir we own" {
     // New skill exists, old-named dir is gone.
     try tmp.dir.access(tabs_skill.dir_name ++ "/SKILL.md", .{});
     try testing.expectError(error.FileNotFound, tmp.dir.access("madmaxx-tabs", .{}));
-}
-
-test "install migrates old mosttly-named skill dir we own" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.makePath("mosttly-tabs");
-    try tmp.dir.writeFile(.{
-        .sub_path = "mosttly-tabs/SKILL.md",
-        .data = "---\nname: mosttly-tabs\n---\n<!-- " ++ legacy_ghostty_ownership_marker ++ " -->\n",
-    });
-
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
-    defer alloc.free(root);
-
-    const written = try writeSkill(alloc, root, tabs_skill);
-    defer alloc.free(written);
-
-    try tmp.dir.access(tabs_skill.dir_name ++ "/SKILL.md", .{});
-    try testing.expectError(error.FileNotFound, tmp.dir.access("mosttly-tabs", .{}));
-}
-
-test "install leaves a hand-written legacy-named skill alone" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.makePath("mosttly-tabs");
-    const foreign = "---\nname: mosttly-tabs\n---\nuser-authored skill\n";
-    try tmp.dir.writeFile(.{
-        .sub_path = "mosttly-tabs/SKILL.md",
-        .data = foreign,
-    });
-
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
-    defer alloc.free(root);
-
-    const written = try writeSkill(alloc, root, tabs_skill);
-    defer alloc.free(written);
-
-    const foreign_path = try std.fs.path.join(alloc, &.{ root, "mosttly-tabs", "SKILL.md" });
-    defer alloc.free(foreign_path);
-    const contents = try readFileAllocIfExists(alloc, foreign_path);
-    defer alloc.free(contents);
-    try testing.expectEqualStrings(foreign, contents);
 }

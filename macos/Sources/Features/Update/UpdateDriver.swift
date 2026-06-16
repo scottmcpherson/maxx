@@ -22,6 +22,14 @@ class UpdateDriver: NSObject, SPUUserDriver {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// Sparkle can spend time probing installer state before it calls
+    /// `showUserInitiatedUpdateCheck`. Show the same unobtrusive state as soon
+    /// as the user asks, then let Sparkle replace it with the real cancellable
+    /// state when the check actually starts.
+    func showOptimisticUserInitiatedUpdateCheck() {
+        viewModel.beginChecking()
+    }
+
     @objc private func handleTerminalWindowWillClose() {
         // If we lost the ability to show unobtrusive states, cancel whatever
         // update state we're in. This will allow the manual `check for updates`
@@ -49,7 +57,7 @@ class UpdateDriver: NSObject, SPUUserDriver {
     }
 
     func showUserInitiatedUpdateCheck(cancellation: @escaping () -> Void) {
-        viewModel.state = .checking(.init(cancel: cancellation))
+        viewModel.beginChecking(cancel: cancellation)
 
         if !hasUnobtrusiveTarget {
             standard.showUserInitiatedUpdateCheck(cancellation: cancellation)
@@ -196,6 +204,14 @@ class UpdateDriver: NSObject, SPUUserDriver {
     }
 
     func dismissUpdateInstallation() {
+        // Sparkle may dismiss stale installation UI while a fresh manual check
+        // is starting. Keep the optimistic checking affordance visible until
+        // Sparkle publishes a concrete follow-up state.
+        if case .checking = viewModel.state {
+            standard.dismissUpdateInstallation()
+            return
+        }
+
         viewModel.state = .idle
         standard.dismissUpdateInstallation()
     }

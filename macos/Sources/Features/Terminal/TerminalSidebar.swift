@@ -520,13 +520,23 @@ private struct TerminalSidebarFooter: View {
 
             Spacer(minLength: 0)
 
-            if let updateViewModel, !updateViewModel.state.isIdle {
-                TerminalSidebarUpdateButton(model: updateViewModel)
+            if let updateViewModel {
+                TerminalSidebarUpdateSlot(model: updateViewModel)
             }
         }
         .padding(.horizontal, 9)
         .padding(.top, 7)
         .padding(.bottom, 9)
+    }
+}
+
+private struct TerminalSidebarUpdateSlot: View {
+    @ObservedObject var model: UpdateViewModel
+
+    var body: some View {
+        if !model.state.isIdle {
+            TerminalSidebarUpdateButton(model: model)
+        }
     }
 }
 
