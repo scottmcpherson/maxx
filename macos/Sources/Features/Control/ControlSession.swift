@@ -1,13 +1,14 @@
 import Darwin
 import Foundation
 
-/// An API-created session.
+/// A control session.
 ///
-/// This is a control-plane object distinct from the terminal surface it manages.
-/// Its `id` is stable for the lifetime of the session and is intentionally
-/// unrelated to the surface UUID, the UI title, the process ID, the working
-/// directory, the git branch, or the command text — callers manage sessions
-/// solely through this id.
+/// This is a control-plane object distinct from the terminal surface it manages:
+/// either a tab Maxx created through `sessions.create`, or the caller's current
+/// tab after explicit `sessions.register-current`. Its `id` is stable for the
+/// lifetime of the session and is intentionally unrelated to the surface UUID,
+/// the UI title, the process ID, the working directory, the git branch, or the
+/// command text — callers manage sessions solely through this id.
 struct ControlSession {
     /// Stable control-session identifier.
     let id: UUID

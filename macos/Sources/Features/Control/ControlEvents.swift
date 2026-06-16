@@ -134,7 +134,7 @@ struct ControlStreamMessage: Codable {
 
 /// One entry in the registry's append-only, bounded global event bus.
 ///
-/// The bus is the cross-resource view of everything that happens to API-created
+/// The bus is the cross-resource view of everything that happens to control
 /// sessions, carrying a process-wide monotonic ``cursor`` so a supervisor can
 /// stream, filter, and resume from a known point regardless of which session an
 /// event belongs to. It is a superset of the per-session audit logs: every

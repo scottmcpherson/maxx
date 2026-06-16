@@ -198,6 +198,10 @@ maxx +control sessions create \
   --metadata workflow=release-checks \
   --metadata request_id=abc123
 
+# From inside an already-open Maxx tab, register the current tab only.
+parent=$(maxx +control sessions register-current \
+  | jq -r .result.session.session_id)
+
 maxx +control sessions get <session_id>
 maxx +control sessions list
 maxx +control sessions update <session_id> --status waiting_for_review
@@ -425,31 +429,32 @@ Durations accept `ms`/`s`/`m`/`h` suffixes (a bare number is seconds).
 
 The `method` field mirrors the proposed REST shape:
 
-| Method                     | REST equivalent                                | Purpose                                                                             |
-| -------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `sessions.create`          | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
-| `sessions.get`             | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
-| `sessions.list`            | `GET /control/v1/sessions`                     | List API-created sessions; optional `metadata_filter`, `parent`/`group` filters.    |
-| `sessions.update`          | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only (metadata merges).                     |
-| `sessions.action`          | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
-| `sessions.wait`            | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
-| `sessions.watch`           | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
-| `sessions.archive`         | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
-| `sessions.restart`         | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
-| `sessions.events`          | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
-| `sessions.declare-state`   | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
-| `sessions.emit-event`      | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
-| `sessions.set-metadata`    | `PUT /control/v1/sessions/{id}/meta`           | Agent sets/merges one metadata key (`value` or `value_json`).                       |
-| `sessions.remove-metadata` | `DELETE /control/v1/sessions/{id}/meta`        | Agent removes one or more metadata keys (`key`/`keys`).                             |
-| `sessions.clear-metadata`  | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
-| `sessions.set-state`       | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
-| `sessions.set-summary`     | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
-| `sessions.set-agent-type`  | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
-| `sessions.set-parent`      | `PUT /control/v1/sessions/{id}/parent`         | Set/clear the parent edge after creation; rejects self/missing/cycle (MAX-6).       |
-| `sessions.set-group`       | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
-| `stream.watch`             | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
-| `stream.wait`              | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
-| `policy.check`             | `GET /control/v1/policy/check`                 | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
+| Method                      | REST equivalent                                | Purpose                                                                             |
+| --------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `sessions.create`           | `POST /control/v1/sessions`                    | Create a tab/session from explicit inputs.                                          |
+| `sessions.register-current` | `POST /control/v1/sessions/current`            | Register the caller's current live tab using its per-surface proof.                 |
+| `sessions.get`              | `GET /control/v1/sessions/{id}`                | Explicit lifecycle state + declared metadata.                                       |
+| `sessions.list`             | `GET /control/v1/sessions`                     | List control sessions; optional `metadata_filter`, `parent`/`group` filters.        |
+| `sessions.update`           | `PATCH /control/v1/sessions/{id}`              | Update caller-owned `status`/`metadata` only (metadata merges).                     |
+| `sessions.action`           | `POST /control/v1/sessions/{id}/actions`       | `focus`, `input`, `interrupt` (`signal`), `cancel`, `close`.                        |
+| `sessions.wait`             | `GET /control/v1/sessions/{id}/wait`           | Block on a state/event/lifecycle until matched or timeout.                          |
+| `sessions.watch`            | `GET /control/v1/sessions/{id}/events`         | Stream lifecycle/event changes (newline-delimited).                                 |
+| `sessions.archive`          | `POST /control/v1/sessions/{id}/archive`       | Close the surface, retain the record.                                               |
+| `sessions.restart`          | `POST /control/v1/sessions/{id}/restart`       | Replay the recorded/supplied command in a fresh surface.                            |
+| `sessions.events`           | `GET /control/v1/sessions/{id}/log`            | Read the audit log (declared states/events + lifecycle).                            |
+| `sessions.declare-state`    | `PUT /control/v1/sessions/{id}/state`          | Agent declares a lifecycle state (audited).                                         |
+| `sessions.emit-event`       | `POST /control/v1/sessions/{id}/emit`          | Agent emits a named event with optional JSON payload.                               |
+| `sessions.set-metadata`     | `PUT /control/v1/sessions/{id}/meta`           | Agent sets/merges one metadata key (`value` or `value_json`).                       |
+| `sessions.remove-metadata`  | `DELETE /control/v1/sessions/{id}/meta`        | Agent removes one or more metadata keys (`key`/`keys`).                             |
+| `sessions.clear-metadata`   | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
+| `sessions.set-state`        | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
+| `sessions.set-summary`      | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-agent-type`   | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
+| `sessions.set-parent`       | `PUT /control/v1/sessions/{id}/parent`         | Set/clear the parent edge after creation; rejects self/missing/cycle (MAX-6).       |
+| `sessions.set-group`        | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
+| `stream.watch`              | `GET /control/v1/stream`                       | Stream the cross-resource event bus (filtered, resumable).                          |
+| `stream.wait`               | `GET /control/v1/stream/wait`                  | Block on a stream event or a group-wide condition.                                  |
+| `policy.check`              | `GET /control/v1/policy/check`                 | Evaluate a (source, capability, target); report allow/deny/confirm, no side effect. |
 
 ### Audit entries
 
@@ -521,7 +526,7 @@ Errors are predictable and documented:
 | `invalid_request`       | Malformed input, bad limits, or a disallowed update field.                |
 | `unauthorized`          | Missing/wrong token, or the policy denied this capability for the source. |
 | `confirmation_required` | The policy requires confirmation; re-send with `confirm: true`.           |
-| `not_found`             | No API-created session with that id.                                      |
+| `not_found`             | No control session with that id.                                          |
 | `already_ended`         | The session was canceled or its surface no longer exists.                 |
 | `unsupported_action`    | Unknown action name.                                                      |
 | `unsupported`           | Operation not supported for this session (e.g. no command to restart).    |
@@ -533,6 +538,11 @@ Errors are predictable and documented:
   UUID, the UI title, the PID, the working directory, the branch, or the command
   text. Use it for all later operations.
 - `surface_id` is the underlying terminal surface; exposed for correlation only.
+  `sessions.register-current` is the only adoption path for a manually opened
+  tab: the CLI reads the current tab's `GHOSTTY_AGENT_SURFACE_ID` and
+  `GHOSTTY_AGENT_REGISTRATION_TOKEN` environment variables and sends them as a
+  proof. Supplying a guessed `surface_id` without that per-surface proof is
+  rejected, and the CLI exposes no `--surface-id` flag for registration.
 - `status` and `metadata` are **caller/agent-owned**. `lifecycle` is **Maxx-owned**.
   `metadata` is an **agent-reported** map of namespaced keys → arbitrary JSON
   values (see [Agent-reported metadata](#agent-reported-metadata)); Maxx stores,
@@ -548,8 +558,9 @@ Errors are predictable and documented:
   coordination (`set-group`, or `create --group`). It is an opaque token (no
   meaning is inferred from its text); a session belongs to at most one group at a
   time, and membership changes are recorded as Maxx-owned stream events.
-- The API only ever lists/controls **API-created** sessions. The user's
-  manually-opened terminals are never reachable through it.
+- The API only ever lists/controls sessions it owns: API-created sessions and
+  manually opened tabs that explicitly registered themselves as the current tab.
+  Other manually opened terminals are never reachable through it.
 
 ### Limits
 
@@ -697,8 +708,9 @@ and is flagged `restored: true` (a mechanical fact about this run, not an
 inference about the work). The detachment is a safety boundary — with macOS
 window restoration a freshly rebuilt, user-owned surface can reuse a persisted
 `surface_id`, and the control API must never adopt, observe, signal, or close a
-surface it did not create this run — so a restored record resolves no surface and
-its actions return `already_ended` until it is restarted. A restored record is
+surface it did not create or explicitly register this run — so a restored record
+resolves no surface and its actions return `already_ended` until it is restarted.
+A restored record is
 fully listable/readable via `get` / `list` / `events`, and — because its
 `command` is persisted — is `restart`-able: a restart spawns a fresh surface,
 revives the record (`restored`
@@ -827,18 +839,19 @@ grouped connector launch is observed on the stream via `created` + `group.joined
 
 ### Events Maxx owns (`source_kind: maxx`, `kind: lifecycle`)
 
-| `name`         | When                                                          |
-| -------------- | ------------------------------------------------------------- |
-| `created`      | A session/tab was created (its command, if any, was started). |
-| `focused`      | A session was focused via the API.                            |
-| `closed`       | A session was canceled/closed, or its surface vanished.       |
-| `exited`       | The session's child process exited (kernel-reported).         |
-| `archived`     | A session was archived.                                       |
-| `restarted`    | A session's command was restarted in a fresh surface.         |
-| `group.joined` | A session joined a group (`message`/`group` name the group).  |
-| `group.left`   | A session left a group.                                       |
-| `parent.set`   | A session's parent edge was set (`message` is the parent id). |
-| `parent.cleared` | A session's parent edge was cleared.                        |
+| `name`           | When                                                          |
+| ---------------- | ------------------------------------------------------------- |
+| `created`        | A session/tab was created (its command, if any, was started). |
+| `registered`     | The caller's current live tab self-registered as a session.   |
+| `focused`        | A session was focused via the API.                            |
+| `closed`         | A session was canceled/closed, or its surface vanished.       |
+| `exited`         | The session's child process exited (kernel-reported).         |
+| `archived`       | A session was archived.                                       |
+| `restarted`      | A session's command was restarted in a fresh surface.         |
+| `group.joined`   | A session joined a group (`message`/`group` name the group).  |
+| `group.left`     | A session left a group.                                       |
+| `parent.set`     | A session's parent edge was set (`message` is the parent id). |
+| `parent.cleared` | A session's parent edge was cleared.                          |
 
 These derive only from explicit API actions and kernel-reported process/surface
 state — never from terminal output, process names, branch names, paths, tab

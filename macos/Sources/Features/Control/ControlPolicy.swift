@@ -28,7 +28,7 @@ import Foundation
 /// the underlying feature lands, only `isImplemented` flips. (`groups:create`
 /// became implemented with MAX-7.)
 enum ControlCapability: String, CaseIterable, Codable, Sendable {
-    /// Enumerate / read API-created sessions (tabs) and their audit log.
+    /// Enumerate / read control sessions (tabs) and their audit log.
     case tabsList = "tabs:list"
     /// Spawn a new tab/session.
     case tabsSpawn = "tabs:spawn"
@@ -526,7 +526,7 @@ enum ControlPolicyMapping {
             // Observing the cross-resource event stream is the same read
             // capability as listing/observing sessions.
             return .tabsList
-        case .sessionsCreate:
+        case .sessionsCreate, .sessionsRegisterCurrent:
             return .tabsSpawn
         case .sessionsSetGroup, .sessionsSetParent:
             // Assigning/clearing group membership (`set-group`, MAX-7) or a parent
@@ -581,6 +581,8 @@ enum ControlPolicyMapping {
         case .sessionsCreate:
             let location = params?.location ?? "tab"
             return .newSurface(location == "window" ? "window" : "tab")
+        case .sessionsRegisterCurrent:
+            return .newSurface("current tab")
         default:
             if let id = params?.id, !id.isEmpty { return .session(id) }
             return .none

@@ -79,12 +79,44 @@ final class TerminalControlHost: ControlSessionHost {
         return TerminalSurfaceHandle(view: view)
     }
 
+    func surfaceForRegistration(surfaceID: UUID, token: String) -> ControlSurfaceHandle? {
+        guard let view = Self.allSurfaceViews.first(where: { $0.id == surfaceID }) else {
+            return nil
+        }
+        guard Self.timingSafeEquals(view.agentRegistrationToken, token) else {
+            return nil
+        }
+        return TerminalSurfaceHandle(view: view)
+    }
+
     /// All live terminal surfaces across every window (same enumeration the App
     /// Intents `TerminalQuery` uses).
     private static var allSurfaceViews: [Ghostty.SurfaceView] {
         NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .flatMap { $0.surfaceTree.root?.leaves() ?? [] }
+    }
+
+    private static func timingSafeEquals(_ expected: String, _ supplied: String) -> Bool {
+        let expectedBytes = Array(expected.utf8)
+        let suppliedBytes = Array(supplied.utf8)
+        guard !expectedBytes.isEmpty else { return suppliedBytes.isEmpty }
+
+        var paddedSupplied = [UInt8](repeating: 0, count: expectedBytes.count)
+        let copyCount = min(suppliedBytes.count, expectedBytes.count)
+        for index in 0..<copyCount {
+            paddedSupplied[index] = suppliedBytes[index]
+        }
+
+        let bytesMatch = expectedBytes.withUnsafeBytes { expectedBuffer in
+            paddedSupplied.withUnsafeBytes { suppliedBuffer in
+                timingsafe_bcmp(
+                    expectedBuffer.baseAddress!,
+                    suppliedBuffer.baseAddress!,
+                    expectedBytes.count) == 0
+            }
+        }
+        return bytesMatch && suppliedBytes.count == expectedBytes.count
     }
 }
 

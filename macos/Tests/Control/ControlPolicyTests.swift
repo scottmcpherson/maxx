@@ -295,6 +295,12 @@ struct ControlPolicyMappingTests {
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params()) == nil)
     }
 
+    @Test func registerCurrentMapsToTabsSpawn() {
+        #expect(ControlPolicyMapping.capability(
+            for: .sessionsRegisterCurrent,
+            params: params()) == .tabsSpawn)
+    }
+
     @Test func stateDeclarationsMapToStateSet() {
         for method in [ControlMethod.sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary] {
             #expect(ControlPolicyMapping.capability(for: method, params: params()) == .stateSet)
