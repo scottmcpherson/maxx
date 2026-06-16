@@ -200,9 +200,10 @@ The resolved prompt reaches the launched command per `--prompt-delivery`:
 
 ## Visibility and control
 
-- The launched tab is a **normal visible Maxx tab**. Inspect, stop (`sessions
-  action <id> --action interrupt`/`cancel`), or restart it with the usual
-  tab/session controls — triggered execution is never hidden background work.
+- The launched tab is a **normal visible Maxx tab**. Inspect it, stop it with
+  `sessions action <id> --action interrupt` or `cancel`, or restart it with the
+  usual tab/session controls — triggered execution is never hidden background
+  work.
 - Each launch carries explicit provenance metadata on the tab: the connector
   keys (`connector`, `connector.event_id`, …) and the runner keys
   (`runner.trigger`, `runner.trigger_type`, `runner.received_at`).

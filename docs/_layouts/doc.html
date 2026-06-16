@@ -172,6 +172,13 @@
     text-decoration: none;
   }
 
+  .sidebar a.active {
+    color: var(--text);
+    background: rgba(56, 214, 255, .12);
+    box-shadow: inset 3px 0 0 var(--cyan);
+    font-weight: 650;
+  }
+
   .sidebar .group {
     margin: 18px 0 6px;
     color: var(--faint);
@@ -321,19 +328,20 @@
 
   <main class="page">
     <aside class="sidebar" aria-label="Documentation sections">
+      {% assign current_url = page.url | replace: 'index.html', '' %}
       <p class="sidebar-title">Documentation</p>
-      <a href="{{ '/docs/' | relative_url }}">Overview</a>
-      <a href="{{ '/docs/getting-started/' | relative_url }}">Getting Started</a>
-      <a href="{{ '/docs/how-to/' | relative_url }}">How-to</a>
-      <a href="{{ '/docs/reference/' | relative_url }}">Reference</a>
-      <a href="{{ '/docs/explanation/' | relative_url }}">Explanation</a>
+      <a href="{{ '/docs/' | relative_url }}"{% if current_url == '/docs/' %} class="active" aria-current="page"{% endif %}>Overview</a>
+      <a href="{{ '/docs/getting-started/' | relative_url }}"{% if current_url contains '/docs/getting-started/' %} class="active"{% if current_url == '/docs/getting-started/' %} aria-current="page"{% endif %}{% endif %}>Getting Started</a>
+      <a href="{{ '/docs/how-to/' | relative_url }}"{% if current_url contains '/docs/how-to/' %} class="active"{% if current_url == '/docs/how-to/' %} aria-current="page"{% endif %}{% endif %}>How-to</a>
+      <a href="{{ '/docs/reference/' | relative_url }}"{% if current_url contains '/docs/reference/' %} class="active"{% if current_url == '/docs/reference/' %} aria-current="page"{% endif %}{% endif %}>Reference</a>
+      <a href="{{ '/docs/explanation/' | relative_url }}"{% if current_url contains '/docs/explanation/' %} class="active"{% if current_url == '/docs/explanation/' %} aria-current="page"{% endif %}{% endif %}>Explanation</a>
 
       <p class="group">Core References</p>
-      <a href="{{ '/control-api.html' | relative_url }}">Control API</a>
-      <a href="{{ '/automation-runner.html' | relative_url }}">Automation Runner</a>
-      <a href="{{ '/connector-adapters.html' | relative_url }}">Connector Adapters</a>
-      <a href="{{ '/webhook-ingestion.html' | relative_url }}">Webhook Ingestion</a>
-      <a href="{{ '/no-inference.html' | relative_url }}">No-Inference Rule</a>
+      <a href="{{ '/control-api.html' | relative_url }}"{% if current_url == '/control-api.html' %} class="active" aria-current="page"{% endif %}>Control API</a>
+      <a href="{{ '/automation-runner.html' | relative_url }}"{% if current_url == '/automation-runner.html' %} class="active" aria-current="page"{% endif %}>Automation Runner</a>
+      <a href="{{ '/connector-adapters.html' | relative_url }}"{% if current_url == '/connector-adapters.html' %} class="active" aria-current="page"{% endif %}>Connector Adapters</a>
+      <a href="{{ '/webhook-ingestion.html' | relative_url }}"{% if current_url == '/webhook-ingestion.html' %} class="active" aria-current="page"{% endif %}>Webhook Ingestion</a>
+      <a href="{{ '/no-inference.html' | relative_url }}"{% if current_url == '/no-inference.html' %} class="active" aria-current="page"{% endif %}>No-Inference Rule</a>
     </aside>
 
     <article class="content">
