@@ -18,10 +18,15 @@ enum ControlMethod: String, Codable {
     /// Create a tab/session from explicit inputs. (`POST /sessions`)
     case sessionsCreate = "sessions.create"
 
+    /// Register the caller's current, already-open tab as a control session.
+    /// The request must carry the per-surface registration proof injected into
+    /// that tab's environment; callers cannot name arbitrary surface ids.
+    case sessionsRegisterCurrent = "sessions.register-current"
+
     /// Return explicit lifecycle state and declared metadata. (`GET /sessions/{id}`)
     case sessionsGet = "sessions.get"
 
-    /// List API-created sessions visible to the caller. (`GET /sessions`)
+    /// List control sessions visible to the caller. (`GET /sessions`)
     case sessionsList = "sessions.list"
 
     /// Update caller-owned metadata/status only. (`PATCH /sessions/{id}`)
@@ -161,6 +166,12 @@ struct ControlRequest: Codable {
     struct Params: Codable {
         /// Control session id (UUID string) for get/update/action.
         var id: String?
+        /// Surface id for `sessions.register-current`, read by the CLI from
+        /// `GHOSTTY_AGENT_SURFACE_ID` in the current tab's environment.
+        var surfaceID: String?
+        /// Per-surface proof for `sessions.register-current`, read by the CLI
+        /// from `GHOSTTY_AGENT_REGISTRATION_TOKEN`. Not persisted or returned.
+        var registrationToken: String?
         var title: String?
         var cwd: String?
         var command: String?
@@ -257,7 +268,10 @@ struct ControlRequest: Codable {
         var capability: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, title, cwd, command, env, metadata, status, location
+            case id
+            case surfaceID = "surface_id"
+            case registrationToken = "registration_token"
+            case title, cwd, command, env, metadata, status, location
             case action, input, state, event, lifecycle, message, source
             case payloadJson = "payload_json"
             case key, value

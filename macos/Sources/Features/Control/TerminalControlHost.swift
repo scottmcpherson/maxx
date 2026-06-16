@@ -79,12 +79,35 @@ final class TerminalControlHost: ControlSessionHost {
         return TerminalSurfaceHandle(view: view)
     }
 
+    func surfaceForRegistration(surfaceID: UUID, token: String) -> ControlSurfaceHandle? {
+        guard let view = Self.allSurfaceViews.first(where: { $0.id == surfaceID }) else {
+            return nil
+        }
+        guard Self.constantTimeEquals(view.agentRegistrationToken, token) else {
+            return nil
+        }
+        return TerminalSurfaceHandle(view: view)
+    }
+
     /// All live terminal surfaces across every window (same enumeration the App
     /// Intents `TerminalQuery` uses).
     private static var allSurfaceViews: [Ghostty.SurfaceView] {
         NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .flatMap { $0.surfaceTree.root?.leaves() ?? [] }
+    }
+
+    private static func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
+        let a = Array(lhs.utf8)
+        let b = Array(rhs.utf8)
+        let count = max(a.count, b.count)
+        var diff = a.count ^ b.count
+        for index in 0..<count {
+            let left = index < a.count ? a[index] : 0
+            let right = index < b.count ? b[index] : 0
+            diff |= Int(left ^ right)
+        }
+        return diff == 0
     }
 }
 

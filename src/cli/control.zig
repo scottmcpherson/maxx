@@ -31,6 +31,7 @@ const Group = enum {
 
 const Verb = enum {
     create,
+    @"register-current",
     get,
     list,
     update,
@@ -79,6 +80,8 @@ const Command = struct {
     group: Group = .sessions,
     verb: Verb,
     id: ?[]const u8 = null,
+    surface_id: ?[]const u8 = null,
+    registration_token: ?[]const u8 = null,
     title: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     command: ?[]const u8 = null,
@@ -125,6 +128,7 @@ const Command = struct {
         return switch (self.group) {
             .sessions => switch (self.verb) {
                 .create => "sessions.create",
+                .@"register-current" => "sessions.register-current",
                 .get => "sessions.get",
                 .list => "sessions.list",
                 .update => "sessions.update",
@@ -201,10 +205,15 @@ const ParseError = error{
 ///     `--title`, `--cwd`, `--command`, `--status`, `--location=tab|window`,
 ///     repeatable `--metadata key=value` and `--env KEY=VALUE`.
 ///
+///   * `sessions register-current`: from inside a normal Maxx tab, explicitly
+///     register the current tab as a control session. The CLI reads
+///     `GHOSTTY_AGENT_SURFACE_ID` and `GHOSTTY_AGENT_REGISTRATION_TOKEN` from the
+///     tab environment; callers cannot supply an arbitrary surface id.
+///
 ///   * `sessions get <session_id>`: print the explicit lifecycle state and
 ///     declared metadata for a session.
 ///
-///   * `sessions list`: list the API-created sessions.
+///   * `sessions list`: list control sessions.
 ///
 ///   * `sessions update <session_id>`: update caller-owned fields only. Flags:
 ///     `--status`, repeatable `--metadata key=value`.
@@ -341,7 +350,7 @@ pub fn run(alloc: Allocator) !u8 {
     const stderr = &stderr_writer.interface;
     defer stderr.flush() catch {};
 
-    const cmd = parseCommand(arena_alloc, &iter) catch |err| switch (err) {
+    var cmd = parseCommand(arena_alloc, &iter) catch |err| switch (err) {
         error.MissingGroup, error.MissingVerb => return Action.help_error,
         error.UnknownGroup => {
             try stderr.print(
@@ -356,7 +365,7 @@ pub fn run(alloc: Allocator) !u8 {
                     "  sessions: create, get, list, update, cancel, action, wait, watch, " ++
                     "archive, restart, events, declare-state, emit-event, set-metadata, " ++
                     "remove-metadata, clear-metadata, set-state, set-summary, set-agent-type, " ++
-                    "set-parent, set-group\n" ++
+                    "set-parent, set-group, register-current\n" ++
                     "  stream:   watch, wait\n" ++
                     "  event:    emit\n" ++
                     "  policy:   check, sources, validate\n",
@@ -393,6 +402,37 @@ pub fn run(alloc: Allocator) !u8 {
 
     if (cmd.group == .policy and cmd.verb == .@"policy-validate") {
         return runPolicyValidate(arena_alloc, cmd, stderr);
+    }
+
+    if (cmd.verb == .@"register-current") {
+        cmd.surface_id = std.process.getEnvVarOwned(
+            arena_alloc,
+            "GHOSTTY_AGENT_SURFACE_ID",
+        ) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => {
+                try stderr.print(
+                    "error: sessions register-current must be run inside a Maxx tab " ++
+                        "(GHOSTTY_AGENT_SURFACE_ID is not set)\n",
+                    .{},
+                );
+                return 1;
+            },
+            else => return err,
+        };
+        cmd.registration_token = std.process.getEnvVarOwned(
+            arena_alloc,
+            "GHOSTTY_AGENT_REGISTRATION_TOKEN",
+        ) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => {
+                try stderr.print(
+                    "error: sessions register-current requires this Maxx build's " ++
+                        "registration token (GHOSTTY_AGENT_REGISTRATION_TOKEN is not set)\n",
+                    .{},
+                );
+                return 1;
+            },
+            else => return err,
+        };
     }
 
     // Resolve the control directory, socket, and token paths.
@@ -727,13 +767,14 @@ fn parseVerb(group: Group, s: []const u8) ?Verb {
 
 fn sessionsVerb(s: []const u8) ?Verb {
     const candidates = [_]Verb{
-        .create,            .get,               .list,
-        .update,            .cancel,            .action,
-        .wait,              .watch,             .archive,
-        .restart,           .events,            .@"declare-state",
-        .@"emit-event",     .@"set-metadata",   .@"set-state",
-        .@"set-summary",    .@"set-group",      .@"remove-metadata",
-        .@"clear-metadata", .@"set-agent-type", .@"set-parent",
+        .create,             .@"register-current", .get,
+        .list,               .update,              .cancel,
+        .action,             .wait,                .watch,
+        .archive,            .restart,             .events,
+        .@"declare-state",   .@"emit-event",       .@"set-metadata",
+        .@"set-state",       .@"set-summary",      .@"set-group",
+        .@"remove-metadata", .@"clear-metadata",   .@"set-agent-type",
+        .@"set-parent",
     };
     inline for (candidates) |v| {
         if (std.mem.eql(u8, s, @tagName(v))) return v;
@@ -795,6 +836,14 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
 
     if (cmd.id) |v| {
         try json.objectField("id");
+        try json.write(v);
+    }
+    if (cmd.surface_id) |v| {
+        try json.objectField("surface_id");
+        try json.write(v);
+    }
+    if (cmd.registration_token) |v| {
+        try json.objectField("registration_token");
         try json.write(v);
     }
     if (cmd.title) |v| {
@@ -1101,6 +1150,35 @@ test "parseCommand get with positional id" {
     try testing.expectEqualStrings("ABC-123", cmd.id.?);
 }
 
+test "parseCommand register-current" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "sessions register-current");
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"register-current");
+    try testing.expectEqualStrings("sessions.register-current", cmd.method());
+}
+
+test "parseCommand register-current rejects surface id flag" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions register-current --surface-id BAD",
+    );
+    defer iter.deinit();
+
+    try testing.expectError(error.UnknownFlag, parseCommand(alloc, &iter));
+}
+
 test "parseCommand unknown verb" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -1134,6 +1212,28 @@ test "buildRequest create includes method, token, metadata" {
     try testing.expectEqualStrings("Run checks", params.get("title").?.string);
     try testing.expectEqualStrings("ls", params.get("command").?.string);
     try testing.expectEqualStrings("release", params.get("metadata").?.object.get("workflow").?.string);
+}
+
+test "buildRequest register-current includes current surface proof" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"register-current",
+        .surface_id = "SURFACE-1",
+        .registration_token = "proof-token",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.register-current", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("SURFACE-1", params.get("surface_id").?.string);
+    try testing.expectEqualStrings("proof-token", params.get("registration_token").?.string);
 }
 
 test "buildRequest cancel maps to sessions.action with cancel" {

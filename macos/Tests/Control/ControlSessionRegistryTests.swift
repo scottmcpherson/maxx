@@ -15,6 +15,9 @@ final class FakeControlSessionHost: ControlSessionHost {
         var alive = true
         var exists = true
         var pid: Int? = 4242
+        var title = "fake"
+        var workingDirectory: String?
+        var registrationToken = "surface-token"
         var focusCount = 0
         var interruptCount = 0
         /// Signals passed to `interrupt`; nil entries mean "Ctrl-C via tty".
@@ -50,6 +53,26 @@ final class FakeControlSessionHost: ControlSessionHost {
         guard let surface = surfaces[surfaceID], surface.exists else { return nil }
         return FakeSurfaceHandle(id: surfaceID, surface: surface)
     }
+
+    func surfaceForRegistration(surfaceID: UUID, token: String) -> ControlSurfaceHandle? {
+        guard let surface = surfaces[surfaceID], surface.exists else { return nil }
+        guard surface.registrationToken == token else { return nil }
+        return FakeSurfaceHandle(id: surfaceID, surface: surface)
+    }
+
+    func addManualSurface(
+        id: UUID = UUID(),
+        token: String = "surface-token",
+        title: String = "manual",
+        workingDirectory: String? = nil
+    ) -> UUID {
+        let surface = Surface()
+        surface.registrationToken = token
+        surface.title = title
+        surface.workingDirectory = workingDirectory
+        surfaces[id] = surface
+        return id
+    }
 }
 
 @MainActor
@@ -63,8 +86,8 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     }
 
     var surfaceID: UUID { id }
-    var title: String { "fake" }
-    var workingDirectory: String? { nil }
+    var title: String { surface.title }
+    var workingDirectory: String? { surface.workingDirectory }
     var pid: Int? { surface.pid }
     var isProcessAlive: Bool { surface.alive }
     func focus() { surface.focusCount += 1 }
@@ -466,6 +489,151 @@ struct ControlSessionRegistryTests {
 
         let response = registryB.handle(request(.sessionsGet, params(id: id)), host: host)
         #expect(response.error?.code == "not_found")
+    }
+
+    // MARK: Register current tab (MAX-17)
+
+    @Test func registerCurrentCreatesSessionForManualSurface() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(
+            token: "proof", title: "Supervisor", workingDirectory: "/tmp")
+
+        let response = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "proof")),
+            host: host)
+
+        #expect(response.ok)
+        let session = try #require(response.result?.session)
+        #expect(session.surfaceID == surfaceID.uuidString)
+        #expect(session.title == "Supervisor")
+        #expect(session.cwd == "/tmp")
+        #expect(session.status == "registered")
+        #expect(session.lifecycle == "running")
+        #expect(host.createdRequests.isEmpty)
+
+        let listed = registry.handle(request(.sessionsList), host: host)
+        #expect(listed.result?.sessions?.map(\.sessionID) == [session.sessionID])
+    }
+
+    @Test func registerCurrentRetryIsIdempotentForSameLiveSurface() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(token: "proof")
+
+        let first = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "proof")),
+            host: host)
+        let second = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "proof")),
+            host: host)
+
+        #expect(first.ok)
+        #expect(second.ok)
+        #expect(second.result?.session?.sessionID == first.result?.session?.sessionID)
+        #expect(registry.count == 1)
+
+        let (_, messages) = try registry.beginStreamWatch(.init(since: 0), host: host)
+        let registered = messages.compactMap(\.event).filter { $0.name == "registered" }
+        #expect(registered.count == 1)
+    }
+
+    @Test func registerCurrentRejectsGuessedDifferentSurface() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(token: "real-proof")
+
+        let wrongToken = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "guessed")),
+            host: host)
+        #expect(wrongToken.error?.code == "unauthorized")
+        #expect(registry.count == 0)
+
+        let unknownSurface = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: UUID().uuidString,
+                registrationToken: "real-proof")),
+            host: host)
+        #expect(unknownSurface.error?.code == "unauthorized")
+        #expect(registry.count == 0)
+    }
+
+    @Test func registerCurrentRejectsMutatingFields() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(token: "proof")
+
+        let response = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "proof",
+                status: "complete",
+                parent: UUID().uuidString)),
+            host: host)
+
+        #expect(response.error?.code == "invalid_request")
+        #expect(registry.count == 0)
+    }
+
+    @Test func registerCurrentPolicyDenialHappensBeforeProofValidation() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let response = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: "not-a-uuid",
+                registrationToken: "bad",
+                caller: "readonly-external")),
+            host: host)
+
+        #expect(response.error?.code == "unauthorized")
+        #expect(registry.count == 0)
+    }
+
+    @Test func registeredParentSupportsDeclarationsMetadataAndChildren() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let parentSurface = host.addManualSurface(token: "proof")
+        let parent = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: parentSurface.uuidString,
+                registrationToken: "proof")),
+            host: host)
+        let parentID = try #require(parent.result?.session?.sessionID)
+
+        #expect(registry.handle(
+            request(.sessionsSetState, .init(id: parentID, state: "running")),
+            host: host).ok)
+        #expect(registry.handle(
+            request(.sessionsSetSummary, .init(id: parentID, summary: "Supervising children")),
+            host: host).ok)
+        #expect(registry.handle(
+            request(.sessionsSetMetadata, .init(id: parentID, key: "linear.issue", value: "MAX-17")),
+            host: host).ok)
+        #expect(registry.handle(
+            request(.sessionsSetGroup, .init(id: parentID, group: "max-17")),
+            host: host).ok)
+
+        let child = registry.handle(
+            request(.sessionsCreate, .init(command: "codex", parent: parentID)),
+            host: host)
+        let childID = try #require(child.result?.session?.sessionID)
+        #expect(child.result?.session?.parentID == parentID)
+
+        let listed = registry.handle(request(.sessionsList, .init(parent: parentID)), host: host)
+        #expect(listed.result?.sessions?.map(\.sessionID) == [childID])
+        let parentView = registry.handle(request(.sessionsGet, .init(id: parentID)), host: host)
+        #expect(parentView.result?.session?.workflowState == "running")
+        #expect(parentView.result?.session?.summary == "Supervising children")
+        #expect(parentView.result?.session?.metadata["linear.issue"] == .string("MAX-17"))
+        #expect(parentView.result?.session?.group == "max-17")
     }
 
     // MARK: - MAX-2 helpers

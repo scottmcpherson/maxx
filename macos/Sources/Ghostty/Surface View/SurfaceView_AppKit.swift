@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Darwin
+import Security
 import SwiftUI
 import CoreText
 import UserNotifications
@@ -81,6 +82,11 @@ extension Ghostty {
 
         /// Stable hook identity for this surface.
         let agentSurfaceID: String
+
+        /// Runtime-only proof that a control request came from this surface's
+        /// environment. Injected into the terminal process and checked by
+        /// `sessions.register-current`; never encoded for restoration.
+        let agentRegistrationToken: String
 
         /// Per-surface JSONL file used by agent hook helpers.
         let agentEventFileURL: URL
@@ -304,6 +310,7 @@ extension Ghostty {
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             let surfaceUUID = uuid ?? UUID()
             self.agentSurfaceID = surfaceUUID.uuidString.lowercased()
+            self.agentRegistrationToken = Self.makeAgentRegistrationToken()
             self.agentEventFileURL = Self.agentEventFileURL(surfaceID: agentSurfaceID)
             self.markedText = NSMutableAttributedString()
 
@@ -895,6 +902,7 @@ extension Ghostty {
 
         private func configureAgentHookEnvironment(_ config: inout SurfaceConfiguration) {
             config.environmentVariables["GHOSTTY_AGENT_SURFACE_ID"] = agentSurfaceID
+            config.environmentVariables["GHOSTTY_AGENT_REGISTRATION_TOKEN"] = agentRegistrationToken
             config.environmentVariables["GHOSTTY_AGENT_EVENT_FILE"] = agentEventFileURL.path
             config.environmentVariables["GHOSTTY_AGENT_HOOKS_DISABLED"] =
                 ProcessInfo.processInfo.environment["GHOSTTY_AGENT_HOOKS_DISABLED"] ?? "0"
@@ -1110,6 +1118,18 @@ extension Ghostty {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("maxx-agent-hooks-\(uid)", isDirectory: true)
             return root.appendingPathComponent("\(surfaceID).jsonl", isDirectory: false)
+        }
+
+        private static func makeAgentRegistrationToken() -> String {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            let status = bytes.withUnsafeMutableBytes { buffer in
+                SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+            }
+            if status == errSecSuccess {
+                return bytes.map { String(format: "%02x", $0) }.joined()
+            }
+            return UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         }
 
         private static var agentHookHelperURL: URL? {

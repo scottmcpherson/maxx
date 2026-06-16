@@ -181,6 +181,31 @@ struct NoInferenceGuardrailsTests {
         #expect(host.surfaces[surface]?.relationship == nil)
     }
 
+    @Test func registerCurrentNeverInfersWorkflowStateFromExistingTabFacts() {
+        // Registering a manually opened tab snapshots mechanical facts (surface
+        // id, title, cwd), but none of that prose may become workflow truth.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surface = host.addManualSurface(
+            token: "proof",
+            title: "tests passed, ready for review",
+            workingDirectory: "/Users/dev/worktrees/max-17-complete")
+
+        let registered = registry.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surface.uuidString,
+                registrationToken: "proof")),
+            host: host)
+        let id = registered.result!.session!.sessionID
+        let session = get(registry, host, id)
+
+        #expect(session.title == "tests passed, ready for review")
+        #expect(session.cwd == "/Users/dev/worktrees/max-17-complete")
+        #expect(session.workflowState == nil)
+        #expect(session.summary == nil)
+        #expect(host.surfaces[surface]?.declaredState == nil)
+    }
+
     @Test func explicitRelationshipRendersButGroupMetadataKeyDoesNot() {
         // The flip side: an explicit `create --group` / `set-parent` edge IS
         // surfaced, while a metadata key that merely happens to be named "group"

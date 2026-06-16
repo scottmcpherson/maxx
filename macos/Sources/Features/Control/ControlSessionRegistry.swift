@@ -29,6 +29,15 @@ protocol ControlSessionHost: AnyObject {
 
     /// Returns a handle to a live surface by id, or `nil` if it no longer exists.
     func surface(for surfaceID: UUID) -> ControlSurfaceHandle?
+
+    /// Returns a handle only when the supplied per-surface registration token
+    /// proves the caller is running inside that live surface.
+    ///
+    /// Used by `sessions.register-current`. A nil result deliberately collapses
+    /// "surface missing" and "bad token" so the registry can reject arbitrary
+    /// surface-id adoption without turning the endpoint into a surface-existence
+    /// oracle.
+    func surfaceForRegistration(surfaceID: UUID, token: String) -> ControlSurfaceHandle?
 }
 
 /// A handle to a live surface.
@@ -69,10 +78,11 @@ protocol ControlSurfaceHandle {
     func applyRelationship(_ relationship: ControlRelationship)
 }
 
-/// The in-memory registry of API-created sessions plus the request dispatcher.
+/// The in-memory registry of control sessions plus the request dispatcher.
 ///
 /// Authorization model: the registry only ever exposes or mutates sessions it
-/// created. The user's manually-opened terminals are never enumerated or
+/// owns: sessions it created, plus the caller's current live tab after explicit
+/// self-registration. Other manually-opened terminals are never enumerated or
 /// controllable through this API, so a caller cannot reach an arbitrary surface
 /// even with a valid token.
 @MainActor
@@ -108,7 +118,7 @@ final class ControlSessionRegistry {
     // MARK: Structured event stream (MAX-7)
 
     /// Append-only, bounded global event bus: the cross-resource view of
-    /// everything that happens to API-created sessions, carrying a process-wide
+    /// everything that happens to control sessions, carrying a process-wide
     /// monotonic cursor. Oldest entries are evicted once it exceeds
     /// ``maxBusEvents``; a `stream.watch --since` below the retained window is
     /// reported as a retention miss rather than silently skipped.
@@ -261,6 +271,8 @@ final class ControlSessionRegistry {
             switch request.method {
             case .sessionsCreate:
                 return .success(.init(session: try create(request.params, host: host)))
+            case .sessionsRegisterCurrent:
+                return .success(.init(session: try registerCurrent(request.params, host: host)))
             case .sessionsGet:
                 return .success(.init(session: try get(request.params, host: host)))
             case .sessionsList:
@@ -585,6 +597,95 @@ final class ControlSessionRegistry {
         if !relationship(of: session).isEmpty {
             pushRelationship(session, to: liveSurface(of: session, host: host))
         }
+        return view(of: session, host: host)
+    }
+
+    /// Register the caller's current, already-open tab as a control session.
+    ///
+    /// This is the only adoption path for manually opened tabs. It is scoped to
+    /// the caller's own live surface by a per-surface registration token injected
+    /// into that tab's environment; a caller that merely guesses another
+    /// `surface_id` cannot satisfy the proof. Restored records from a previous app
+    /// run are intentionally ignored for idempotence so this path never rebinds a
+    /// persisted session to a coincidentally restored live surface by matching the
+    /// old surface id.
+    private func registerCurrent(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        // Keep registration as a pure "bind my current tab" operation. Existing
+        // post-registration verbs own declarations/relationships/metadata, so a
+        // retry cannot accidentally mutate the session while trying to be
+        // idempotent.
+        if params?.id != nil
+            || params?.title != nil
+            || params?.cwd != nil
+            || params?.command != nil
+            || params?.env != nil
+            || params?.metadata != nil
+            || params?.status != nil
+            || params?.location != nil
+            || params?.parent != nil
+            || params?.group != nil
+            || params?.agentType != nil {
+            throw ControlError(
+                .invalidRequest,
+                "register-current only accepts the current tab registration proof")
+        }
+
+        guard let rawSurfaceID = params?.surfaceID, !rawSurfaceID.isEmpty else {
+            throw ControlError(.invalidRequest, "surface_id is required")
+        }
+        guard let surfaceID = UUID(uuidString: rawSurfaceID) else {
+            throw ControlError(.invalidRequest, "surface_id is not a valid UUID")
+        }
+        guard let token = params?.registrationToken, !token.isEmpty else {
+            throw ControlError(.invalidRequest, "registration_token is required")
+        }
+        guard let handle = host.surfaceForRegistration(surfaceID: surfaceID, token: token) else {
+            // Collapse missing surface and bad token into one response so this
+            // endpoint cannot be used to probe arbitrary manually opened tabs.
+            throw ControlError(.unauthorized, "current tab registration proof failed")
+        }
+
+        if let existing = sessions.values
+            .filter({
+                $0.surfaceID == surfaceID
+                    && !$0.restoredFromPreviousRun
+                    && !$0.canceled
+                    && !$0.archived
+                    && liveSurface(of: $0, host: host) != nil
+            })
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .first {
+            return view(of: existing, host: host)
+        }
+
+        let createdAt = now()
+        let title = handle.title.isEmpty ? nil : handle.title
+        var session = ControlSession(
+            id: makeID(),
+            surfaceID: surfaceID,
+            title: title,
+            command: nil,
+            cwd: handle.workingDirectory,
+            env: [:],
+            location: .tab,
+            status: "registered",
+            metadata: [:],
+            group: nil,
+            parentID: nil,
+            agentType: nil,
+            createdAt: createdAt,
+            updatedAt: createdAt,
+            lastSeenAt: createdAt,
+            canceled: false)
+        session.lastObservedLifecycle = handle.isProcessAlive
+            ? ControlLifecycle.running.rawValue
+            : ControlLifecycle.exited.rawValue
+        store(&session, touch: false)
+        recordMechanical(
+            session, name: "registered", group: nil, createdAt: createdAt, pid: handle.pid)
         return view(of: session, host: host)
     }
 

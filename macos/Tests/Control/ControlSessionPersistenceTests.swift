@@ -478,6 +478,45 @@ struct ControlSessionPersistenceTests {
         if let surfaceID { #expect(host2.surfaces[surfaceID]?.focusCount == 0) }
     }
 
+    @Test func registerCurrentAfterRestartDoesNotRebindRestoredRecord() throws {
+        let url = tempStoreURL()
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry1, host1) = makeRegistry(url: url, clock: clock)
+        let surfaceID = host1.addManualSurface(id: UUID(), token: "first-run")
+        let first = registry1.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "first-run")),
+            host: host1)
+        let oldSessionID = try #require(first.result?.session?.sessionID)
+        registry1.flush()
+
+        // New app run: the persisted record is restored and detached. A live
+        // surface may coincidentally reuse the same UUID, but it carries this
+        // run's registration token.
+        let (registry2, host2) = makeRegistry(url: url, clock: clock)
+        _ = host2.addManualSurface(id: surfaceID, token: "second-run")
+
+        let restored = registry2.handle(
+            request(.sessionsGet, .init(id: oldSessionID)), host: host2)
+            .result?.session
+        #expect(restored?.lifecycle == "closed")
+        #expect(restored?.restored == true)
+        #expect(restored?.pid == nil)
+
+        let registeredAgain = registry2.handle(
+            request(.sessionsRegisterCurrent, .init(
+                surfaceID: surfaceID.uuidString,
+                registrationToken: "second-run")),
+            host: host2)
+        let newSession = try #require(registeredAgain.result?.session)
+        #expect(newSession.sessionID != oldSessionID)
+        #expect(newSession.surfaceID == surfaceID.uuidString)
+        #expect(newSession.lifecycle == "running")
+        #expect(newSession.restored == nil)
+        #expect(registry2.count == 2)
+    }
+
     @Test func restoredSessionCanBeRestarted() {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

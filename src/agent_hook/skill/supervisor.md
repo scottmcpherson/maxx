@@ -40,18 +40,19 @@ declare it (see _summarize_), or report the gap — do not infer it.
 
 ## Two control surfaces
 
-| Surface                                                  | Reach                                               | Use it for                                                                                                                                   |
-| -------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maxx-agent-hook` (in-tab CLI, on PATH inside Maxx tabs) | The current window's tabs, via AppleScript          | Quick visible ops: `new-tab`, `list-tabs`, `send`, `rename-tab`, `close-tab`. See the **`maxx-tabs`** skill.                                 |
-| `maxx +control sessions …` (the control API)             | Any **API-created** session, by stable `session_id` | Everything a supervisor needs: spawn with a recorded command, declare state/metadata, set parent/group, `watch`/`wait`, stream group events. |
+| Surface                                                  | Reach                                                                                             | Use it for                                                                                                                                   |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxx-agent-hook` (in-tab CLI, on PATH inside Maxx tabs) | The current window's tabs, via AppleScript                                                        | Quick visible ops: `new-tab`, `list-tabs`, `send`, `rename-tab`, `close-tab`. See the **`maxx-tabs`** skill.                                 |
+| `maxx +control sessions …` (the control API)             | API-created sessions and the current tab after explicit self-registration, by stable `session_id` | Everything a supervisor needs: spawn with a recorded command, declare state/metadata, set parent/group, `watch`/`wait`, stream group events. |
 
 Prefer the **control API** for supervised work: a `sessions create` returns a
 stable `session_id` that survives renames, restarts, and reconnects, and it
-unlocks state/metadata/group/watch. (`maxx-agent-hook new-tab` opens a visible
-tab too, but it is _not_ an API-created session, so it has no `session_id` and
-none of those primitives — you can only observe it through `list-tabs`' hook
-state.) The control API only ever sees **API-created** sessions; the user's
-hand-opened terminals are never reachable through it.
+unlocks state/metadata/group/watch. A normal, hand-opened parent tab can join
+that registry only by running `sessions register-current` from inside itself;
+the command uses the tab's per-surface proof, so it cannot adopt another tab by
+guessing a `surface_id`. (`maxx-agent-hook new-tab` opens a visible tab too, but
+it is _not_ a control session unless the tab self-registers — you can otherwise
+only observe it through `list-tabs`' hook state.)
 
 Notes on invocation:
 
@@ -64,6 +65,16 @@ Notes on invocation:
 - Every call prints one JSON response. Capture `session_id` with `jq`.
 - A flag value that begins with `+` must use `--flag=value` form
   (`--command=+x`); otherwise Maxx's `+action` detection grabs it.
+
+Before spawning children, register this parent tab and keep its id:
+
+```sh
+supervisor_session=$(maxx +control sessions register-current \
+  | jq -r .result.session.session_id)
+```
+
+The command is idempotent for the same live tab: retrying returns the same
+`session_id` instead of creating a duplicate.
 
 ## The six supervisor moves
 
@@ -88,6 +99,7 @@ child=$(maxx +control sessions create \
   --title "Fix parser" \
   --cwd "$PWD" \
   --agent-type claude-code \
+  --parent "$supervisor_session" \
   --group refactor-2026 \
   --metadata role=worker --metadata task=MAX-123 \
   --command 'claude --permission-mode acceptEdits' \
@@ -98,6 +110,7 @@ child=$(maxx +control sessions create \
   --title "Add CSV export" \
   --cwd "$PWD" \
   --agent-type codex \
+  --parent "$supervisor_session" \
   --group refactor-2026 \
   --metadata role=worker --metadata task=MAX-124 \
   --command 'codex --full-auto' \
@@ -156,13 +169,11 @@ maxx +control sessions emit-event    "$child" --event pr.opened --payload-json '
 ```
 
 **A child declares its own state.** Tell the child (in its prompt) to declare
-progress. Inside its tab it resolves its own `session_id` by matching its
-surface id — no scraping, no guessing:
+progress. Inside its tab it resolves its own `session_id` by registering the
+current tab idempotently — no scraping, no guessed surface adoption:
 
 ```sh
-self=$(maxx +control sessions list \
-  | jq -r --arg s "$GHOSTTY_AGENT_SURFACE_ID" \
-      '.result.sessions[] | select((.surface_id|ascii_downcase)==($s|ascii_downcase)) | .session_id')
+self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
 maxx +control sessions set-state   "$self" --state complete
 maxx +control sessions set-summary "$self" --summary "Parser overflow fixed; 12 tests green"
 ```
@@ -275,8 +286,7 @@ Codex; only the `--command` permission flags differ (see _spawn_).
 You are a worker tab supervised by another agent. Task: <one self-contained task>.
 Working dir: <cwd>. When you finish, declare your result so the supervisor can read it
 without watching your output:
-  self=$(maxx +control sessions list | jq -r --arg s "$GHOSTTY_AGENT_SURFACE_ID" \
-    '.result.sessions[]|select((.surface_id|ascii_downcase)==($s|ascii_downcase))|.session_id')
+  self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
   maxx +control sessions set-summary "$self" --summary "<one line: what you did / found>"
   maxx +control sessions set-state   "$self" --state complete   # or failed
 If you need a decision you cannot make, set-state needsInput with a summary naming the question, then wait.
