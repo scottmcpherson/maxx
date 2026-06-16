@@ -200,6 +200,22 @@ struct ControlPolicySource: Sendable {
     }
 }
 
+/// Wire/config view of a policy source. Returned by `policy.sources` and used by
+/// diagnostics; it contains only explicit policy configuration, never ambient
+/// process/session state.
+struct ControlPolicySourceView: Codable, Equatable {
+    var id: String
+    var kind: String
+    var allow: [String]
+    var confirm: [String]
+    var confirmScope: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, allow, confirm
+        case confirmScope = "confirm_scope"
+    }
+}
+
 /// The result of resolving a caller claim against the policy.
 enum ControlResolvedSource: Sendable {
     case known(ControlPolicySource)
@@ -305,6 +321,19 @@ struct ControlPolicy: Sendable {
     init(defaults: Defaults = .init(), sources: [ControlPolicySource]) {
         self.defaults = defaults
         self.sources = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+    }
+
+    var sourceViews: [ControlPolicySourceView] {
+        sources.values
+            .sorted { $0.id < $1.id }
+            .map { source in
+                ControlPolicySourceView(
+                    id: source.id,
+                    kind: source.kind.rawValue,
+                    allow: source.allow.map(\.rawValue).sorted(),
+                    confirm: source.confirm.map(\.rawValue).sorted(),
+                    confirmScope: source.confirmScope.rawValue)
+            }
     }
 
     /// Resolve a caller claim to a configured source. An omitted claim resolves
@@ -424,49 +453,53 @@ extension ControlPolicy {
     /// so a token holder claiming one of them via `--as` can only *reduce* its
     /// own privileges, never escalate. They exist to (a) demonstrate and exercise
     /// the deny / confirmation / external-read paths end-to-end and (b) document
-    /// the intended config shape. Credential-bound external/webhook sources that
-    /// are *more* privileged than the default — and the secure key storage /
-    /// rotation they require — are explicit follow-up work (see MAX-11 risks).
+    /// the intended config shape. User-configured external/webhook/token sources
+    /// are added beside these built-ins by `ControlPolicyConfigLoader`; built-in
+    /// ids remain reserved so config cannot silently rewrite the safe defaults.
+    static let builtInSources: [ControlPolicySource] = [
+        // Trusted first-party CLI: full implemented surface, no friction.
+        ControlPolicySource(
+            id: "local-cli",
+            kind: .local,
+            allow: ControlCapability.allImplemented),
+
+        // A local source that confirms every mutation — demonstrates the
+        // confirmation path. Reads flow without a prompt.
+        ControlPolicySource(
+            id: "local-prompt",
+            kind: .local,
+            allow: [.tabsList],
+            confirm: [
+                .tabsSpawn, .tabsRestart, .tabsFocus, .tabsClose,
+                .inputSend, .keysPress, .stateSet,
+            ],
+            confirmScope: .always),
+
+        // A webhook/automation origin with its own narrow allowlist: it may
+        // spawn tabs and declare state, nothing else. Any other capability
+        // (input, close, output) falls to the external deny default.
+        ControlPolicySource(
+            id: "trusted-automation",
+            kind: .webhook,
+            allow: [.tabsSpawn, .stateSet]),
+
+        // A read-only external caller: may observe sessions but cannot mutate
+        // them and cannot read terminal output.
+        ControlPolicySource(
+            id: "readonly-external",
+            kind: .external,
+            allow: [.tabsList]),
+    ]
+
+    static let builtInSourceIDs = Set(builtInSources.map(\.id))
+
     static let `default` = ControlPolicy(
         defaults: .init(
             unknownSource: .deny,
             externalSource: .deny,
             localMutation: .confirm,
             localRead: .allow),
-        sources: [
-            // Trusted first-party CLI: full implemented surface, no friction.
-            ControlPolicySource(
-                id: "local-cli",
-                kind: .local,
-                allow: ControlCapability.allImplemented),
-
-            // A local source that confirms every mutation — demonstrates the
-            // confirmation path. Reads flow without a prompt.
-            ControlPolicySource(
-                id: "local-prompt",
-                kind: .local,
-                allow: [.tabsList],
-                confirm: [
-                    .tabsSpawn, .tabsRestart, .tabsFocus, .tabsClose,
-                    .inputSend, .keysPress, .stateSet,
-                ],
-                confirmScope: .always),
-
-            // A webhook/automation origin with its own narrow allowlist: it may
-            // spawn tabs and declare state, nothing else. Any other capability
-            // (input, close, output) falls to the external deny default.
-            ControlPolicySource(
-                id: "trusted-automation",
-                kind: .webhook,
-                allow: [.tabsSpawn, .stateSet]),
-
-            // A read-only external caller: may observe sessions but cannot mutate
-            // them and cannot read terminal output.
-            ControlPolicySource(
-                id: "readonly-external",
-                kind: .external,
-                allow: [.tabsList]),
-        ])
+        sources: builtInSources)
 }
 
 // MARK: - Method → capability mapping
@@ -478,7 +511,8 @@ enum ControlPolicyMapping {
     /// The capability a method (and, for `sessions.action`, its sub-action)
     /// requires. Returns `nil` for requests that are intentionally *ungated*:
     ///
-    ///   * `policy.check` — read-only policy introspection, no side effect.
+    ///   * `policy.check` / `policy.sources` — read-only policy introspection,
+    ///     no side effect.
     ///   * `sessions.action` with a missing/unknown action — left to the handler
     ///     to reject with its existing error, so error semantics are unchanged.
     ///   * a no-op `sessions.update` that writes neither `status` nor `metadata`.
@@ -531,7 +565,7 @@ enum ControlPolicyMapping {
             // The agent-reported metadata write surface (MAX-4) is gated by
             // `metadata:set`.
             return .metadataSet
-        case .policyCheck:
+        case .policyCheck, .policySources:
             return nil
         }
     }

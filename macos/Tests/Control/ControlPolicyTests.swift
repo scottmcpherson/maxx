@@ -113,6 +113,160 @@ struct ControlPolicyEvaluatorTests {
     }
 }
 
+// MARK: - Configured policy sources
+
+@MainActor
+struct ControlPolicyConfigTests {
+    private let linearWebhookConfig = """
+        {
+          "version": 1,
+          "sources": [
+            {
+              "id": "linear-webhook",
+              "kind": "webhook",
+              "allow": ["tabs:spawn", "groups:create", "state:set"],
+              "confirm": ["input:send"],
+              "confirm_scope": "once_per_source"
+            }
+          ]
+        }
+        """
+
+    private func configuredPolicy() throws -> ControlPolicy {
+        try ControlPolicyConfigLoader.policy(from: Data(linearWebhookConfig.utf8))
+    }
+
+    @Test func configAddsWebhookSourceBesideSafeBuiltIns() throws {
+        let policy = try configuredPolicy()
+
+        #expect(policy.evaluate(
+            source: policy.resolve("linear-webhook"),
+            capability: .groupsCreate,
+            target: .newSurface("tab")) == .allow)
+        #expect(policy.evaluate(
+            source: policy.resolve("linear-webhook"),
+            capability: .stateSet,
+            target: .none) == .allow)
+
+        if case .deny = policy.evaluate(
+            source: policy.resolve("trusted-automation"),
+            capability: .groupsCreate,
+            target: .newSurface("tab")) {
+        } else {
+            Issue.record("built-in trusted-automation must remain narrow")
+        }
+
+        let source = policy.sourceViews.first { $0.id == "linear-webhook" }
+        #expect(source?.kind == "webhook")
+        #expect(source?.allow.contains("groups:create") == true)
+        #expect(source?.confirm == ["input:send"])
+        #expect(source?.confirmScope == "once_per_source")
+    }
+
+    @Test func configRejectsReservedSourcesAndLoadFailureFallsBackSafely() throws {
+        let invalid = """
+            {
+              "sources": [
+                {
+                  "id": "trusted-automation",
+                  "kind": "webhook",
+                  "allow": ["tabs:spawn", "groups:create"]
+                }
+              ]
+            }
+            """
+
+        #expect(throws: ControlPolicyConfigError.reservedSourceID("trusted-automation")) {
+            _ = try ControlPolicyConfigLoader.policy(from: Data(invalid.utf8))
+        }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("control-policy.json", isDirectory: false)
+        try Data(invalid.utf8).write(to: file)
+
+        let fallback = ControlPolicyConfigLoader.loadOrDefault(fileURL: file)
+        if case .deny = fallback.evaluate(
+            source: fallback.resolve("trusted-automation"),
+            capability: .groupsCreate,
+            target: .newSurface("tab")) {
+        } else {
+            Issue.record("invalid config fallback must not broaden trusted-automation")
+        }
+        if case .deny = fallback.evaluate(
+            source: fallback.resolve("linear-webhook"),
+            capability: .groupsCreate,
+            target: .newSurface("tab")) {
+        } else {
+            Issue.record("invalid config fallback must not create configured sources")
+        }
+    }
+
+    @Test func configuredWebhookCanCreateGroupedLaunch() throws {
+        let registry = ControlSessionRegistry(policy: try configuredPolicy())
+        let host = FakeControlSessionHost()
+
+        let response = registry.handle(
+            .init(token: "t", method: .sessionsCreate, params: .init(
+                command: "claude",
+                group: "issue-MAX-16",
+                caller: "linear-webhook")),
+            host: host)
+
+        #expect(response.ok)
+        #expect(response.result?.session?.group == "issue-MAX-16")
+        #expect(host.createdRequests.count == 1)
+    }
+
+    @Test func configuredWebhookWithoutGroupsCreateCannotCreateGroupedLaunch() throws {
+        let json = """
+            {
+              "sources": [
+                {
+                  "id": "spawn-only-webhook",
+                  "kind": "webhook",
+                  "allow": ["tabs:spawn"]
+                }
+              ]
+            }
+            """
+        let policy = try ControlPolicyConfigLoader.policy(from: Data(json.utf8))
+        let registry = ControlSessionRegistry(policy: policy)
+        let host = FakeControlSessionHost()
+
+        let response = registry.handle(
+            .init(token: "t", method: .sessionsCreate, params: .init(
+                command: "claude",
+                group: "issue-MAX-16",
+                caller: "spawn-only-webhook")),
+            host: host)
+
+        #expect(response.error?.code == ControlErrorCode.unauthorized.rawValue)
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func policySourcesListsActiveConfiguredSources() throws {
+        let registry = ControlSessionRegistry(policy: try configuredPolicy())
+        let host = FakeControlSessionHost()
+
+        let response = registry.handle(
+            .init(token: "t", method: .policySources, params: .init()),
+            host: host)
+
+        #expect(response.ok)
+        let sources = response.result?.policySources ?? []
+        #expect(sources.contains { $0.id == "local-cli" })
+        #expect(sources.contains {
+            $0.id == "linear-webhook" && $0.allow.contains("groups:create")
+        })
+        #expect(host.createdRequests.isEmpty)
+    }
+}
+
 // MARK: - Method → capability mapping
 
 @MainActor
@@ -168,6 +322,7 @@ struct ControlPolicyMappingTests {
 
     @Test func policyCheckIsUngated() {
         #expect(ControlPolicyMapping.capability(for: .policyCheck, params: params()) == nil)
+        #expect(ControlPolicyMapping.capability(for: .policySources, params: params()) == nil)
     }
 
     @Test func targetsAreDescribed() {

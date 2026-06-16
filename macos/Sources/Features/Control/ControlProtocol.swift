@@ -112,6 +112,10 @@ enum ControlMethod: String, Codable {
     /// performing any action. A read-only diagnostic so callers/integrators can
     /// see whether an action would be allowed, denied, or require confirmation.
     case policyCheck = "policy.check"
+
+    /// List active policy sources. Read-only diagnostics for operators; the
+    /// response is explicit configuration only, not runtime/session state.
+    case policySources = "policy.sources"
 }
 
 // MARK: - Errors
@@ -420,11 +424,14 @@ struct ControlResponse: Codable {
         var streamEvent: ControlStreamEventView?
         /// A policy evaluation, returned by `policy.check`.
         var policy: ControlPolicyDecisionView?
+        /// Active policy sources, returned by `policy.sources`.
+        var policySources: [ControlPolicySourceView]?
 
         enum CodingKeys: String, CodingKey {
             case session, sessions, canceled, applied, outcome, event, events
             case streamEvent = "stream_event"
             case policy
+            case policySources = "policy_sources"
         }
 
         init(
@@ -436,7 +443,8 @@ struct ControlResponse: Codable {
             event: ControlEventView? = nil,
             events: [ControlEventView]? = nil,
             streamEvent: ControlStreamEventView? = nil,
-            policy: ControlPolicyDecisionView? = nil
+            policy: ControlPolicyDecisionView? = nil,
+            policySources: [ControlPolicySourceView]? = nil
         ) {
             self.session = session
             self.sessions = sessions
@@ -447,6 +455,7 @@ struct ControlResponse: Codable {
             self.events = events
             self.streamEvent = streamEvent
             self.policy = policy
+            self.policySources = policySources
         }
     }
 

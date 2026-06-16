@@ -184,7 +184,7 @@ maxx +runner poll --source linear --command 'claude ${issue.identifier}' \
 
 # Attribute the launch to a policy source and group it for a supervisor.
 maxx +runner run --source linear --command 'claude' \
-    --as trusted-automation --group 'issue-${issue.identifier}' --payload event.json
+    --as linear-webhook --group 'issue-${issue.identifier}' --payload event.json
 
 # Resolve and dedup-check without launching (no running Maxx required).
 cat event.json | maxx +runner run --source linear --command 'claude' --dry-run
@@ -202,8 +202,8 @@ error.
 > built-in `trusted-automation` source has only `tabs:spawn`/`state:set`, so
 > pairing `--as trusted-automation` with `--group` is rejected (`unauthorized`,
 > no tab spawned). A grouped webhook launch needs a configured policy source
-> granted both capabilities. See the
-> [Control API capability policy](./control-api.md#capability-policy).
+> such as `linear-webhook` granted both capabilities. See
+> [configured policy sources](./control-api.md#configured-policy-sources).
 
 ## Relationship to the connector layer
 
