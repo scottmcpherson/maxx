@@ -389,10 +389,11 @@ applies to these exactly as to any other request.
 `stream watch` first prints a `hello` line carrying the current `cursor` and the
 envelope `schema`, then one `{"type":"event","event":{…}}` line per matching
 event, and a final `{"type":"end"}` when a single-session filter's session ends
-(otherwise it runs until `--timeout` or the caller disconnects). `--since
-<cursor>` replays retained events after that cursor; if the cursor predates the
-retained window the `hello` line carries `"reset": true` and `"dropped_through":
-<cursor>` so the supervisor knows a gap occurred rather than silently missing it.
+(otherwise it runs until `--timeout` or the caller disconnects).
+`--since <cursor>` replays retained events after that cursor; if the cursor
+predates the retained window, the `hello` line carries `"reset": true` and a
+`"dropped_through"` cursor so the supervisor knows a gap occurred rather than
+silently missing it.
 
 `stream wait` prints one response whose `result.outcome` is `matched`, `timeout`,
 or `ended`; on a `--event` match it also carries the `stream_event` envelope, and

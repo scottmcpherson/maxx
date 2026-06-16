@@ -133,24 +133,24 @@ infers nothing; positive fixtures prove explicit declarations still render.
   expires to `idle`.
 - `src/agent_hook/main.zig` (`agent hook state normalization`) — prose, PR
   URLs, and branch-like strings normalize to no state.
-- `src/connector/connector.zig` (`no-inference: adapters surface only explicit
-  fields`) — connector payloads stuffed with uncopied bait (branch, head ref,
+- `src/connector/connector.zig` (`no-inference: adapters use explicit fields`)
+  — connector payloads stuffed with uncopied bait (branch, head ref,
   labels, plain state strings, assignees, paths) never leak into the event,
   prompt, provenance metadata, caller, group, or the emitted `sessions.create`
   request; only explicitly copied fields and templated group values from
   explicit event fields appear.
-- `src/runner/runner.zig` (`no-inference: only explicit fields and reserved
-  provenance reach the request`) — the automation trigger runner dispatches a
-  payload stuffed with bait and asserts none of it reaches the `sessions.create`
-  it sends; the runner's own provenance is limited to reserved, explicit
-  `runner.*` keys. A polling trigger fires only on its configured exit-code
-  contract and forwards the check's stdout as an opaque payload — it never reads
-  the output to decide meaning (`src/runner/poll.zig`).
-- `src/webhook/handler.zig` (`no-inference: webhook bait fields never reach the
-  launch`) — a webhook payload stuffed with bait reaches the launch only through
-  the connector adapter's explicit fields; the listener authenticates and frames
-  the request but interprets nothing, and the raw body is handed to the command
-  verbatim (a temp file) rather than scraped.
+- `src/runner/runner.zig` (`no-inference: runner forwards explicit fields`) —
+  the automation trigger runner dispatches a payload stuffed with bait and
+  asserts none of it reaches the `sessions.create` it sends; the runner's own
+  provenance is limited to reserved, explicit `runner.*` keys. A polling trigger
+  fires only on its configured exit-code contract and forwards the check's stdout
+  as an opaque payload — it never reads the output to decide meaning
+  (`src/runner/poll.zig`).
+- `src/webhook/handler.zig` (`no-inference: webhook bait stays out`) — a webhook
+  payload stuffed with bait reaches the launch only through the connector
+  adapter's explicit fields; the listener authenticates and frames the request
+  but interprets nothing, and the raw body is handed to the command verbatim (a
+  temp file) rather than scraped.
 - `macos/Tests/Control/ControlSessionPersistenceTests.swift`
   (`rehydrationNeverInfersUndeclaredSemanticFields`) — a persisted record whose
   mechanical fields (command `git commit -m done …`, cwd `/repo/feature-complete`,
