@@ -75,6 +75,34 @@ So a polling check is a pure data source: "exit `0` means an event occurred; her
 is its payload." What that event _means_ is the adapter's and the launched
 command's concern.
 
+## Watch-mode polling
+
+By default `maxx +runner poll` remains a one-shot check: run the configured
+command once, fire only if the exit code matches `--fire-on`, print one activity
+record, and exit.
+
+Add `--interval <duration>` to make the runner durable:
+
+```sh
+maxx +runner poll --source linear --command 'claude ${issue.identifier}' \
+    --trigger linear-todo \
+    --check './scripts/poll-linear-todo.sh' \
+    --fire-on 0 \
+    --interval 60s
+```
+
+`--watch` is shorthand for watch mode with the default 60s interval. Durations
+use the same style as control waits: bare numbers are seconds, or add `ms`, `s`,
+`m`, or `h`. A successful/idle/duplicate/filtered cycle sleeps for the configured
+interval. A failed cycle is reported as a structured `outcome: "failed"` record
+and retried with exponential backoff, capped by `--max-backoff` (default: a
+bounded value derived from the interval). Pass `--fail-fast` if configuration or
+check failures should terminate the loop instead of retrying.
+
+The loop handles SIGINT/SIGTERM by finishing normal code paths, saving dirty
+dedup state when possible, and exiting. It does not do filesystem work inside the
+signal handler itself.
+
 ## Predicate filtering
 
 `run` and `poll` accept the same predicate model as webhook routes:
@@ -211,6 +239,12 @@ maxx +runner run --source github --command 'codex' \
 maxx +runner poll --source linear --command 'claude ${issue.identifier}' \
     --trigger linear-poll --check './scripts/poll-linear.sh' --fire-on 0
 
+# Keep polling every minute until SIGINT/SIGTERM; duplicate issue ids are
+# suppressed through the same runner-seen state file across restarts.
+maxx +runner poll --source linear --command 'claude ${issue.identifier}' \
+    --trigger linear-todo --check './scripts/poll-linear-todo.sh' \
+    --fire-on 0 --interval 60s
+
 # Add predicates to run/poll payloads before any launch side effects.
 maxx +runner poll --source github --command 'codex run cleanup-merged-pr' \
     --trigger gh-pr-merged --check './scripts/poll-gh-pr.sh' \
@@ -231,6 +265,63 @@ maxx +runner list-seen
 `run`/`poll` exit `0` for `launched`, `duplicate`, `dry_run`, `filtered`, and a
 poll that did not fire (nothing to do); they exit `1` for a failed launch or a
 configuration error.
+
+## Linear Todo poller shape
+
+The check command owns the Linear query. Maxx only sees its explicit exit code
+and the structured payload it writes to stdout. A simple Todo poller can use a
+non-fire exit code such as `7` for idle and emit the existing Linear adapter's
+webhook-shaped payload when it finds work:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${LINEAR_API_KEY:?set LINEAR_API_KEY}"
+TEAM_KEY="${LINEAR_TEAM_KEY:-MAX}"
+IDLE_EXIT="${MAXX_RUNNER_IDLE_EXIT:-7}"
+
+query='
+query TodoIssue($team: String!) {
+  issues(
+    filter: { team: { key: { eq: $team } }, state: { name: { eq: "Todo" } } }
+    first: 1
+    orderBy: updatedAt
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      description
+      state { id name type }
+    }
+  }
+}'
+
+response="$(
+  jq -n --arg query "$query" --arg team "$TEAM_KEY" \
+    '{query: $query, variables: {team: $team}}' |
+  curl -fsS https://api.linear.app/graphql \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H 'Content-Type: application/json' \
+    --data-binary @-
+)"
+
+issue="$(jq -c '.data.issues.nodes[0] // empty' <<<"$response")"
+if [[ -z "$issue" ]]; then
+  exit "$IDLE_EXIT"
+fi
+
+jq -n --argjson issue "$issue" \
+  '{type:"Issue", action:"poll", data:$issue, url:$issue.url}'
+exit 0
+```
+
+Run it with `--fire-on 0`. The adapter uses `data.id` as the event id, so a Todo
+issue that remains visible across repeated checks launches at most once for the
+same trigger/source/dedup state. If a source needs a different explicit cursor,
+pass `--dedup-key <key>` from the surrounding runner configuration.
 
 > **Grouped launches and policy.** A `sessions.create` that sets `--group` is
 > gated by the control server on **both** `tabs:spawn` and `groups:create`. The
