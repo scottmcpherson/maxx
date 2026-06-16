@@ -20,7 +20,7 @@ configured launch.
    delivery mode, and authentication settings.
 3. Configure a capability-policy source for the webhook caller if it needs to
    spawn tabs or create groups.
-4. Start `ghostty +webhook serve --config webhook.json` while Maxx is running.
+4. Start `maxx +webhook serve --config webhook.json` while Maxx is running.
 5. Point the provider or relay at the local route through a trusted tunnel.
 
 ## Read Next

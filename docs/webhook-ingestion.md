@@ -65,7 +65,7 @@ that. See [the no-inference rule](no-inference.html).
 
    ```sh
    export MAXX_WEBHOOK_SECRET=$(openssl rand -hex 32)
-   ghostty +webhook serve --config webhook.json
+   maxx +webhook serve --config webhook.json
    # maxx webhook listening on http://127.0.0.1:8787 (1 route(s))
    ```
 

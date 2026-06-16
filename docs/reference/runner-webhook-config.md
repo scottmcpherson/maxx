@@ -13,13 +13,18 @@ to visible Maxx tabs.
 
 ## Entry Points
 
-| Surface              | Command                      | Full reference                                 |
-| -------------------- | ---------------------------- | ---------------------------------------------- |
-| Connector resolution | `ghostty +connector resolve` | [Connector adapters](/connector-adapters.html) |
-| One-shot runner      | `ghostty +runner run`        | [Automation runner](/automation-runner.html)   |
-| Polling runner       | `ghostty +runner poll`       | [Automation runner](/automation-runner.html)   |
-| Webhook listener     | `ghostty +webhook serve`     | [Webhook ingestion](/webhook-ingestion.html)   |
-| Capability policy    | `maxx +control policy`       | [Control API](/control-api.html)               |
+| Surface              | Command                   | Full reference                           |
+| -------------------- | ------------------------- | ---------------------------------------- |
+| Connector resolution | `maxx +connector resolve` | [Connector adapters][connector-adapters] |
+| One-shot runner      | `maxx +runner run`        | [Automation runner][automation-runner]   |
+| Polling runner       | `maxx +runner poll`       | [Automation runner][automation-runner]   |
+| Webhook listener     | `maxx +webhook serve`     | [Webhook ingestion][webhook-ingestion]   |
+| Capability policy    | `maxx +control policy`    | [Control API][control-api]               |
+
+[connector-adapters]: {{ '/connector-adapters.html' | relative_url }}
+[automation-runner]: {{ '/automation-runner.html' | relative_url }}
+[webhook-ingestion]: {{ '/webhook-ingestion.html' | relative_url }}
+[control-api]: {{ '/control-api.html' | relative_url }}
 
 ## Important Environment Variables
 
