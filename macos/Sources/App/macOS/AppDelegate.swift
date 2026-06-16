@@ -259,8 +259,10 @@ class AppDelegate: NSObject,
         // The registry persists its sessions to a file in the same per-user
         // control directory (MAX-5), so the last known session graph and declared
         // state survive an app restart.
+        let controlPolicy = ControlPolicyConfigLoader.loadOrDefault()
         let controlServer = ControlServer(
             registry: ControlSessionRegistry(
+                policy: controlPolicy,
                 store: ControlSessionStore(fileURL: ControlPaths.registryFile)),
             host: TerminalControlHost(ghostty: ghostty))
         controlServer.start()

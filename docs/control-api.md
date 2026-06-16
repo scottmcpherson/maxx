@@ -100,9 +100,45 @@ names, branch names, paths, or idle time.
 | `readonly-external`   | external | `tabs:list` only; no mutation, no output read. |
 
 These built-ins are all subsets of `local-cli`, so claiming one via `--as` only
-_reduces_ a caller's privileges. Credential-bound external/webhook sources that
-are _more_ privileged than the default — and the secure key storage and rotation
-they require — are explicit follow-up work.
+_reduces_ a caller's privileges. User-configured sources are added beside these
+built-ins; built-in ids are reserved and cannot be replaced by config.
+
+### Configured policy sources
+
+Maxx loads additional policy sources from JSON before constructing the
+`ControlSessionRegistry`, so every Control API request is enforced against the
+active configured policy from startup. The default file is:
+
+```text
+~/Library/Application Support/com.scottmcpherson.maxx/control-policy.json
+```
+
+Debug builds use their bundle id in the same Application Support location. Set
+`MAXX_CONTROL_POLICY_FILE=/path/to/control-policy.json` to point a dev/test
+instance at a specific file.
+
+Example source for grouped Linear webhook launches:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "linear-webhook",
+      "kind": "webhook",
+      "allow": ["tabs:spawn", "groups:create", "state:set"],
+      "confirm": [],
+      "confirm_scope": "always"
+    }
+  ]
+}
+```
+
+Config is fail-closed: missing config uses the built-ins; invalid JSON,
+unsupported versions, reserved/duplicate ids, unknown capabilities, and
+ambiguous allow/confirm overlap are rejected and Maxx falls back to the safe
+built-in policy. The file is bounded before and after read, and it carries no
+secrets.
 
 ### Confirmation
 
@@ -123,6 +159,9 @@ integration's permissions:
 maxx +control policy check --as readonly-external --capability tabs:close
 maxx +control policy check --as readonly-external --capability output:read
 maxx +control policy check --capability tabs:spawn   # the default local source
+maxx +control policy check --as linear-webhook --capability groups:create
+maxx +control policy sources
+maxx +control policy validate --config ./control-policy.json
 ```
 
 Every allow/deny/confirm decision (including `policy check`) is written to the

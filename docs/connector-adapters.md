@@ -155,9 +155,10 @@ token and never has to splice fields into the JSON:
   `trusted-automation` source has only `tabs:spawn` and `state:set`, so a
   `--group` launch sent `--as trusted-automation` is **rejected**
   (`unauthorized`, no tab spawned). A grouped webhook launch therefore needs a
-  configured policy source granted **both** `tabs:spawn` and `groups:create`
+  configured policy source such as `linear-webhook` granted **both**
+  `tabs:spawn` and `groups:create`
   (the default first-party local source already holds both). See the
-  [Control API capability policy](./control-api.md#capability-policy).
+  [configured policy sources](./control-api.md#configured-policy-sources).
 
 ## Resolution and provenance
 
@@ -201,12 +202,10 @@ maxx +connector resolve --source linear --command claude \
     --as trusted-automation --payload event.json
 
 # Group the launch for supervisor coordination. A grouped create needs both
-# tabs:spawn AND groups:create; the default local source has both. The built-in
-# `trusted-automation` has only tabs:spawn/state:set, so pairing --as
-# trusted-automation with --group would be rejected — a grouped webhook launch
-# needs a configured source granted both capabilities (see below).
+# tabs:spawn AND groups:create; a webhook should use a configured source such as
+# linear-webhook rather than the broad default local source.
 maxx +connector resolve --source linear --command claude \
-    --group 'issue-${issue.identifier}' --payload event.json
+    --as linear-webhook --group 'issue-${issue.identifier}' --payload event.json
 ```
 
 `resolve` reads a payload (from `--payload <file>`, or stdin when omitted/`-`),

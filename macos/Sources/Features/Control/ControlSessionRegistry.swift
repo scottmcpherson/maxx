@@ -298,6 +298,8 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setGroup(request.params, host: host)))
             case .policyCheck:
                 return .success(.init(policy: try policyCheck(request.params)))
+            case .policySources:
+                return .success(.init(policySources: policy.sourceViews))
             case .sessionsWait, .sessionsWatch, .streamWatch, .streamWait:
                 // wait/watch (and the stream variants) are long-lived and handled
                 // by the streaming path in ControlServer; they never reach this

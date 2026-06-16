@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Action = @import("../cli.zig").ghostty.Action;
 const args = @import("args.zig");
 const control_client = @import("control_client.zig");
+const policy_config = @import("control_policy_config.zig");
 
 pub const Options = struct {
     pub fn deinit(self: Options) void {
@@ -57,8 +58,10 @@ const Verb = enum {
     // MAX-4 agent-reported metadata verbs.
     @"remove-metadata",
     @"clear-metadata",
-    // MAX-11 capability policy diagnostic (`policy check`).
+    // MAX-11/MAX-16 capability policy diagnostics.
     @"policy-check",
+    @"policy-sources",
+    @"policy-validate",
 };
 
 /// A single `list --filter` constraint: a metadata key that must be present and,
@@ -107,6 +110,7 @@ const Command = struct {
     // MAX-11 capability policy fields.
     caller: ?[]const u8 = null,
     capability: ?[]const u8 = null,
+    config: ?[]const u8 = null,
     confirm: bool = false,
     timeout_ms: ?u64 = null,
     since: ?i64 = null,
@@ -140,7 +144,7 @@ const Command = struct {
                 .@"set-group" => "sessions.set-group",
                 .@"remove-metadata" => "sessions.remove-metadata",
                 .@"clear-metadata" => "sessions.clear-metadata",
-                .emit, .@"policy-check" => unreachable,
+                .emit, .@"policy-check", .@"policy-sources", .@"policy-validate" => unreachable,
             },
             // `stream watch`/`stream wait` are the cross-resource stream.
             .stream => switch (self.verb) {
@@ -150,8 +154,12 @@ const Command = struct {
             },
             // `event emit` is shorthand for an agent event declaration.
             .event => "sessions.emit-event",
-            // `policy check` is the capability diagnostic.
-            .policy => "policy.check",
+            .policy => switch (self.verb) {
+                .@"policy-check" => "policy.check",
+                .@"policy-sources" => "policy.sources",
+                .@"policy-validate" => unreachable,
+                else => unreachable,
+            },
         };
     }
 
@@ -304,6 +312,10 @@ const ParseError = error{
 ///   * `policy check --capability <cap> [--as <source>] [<session_id>]`: a
 ///     read-only diagnostic that reports whether a (source, capability, target)
 ///     would be allowed, denied, or require confirmation — performing no action.
+///   * `policy sources`: list the active policy sources configured in the
+///     running app.
+///   * `policy validate --config <file>`: validate a policy JSON file offline
+///     and print the normalized configured sources.
 ///
 /// The create response includes a stable `session_id` to use for all later
 /// operations. The raw JSON response is printed to stdout. Exit codes are
@@ -347,7 +359,7 @@ pub fn run(alloc: Allocator) !u8 {
                     "set-parent, set-group\n" ++
                     "  stream:   watch, wait\n" ++
                     "  event:    emit\n" ++
-                    "  policy:   check\n",
+                    "  policy:   check, sources, validate\n",
                 .{},
             );
             return 1;
@@ -378,6 +390,10 @@ pub fn run(alloc: Allocator) !u8 {
         },
         else => return err,
     };
+
+    if (cmd.group == .policy and cmd.verb == .@"policy-validate") {
+        return runPolicyValidate(arena_alloc, cmd, stderr);
+    }
 
     // Resolve the control directory, socket, and token paths.
     const dir = control_client.controlDir(arena_alloc) catch |err| {
@@ -430,6 +446,70 @@ pub fn run(alloc: Allocator) !u8 {
     try stdout.flush();
 
     return exitCode(arena_alloc, trimmed, cmd.verb);
+}
+
+fn runPolicyValidate(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
+    const path = cmd.config orelse {
+        try stderr.print("error: policy validate requires --config <file>\n", .{});
+        return 1;
+    };
+
+    const bytes = std.fs.cwd().readFileAlloc(
+        alloc,
+        path,
+        policy_config.max_config_bytes,
+    ) catch |err| {
+        try stderr.print("error: could not read policy config '{s}': {s}\n", .{
+            path,
+            @errorName(err),
+        });
+        return 1;
+    };
+
+    var diag: policy_config.Diagnostic = .{};
+    const cfg = policy_config.parse(alloc, bytes, &diag) catch {
+        try stderr.print("error: invalid policy config: {s}\n", .{diag.message});
+        return 1;
+    };
+
+    var out: std.io.Writer.Allocating = .init(alloc);
+    var json: std.json.Stringify = .{
+        .writer = &out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try json.beginObject();
+    try json.objectField("version");
+    try json.write(cfg.version);
+    try json.objectField("sources");
+    try json.beginArray();
+    for (cfg.sources) |source| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(source.id);
+        try json.objectField("kind");
+        try json.write(@tagName(source.kind));
+        try json.objectField("allow");
+        try json.beginArray();
+        for (source.allow) |cap| try json.write(cap);
+        try json.endArray();
+        try json.objectField("confirm");
+        try json.beginArray();
+        for (source.confirm) |cap| try json.write(cap);
+        try json.endArray();
+        try json.objectField("confirm_scope");
+        try json.write(@tagName(source.confirm_scope));
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.endObject();
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    try stdout.writeAll(out.written());
+    try stdout.writeAll("\n");
+    try stdout.flush();
+    return 0;
 }
 
 /// Parse a human duration into milliseconds. Accepts a bare integer (seconds) or
@@ -588,6 +668,8 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.caller = v;
         } else if (try flagValue(alloc, arg, iter, "--capability")) |v| {
             cmd.capability = v;
+        } else if (try flagValue(alloc, arg, iter, "--config")) |v| {
+            cmd.config = v;
         } else if (std.mem.eql(u8, arg, "--confirm") or std.mem.eql(u8, arg, "--yes")) {
             cmd.confirm = true;
         } else if (try flagValue(alloc, arg, iter, "--timeout")) |v| {
@@ -672,6 +754,8 @@ fn eventVerb(s: []const u8) ?Verb {
 
 fn policyVerb(s: []const u8) ?Verb {
     if (std.mem.eql(u8, s, "check")) return .@"policy-check";
+    if (std.mem.eql(u8, s, "sources")) return .@"policy-sources";
+    if (std.mem.eql(u8, s, "validate")) return .@"policy-validate";
     return null;
 }
 
@@ -1665,6 +1749,58 @@ test "buildRequest policy check includes capability" {
     const params = root.get("params").?.object;
     try testing.expectEqualStrings("trusted-automation", params.get("caller").?.string);
     try testing.expectEqualStrings("output:read", params.get("capability").?.string);
+}
+
+test "parseCommand policy sources" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "policy sources");
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .policy);
+    try testing.expect(cmd.verb == .@"policy-sources");
+    try testing.expectEqualStrings("policy.sources", cmd.method());
+}
+
+test "parseCommand policy validate with config" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "policy validate --config /tmp/policy.json",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.group == .policy);
+    try testing.expect(cmd.verb == .@"policy-validate");
+    try testing.expectEqualStrings("/tmp/policy.json", cmd.config.?);
+}
+
+test "buildRequest policy sources" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .group = .policy,
+        .verb = .@"policy-sources",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("policy.sources", root.get("method").?.string);
+    try testing.expect(root.get("params").? == .object);
 }
 
 test "parseCommand policy with unknown verb errors" {

@@ -39,7 +39,8 @@ that. See [the no-inference rule](./no-inference.md).
          "source": "linear",
          "command": "codex resume --prompt-file $MAXX_WEBHOOK_PAYLOAD_FILE",
          "title": "${issue.identifier}: ${title}",
-         "caller": "trusted-automation",
+         "caller": "linear-webhook",
+         "group": "issue-${issue.identifier}",
          "prompt_delivery": "file",
          "auth": {
            "mode": "hmac",
