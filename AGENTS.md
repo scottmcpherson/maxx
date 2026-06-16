@@ -4,26 +4,26 @@ A file for [guiding coding agents](https://agents.md/).
 
 ## Commands
 
-- **Build:** `zig build`
+- **Build:** `./tools/zig build`
   - If you're on macOS and don't need to build the macOS app, use
     `-Demit-macos-app=false` to skip building the app bundle and speed up
     compilation.
-- **Test (Zig):** `zig build test`
+- **Test (Zig):** `./tools/zig build test`
   - Prefer to run targeted tests with `-Dtest-filter` because the full
     test suite is slow to run.
-- **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
-- **Formatting (Zig)**: `zig fmt .`
+- **Test filter (Zig)**: `./tools/zig build test -Dtest-filter=<test name>`
+- **Formatting (Zig)**: `./tools/zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
-- **Formatting (other)**: `prettier -w .`
+- **Formatting (other)**: `./tools/prettier -w .`
 - **Post-work check:** After making a feature or request change, create a dev
-  build and launch it for user testing with `zig build run`; then use computer
-  use with screenshots to test the app.
+  build and launch it for user testing with `./tools/zig build run`; then use
+  computer use with screenshots to test the app.
 
 ## libghostty-vt
 
-- Build: `zig build -Demit-lib-vt`
-- Build WASM: `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
-- Test: `zig build test-lib-vt -Dtest-filter=<filter>`
+- Build: `./tools/zig build -Demit-lib-vt`
+- Build WASM: `./tools/zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
+- Test: `./tools/zig build test-lib-vt -Dtest-filter=<filter>`
   - Prefer this when the change is in a libghostty-vt file
 - All C enums in `include/ghostty/vt/` must have a `_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE`
   sentinel as the last entry to force int enum sizing (pre-C23 portability).

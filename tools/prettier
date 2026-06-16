@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+self="$script_dir/$(basename "${BASH_SOURCE[0]}")"
+
+same_file() {
+  local lhs="$1"
+  local rhs="$2"
+  [[ "$(cd "$(dirname "$lhs")" && pwd -P)/$(basename "$lhs")" == \
+     "$(cd "$(dirname "$rhs")" && pwd -P)/$(basename "$rhs")" ]]
+}
+
+local_prettier="$repo_root/node_modules/.bin/prettier"
+if [[ -x "$local_prettier" ]]; then
+  exec "$local_prettier" "$@"
+fi
+
+if path_prettier="$(command -v prettier 2>/dev/null)"; then
+  if ! same_file "$path_prettier" "$self"; then
+    exec "$path_prettier" "$@"
+  fi
+fi
+
+if command -v nix >/dev/null 2>&1; then
+  exec nix develop "$repo_root" -c prettier "$@"
+fi
+
+if command -v npx >/dev/null 2>&1; then
+  exec npx --yes prettier@3 "$@"
+fi
+
+echo "error: prettier is not installed and neither nix nor npx is available" >&2
+echo "hint: install Nix, install Node/npm, or install Prettier globally" >&2
+exit 1

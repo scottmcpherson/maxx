@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+self="$script_dir/$(basename "${BASH_SOURCE[0]}")"
+
+required="$(
+  sed -n -E 's/^[[:space:]]*\.minimum_zig_version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+    "$repo_root/build.zig.zon" | head -n 1
+)"
+
+if [[ -z "$required" ]]; then
+  echo "error: could not read .minimum_zig_version from build.zig.zon" >&2
+  exit 1
+fi
+
+same_file() {
+  local lhs="$1"
+  local rhs="$2"
+  [[ "$(cd "$(dirname "$lhs")" && pwd -P)/$(basename "$lhs")" == \
+     "$(cd "$(dirname "$rhs")" && pwd -P)/$(basename "$rhs")" ]]
+}
+
+zig_version() {
+  "$1" version 2>/dev/null || true
+}
+
+sha256_file() {
+  local file="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    echo "error: could not find sha256sum, shasum, or openssl to verify Zig download" >&2
+    return 1
+  fi
+}
+
+exec_if_matching() {
+  local candidate="$1"
+  shift
+  [[ -x "$candidate" ]] || return 1
+  same_file "$candidate" "$self" && return 1
+
+  local version
+  version="$(zig_version "$candidate")"
+  [[ "$version" == "$required" ]] || return 1
+
+  exec "$candidate" "$@"
+}
+
+if [[ -n "${MAXX_ZIG:-}" ]]; then
+  if [[ ! -x "$MAXX_ZIG" ]]; then
+    echo "error: MAXX_ZIG is set but is not executable: $MAXX_ZIG" >&2
+    exit 1
+  fi
+  found="$(zig_version "$MAXX_ZIG")"
+  if [[ "$found" != "$required" ]]; then
+    echo "error: MAXX_ZIG points to Zig $found, but this repo requires Zig $required" >&2
+    exit 1
+  fi
+  exec "$MAXX_ZIG" "$@"
+fi
+
+if command -v brew >/dev/null 2>&1; then
+  if prefix="$(brew --prefix zig@0.15 2>/dev/null)"; then
+    exec_if_matching "$prefix/bin/zig" "$@" || true
+  fi
+fi
+
+for candidate in \
+  /opt/homebrew/opt/zig@0.15/bin/zig \
+  /usr/local/opt/zig@0.15/bin/zig
+do
+  exec_if_matching "$candidate" "$@" || true
+done
+
+if path_zig="$(command -v zig 2>/dev/null)"; then
+  exec_if_matching "$path_zig" "$@" || true
+fi
+
+case "$(uname -s)" in
+  Darwin) zig_os="macos" ;;
+  Linux) zig_os="linux" ;;
+  *)
+    echo "error: unsupported OS for automatic Zig $required resolution: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+case "$(uname -m)" in
+  arm64|aarch64) zig_arch="aarch64" ;;
+  x86_64|amd64) zig_arch="x86_64" ;;
+  *)
+    echo "error: unsupported architecture for automatic Zig $required resolution: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+cache_dir="$cache_home/maxx/zig/$required"
+archive_name="zig-$zig_arch-$zig_os-$required"
+cached="$cache_dir/$archive_name/zig"
+
+if command -v nix >/dev/null 2>&1; then
+  exec nix develop "$repo_root" -c zig "$@"
+fi
+
+exec_if_matching "$cached" "$@" || true
+
+if ! command -v curl >/dev/null 2>&1 ||
+  ! command -v tar >/dev/null 2>&1 ||
+  ! command -v python3 >/dev/null 2>&1
+then
+  echo "error: could not find Zig $required; install Homebrew zig@0.15, Nix, or curl+tar+python3" >&2
+  exit 1
+fi
+
+platform_key="$zig_arch-$zig_os"
+index_url="https://ziglang.org/download/index.json"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+curl -fsSL "$index_url" -o "$tmp/index.json"
+read -r url expected_shasum < <(
+  python3 - "$tmp/index.json" "$required" "$platform_key" <<'PY'
+import json
+import sys
+
+index_path, version, platform = sys.argv[1:4]
+with open(index_path, encoding="utf-8") as f:
+    index = json.load(f)
+
+try:
+    metadata = index[version][platform]
+    print(metadata["tarball"], metadata["shasum"])
+except KeyError as exc:
+    raise SystemExit(f"missing Zig download metadata for {version} {platform}: {exc}") from exc
+PY
+)
+
+if [[ -z "${url:-}" || -z "${expected_shasum:-}" ]]; then
+  echo "error: could not resolve Zig $required download metadata for $platform_key" >&2
+  exit 1
+fi
+
+echo "tools/zig: downloading Zig $required from $url" >&2
+if [[ "$zig_os" == "macos" ]]; then
+  echo "tools/zig: Homebrew zig@0.15 or Nix is preferred on macOS because they include the Xcode 26.4 link workaround." >&2
+fi
+
+curl -fsSL "$url" -o "$tmp/zig.tar.xz"
+actual_shasum="$(sha256_file "$tmp/zig.tar.xz")"
+if [[ "$actual_shasum" != "$expected_shasum" ]]; then
+  echo "error: Zig download checksum mismatch for $url" >&2
+  echo "expected: $expected_shasum" >&2
+  echo "actual:   $actual_shasum" >&2
+  exit 1
+fi
+
+tar -C "$tmp" -xf "$tmp/zig.tar.xz"
+mkdir -p "$cache_dir"
+rm -rf "$cache_dir/$archive_name"
+mv "$tmp/$archive_name" "$cache_dir/$archive_name"
+rm -rf "$tmp"
+trap - EXIT
+
+exec_if_matching "$cached" "$@" || {
+  echo "error: downloaded Zig did not match required version $required" >&2
+  exit 1
+}

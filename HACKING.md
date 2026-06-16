@@ -26,6 +26,12 @@ When you're developing Ghostty, it's very likely that you will want to build a
 _debug_ build to diagnose issues more easily. This is already the default for
 Zig builds, so simply run `zig build` **without any `-Doptimize` flags**.
 
+If your ambient `zig` is not the version required by `build.zig.zon`, use the
+repo wrapper instead: `./tools/zig build`. The wrapper prefers `MAXX_ZIG`,
+Homebrew `zig@0.15`, a matching `zig` on `PATH`, the Nix dev shell, a cached
+verified upstream Zig download, and finally a fresh verified upstream download,
+in that order.
+
 There are many more build steps than just `zig build`, some of which are listed
 here:
 
@@ -142,10 +148,14 @@ modifying anything Prettier will lint, you may want to install it locally and
 run this from the repo root before you commit:
 
 ```
-prettier --write .
+./tools/prettier --write .
 ```
 
 Make sure your Prettier version matches the version of Prettier in [devShell.nix](https://github.com/ghostty-org/ghostty/blob/main/nix/devShell.nix).
+
+The `./tools/prettier` wrapper uses a local/global Prettier when present, falls
+back to the Nix dev shell when available, and otherwise runs Prettier through
+`npx`.
 
 Nix users can use the following command to format with Prettier:
 
