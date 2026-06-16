@@ -308,7 +308,7 @@ fn addLinuxAppResources(
     });
 
     const exe_abs_path = b.fmt(
-        "{s}/bin/ghostty",
+        "{s}/bin/maxx",
         .{b.install_prefix},
     );
 

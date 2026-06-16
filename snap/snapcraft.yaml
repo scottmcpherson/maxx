@@ -19,7 +19,7 @@ platforms:
 
 apps:
   ghostty:
-    command: bin/ghostty
+    command: bin/maxx
     command-chain: [app/launcher]
     completer: share/bash-completion/completions/ghostty.bash
     desktop: share/applications/com.mitchellh.ghostty.desktop

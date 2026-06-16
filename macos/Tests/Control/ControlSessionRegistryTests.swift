@@ -23,6 +23,7 @@ final class FakeControlSessionHost: ControlSessionHost {
         /// Signals passed to `interrupt`; nil entries mean "Ctrl-C via tty".
         var interruptSignals: [Int32?] = []
         var inputs: [String] = []
+        var submitCount = 0
         var closed = false
         /// The most recent declared state/summary pushed to this surface for
         /// display. Lets tests assert the registry → UI path without a real view.
@@ -92,6 +93,10 @@ final class FakeSurfaceHandle: ControlSurfaceHandle {
     var isProcessAlive: Bool { surface.alive }
     func focus() { surface.focusCount += 1 }
     func sendInput(_ text: String) { surface.inputs.append(text) }
+    func submitInput(_ text: String) {
+        surface.inputs.append(text)
+        surface.submitCount += 1
+    }
     @discardableResult
     func interrupt(signal: Int32?) -> Bool {
         surface.interruptCount += 1
@@ -379,6 +384,35 @@ struct ControlSessionRegistryTests {
             host: host)
         #expect(response.ok)
         #expect(host.surfaces[surfaceID]?.inputs == ["echo hi\n"])
+    }
+
+    @Test func submitActionRequiresText() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let created = registry.handle(request(.sessionsCreate), host: host)
+        let id = created.result?.session?.sessionID
+
+        let response = registry.handle(
+            request(.sessionsAction, params(id: id, action: "submit")),
+            host: host)
+        #expect(response.error?.code == "invalid_request")
+    }
+
+    @Test func submitActionSendsTextAndEnter() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(request(.sessionsCreate), host: host)
+        let id = created.result?.session?.sessionID
+
+        let response = registry.handle(
+            request(.sessionsAction, params(id: id, action: "submit", input: "echo hi")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.applied == "submit")
+        #expect(host.surfaces[surfaceID]?.inputs == ["echo hi"])
+        #expect(host.surfaces[surfaceID]?.submitCount == 1)
     }
 
     @Test func interruptActionInvokesHost() {

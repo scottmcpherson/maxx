@@ -29,7 +29,7 @@ back. Coordinate **only** on explicit signals:
 - explicit **mechanical facts** Maxx owns — a session/tab exists, its process is
   running or `exited`, its ids, its timestamps; and
 - explicit **agent-declared facts** — a state, summary, metadata key, or event a
-  child (or you) declared through `maxx +control`.
+  child (or you) declared through the control API.
 
 Never derive a child's progress by **scraping or regexing its terminal output**,
 by reading its **process name, branch, path, worktree, cwd, or tab title**, or
@@ -56,9 +56,17 @@ only observe it through `list-tabs`' hook state.)
 
 Notes on invocation:
 
-- The binary is the Maxx app's CLI: `maxx +control …` (on a dev build or the
-  Ghostty CLI it is the same `ghostty +control …`). It finds the per-user
-  socket and capability token for you.
+- Use `maxx +control` directly. The snippets define `mxctl` only as a short
+  alias; if the `maxx` CLI is missing, the command must fail instead of falling
+  back to another executable.
+
+  ```sh
+  mxctl() {
+    maxx +control "$@"
+  }
+  ```
+
+- The CLI finds the per-user socket and capability token for you.
 - It talks to the running app over `/tmp/maxx-control-<uid>/`. To target a
   specific app instance (e.g. a dev build), export `MAXX_CONTROL_DIR` and pass
   the **same** value to every call.
@@ -69,7 +77,7 @@ Notes on invocation:
 Before spawning children, register this parent tab and keep its id:
 
 ```sh
-supervisor_session=$(maxx +control sessions register-current \
+supervisor_session=$(mxctl sessions register-current \
   | jq -r .result.session.session_id)
 ```
 
@@ -89,13 +97,14 @@ The command is idempotent for the same live tab: retrying returns the same
 > before the agent even starts, and embedded quotes would break the command.
 
 So spawn the agent and its **permission flags** as the command (no task text in
-it), capture the returned `session_id`, then deliver the task as **literal
-input** (next step) — `--action input` is sent verbatim to the running agent and
-is never shell-parsed, so it is safe even for untrusted prompts.
+it), capture the returned `session_id`, then deliver the task as **literal input
+plus an explicit Enter** (next step) — `--action submit` is sent verbatim to the
+running agent and is never shell-parsed, so it is safe even for untrusted
+prompts.
 
 ```sh
 # Claude Code child — launcher only; the task is delivered as input below.
-child=$(maxx +control sessions create \
+child=$(mxctl sessions create \
   --title "Fix parser" \
   --cwd "$PWD" \
   --agent-type claude-code \
@@ -106,7 +115,7 @@ child=$(maxx +control sessions create \
   | jq -r .result.session.session_id)
 
 # Codex child (note the different permission flags).
-child=$(maxx +control sessions create \
+child=$(mxctl sessions create \
   --title "Add CSV export" \
   --cwd "$PWD" \
   --agent-type codex \
@@ -116,21 +125,20 @@ child=$(maxx +control sessions create \
   --command 'codex --full-auto' \
   | jq -r .result.session.session_id)
 
-# Deliver the task prompt as literal input once the agent is up (give it a
-# moment to start its prompt). Safe for variable/untrusted text — no shell parses it.
-# --action input sends the bytes verbatim and does NOT press Enter, so end the
-# text with a newline ($'…\n') to actually submit it.
-maxx +control sessions action "$child" --action input \
-  --input $'Fix the JSON parser overflow in src/parse.zig; run the parser tests.\n'
+# Deliver the task prompt once the agent is up (give it a moment to start its
+# prompt). Safe for variable/untrusted text — no shell parses it. `submit`
+# pastes the input and then sends an explicit Enter key press/release.
+mxctl sessions action "$child" --action submit \
+  --input 'Fix the JSON parser overflow in src/parse.zig; run the parser tests.'
 ```
 
-`--action input` is the literal-input channel used throughout this skill (task
-delivery, follow-ups, answering `needsInput`); it never synthesizes Enter, so
-always include the trailing `\n` when the agent should act on the line.
+Use `--action submit --input <text>` for task delivery and follow-ups that
+should execute immediately. `--action input --input <text>` is paste-only; use
+it only when you intentionally do not want Enter synthesized yet.
 
 (A short, fixed prompt you author yourself _can_ be embedded directly in
 `--command` — single-quote the whole command and keep `$`, backticks, and quotes
-out of the prompt — but route anything dynamic through `--action input` so an
+out of the prompt — but route anything dynamic through `--action submit` so an
 injected prompt can never reach the shell.)
 
 **Preserve the returned `session_id`** — it is the handle for every later move.
@@ -145,18 +153,18 @@ Two kinds of declaration, both stored and replayed verbatim by Maxx:
 ```sh
 # Displayed workflow-state badge + one-line summary (for humans watching the UI).
 # State is exactly one of: running | needsInput | blocked | complete | failed.
-maxx +control sessions set-state   "$child" --state running
-maxx +control sessions set-summary "$child" --summary "Reproducing the overflow"
+mxctl sessions set-state   "$child" --state running
+mxctl sessions set-summary "$child" --summary "Reproducing the overflow"
 
 # Agent-reported metadata: namespaced key -> any JSON value (parent/group/role/
 # task/issue/PR/...). Stored and filtered verbatim; never read as workflow state.
-maxx +control sessions set-metadata "$child" --key linear.issue --value MAX-123
-maxx +control sessions set-metadata "$child" --key pr.url --value https://github.com/org/repo/pull/456
-maxx +control sessions set-metadata "$child" --key run --value-json '{"id":"run_abc","attempt":2}'
+mxctl sessions set-metadata "$child" --key linear.issue --value MAX-123
+mxctl sessions set-metadata "$child" --key pr.url --value https://github.com/org/repo/pull/456
+mxctl sessions set-metadata "$child" --key run --value-json '{"id":"run_abc","attempt":2}'
 
 # Relationships are explicit metadata too:
-maxx +control sessions set-parent "$child" --parent "$supervisor_session"
-maxx +control sessions set-group  "$child" --group refactor-2026
+mxctl sessions set-parent "$child" --parent "$supervisor_session"
+mxctl sessions set-group  "$child" --group refactor-2026
 ```
 
 For machine coordination (so a `wait` can match), use the free-form
@@ -164,8 +172,8 @@ For machine coordination (so a `wait` can match), use the free-form
 badge:
 
 ```sh
-maxx +control sessions declare-state "$child" --state tests:passed --message "all green" --source worker
-maxx +control sessions emit-event    "$child" --event pr.opened --payload-json '{"pr":456}'
+mxctl sessions declare-state "$child" --state tests:passed --message "all green" --source worker
+mxctl sessions emit-event    "$child" --event pr.opened --payload-json '{"pr":456}'
 ```
 
 **A child declares its own state.** Tell the child (in its prompt) to declare
@@ -173,9 +181,12 @@ progress. Inside its tab it resolves its own `session_id` by registering the
 current tab idempotently — no scraping, no guessed surface adoption:
 
 ```sh
-self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
-maxx +control sessions set-state   "$self" --state complete
-maxx +control sessions set-summary "$self" --summary "Parser overflow fixed; 12 tests green"
+mxctl() {
+  maxx +control "$@"
+}
+self=$(mxctl sessions register-current | jq -r .result.session.session_id)
+mxctl sessions set-state   "$self" --state complete
+mxctl sessions set-summary "$self" --summary "Parser overflow fixed; 12 tests green"
 ```
 
 You can also declare on a child's behalf (you hold its `session_id`) — but a
@@ -190,10 +201,10 @@ Maxx-owned process fact), `--event` (an edge-triggered `emit-event`), or
 the `set-state` display badge (`workflow_state`) — those are separate fields:
 
 ```sh
-maxx +control sessions watch "$child" --json                          # stream lifecycle + declarations
-maxx +control sessions wait  "$child" --lifecycle exited --timeout 1h  # mechanical: the process ended
-maxx +control sessions wait  "$child" --event pr.opened --timeout 30m  # a milestone the child emit-event'd
-maxx +control sessions wait  "$child" --state needs-review --timeout 30m  # a free-form status it declare-state'd
+mxctl sessions watch "$child" --json                          # stream lifecycle + declarations
+mxctl sessions wait  "$child" --lifecycle exited --timeout 1h  # mechanical: the process ended
+mxctl sessions wait  "$child" --event pr.opened --timeout 30m  # a milestone the child emit-event'd
+mxctl sessions wait  "$child" --state needs-review --timeout 30m  # a free-form status it declare-state'd
 ```
 
 A mechanical `exited` does not say whether the work succeeded — after it, read
@@ -205,11 +216,11 @@ monotonic `--since` cursor, so a dropped connection never loses events). Here
 `--all declared:<state>` matches each member's `set-state` badge:
 
 ```sh
-maxx +control stream watch --group refactor-2026 --json          # every event in the group
-maxx +control stream wait  --group refactor-2026 --all exited --timeout 1h     # every process ended (mechanical)
-maxx +control stream wait  --group refactor-2026 --all declared:complete       # every set-state badge == complete
-maxx +control stream wait  --group refactor-2026 --all idle                    # none currently declared running
-maxx +control stream wait  --group refactor-2026 --event deploy.done           # any member emits this event
+mxctl stream watch --group refactor-2026 --json          # every event in the group
+mxctl stream wait  --group refactor-2026 --all exited --timeout 1h     # every process ended (mechanical)
+mxctl stream wait  --group refactor-2026 --all declared:complete       # every set-state badge == complete
+mxctl stream wait  --group refactor-2026 --all idle                    # none currently declared running
+mxctl stream wait  --group refactor-2026 --event deploy.done           # any member emits this event
 ```
 
 `wait`/`stream wait` exit codes let scripts branch without reading output:
@@ -223,9 +234,9 @@ Do not poke a running child. Step in only on an explicit `needsInput` (or a
 declared `blocked`/`failed`):
 
 ```sh
-maxx +control sessions action "$child" --action focus                       # bring it on screen
-maxx +control sessions action "$child" --action input --input $'yes, proceed\n'   # answer its prompt
-maxx +control sessions action "$child" --action interrupt --signal SIGINT   # stop the foreground process
+mxctl sessions action "$child" --action focus                         # bring it on screen
+mxctl sessions action "$child" --action submit --input 'yes, proceed'  # answer its prompt
+mxctl sessions action "$child" --action interrupt --signal SIGINT      # stop the foreground process
 ```
 
 A menu or permission prompt inside an agent reads **key presses**, not pasted
@@ -241,10 +252,10 @@ Ask each child to declare a summary, then read the **declared** facts back:
 
 ```sh
 # Prompt the child to wrap up and declare (see the template below), then:
-maxx +control sessions get "$child" | jq '.result.session | {workflow_state, summary, metadata}'
-maxx +control sessions list --group refactor-2026 \
+mxctl sessions get "$child" | jq '.result.session | {workflow_state, summary, metadata}'
+mxctl sessions list --group refactor-2026 \
   | jq '.result.sessions[] | {id:.session_id, state:.workflow_state, summary, task:.metadata.task}'
-maxx +control sessions events "$child"   # the full audit log of declarations + lifecycle
+mxctl sessions events "$child"   # the full audit log of declarations + lifecycle
 ```
 
 Build your final report from each child's declared `workflow_state`, its
@@ -268,7 +279,7 @@ map it to an action, and never substitute terminal scraping or idle time.
 | State                            | Explicit source                                                       | Means                                  | Your response                                                                                    |
 | -------------------------------- | --------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `running`                        | child `set-state running`; or `list-tabs` hook `agent.state`          | a turn is in progress                  | keep watching; don't interrupt                                                                   |
-| `needsInput`                     | child `set-state needsInput`; or hook `needsInput`                    | waiting on input/permission            | _intervene_ — `--action input`, or press a key                                                   |
+| `needsInput`                     | child `set-state needsInput`; or hook `needsInput`                    | waiting on input/permission            | _intervene_ — `--action submit`, or press a key                                                  |
 | `idle`                           | `stream wait --all idle` (no member declared running); or hook `idle` | not currently working                  | check for a declared state/summary; decide the next step                                         |
 | `blocked`                        | child `set-state blocked`                                             | child declared it is stuck             | read its summary; unblock, reassign, or escalate                                                 |
 | `error` / `failed`               | child `set-state failed` / an `emit-event`; or hook `error`           | child declared a failure               | read the summary/event; retry or escalate                                                        |
@@ -286,9 +297,12 @@ Codex; only the `--command` permission flags differ (see _spawn_).
 You are a worker tab supervised by another agent. Task: <one self-contained task>.
 Working dir: <cwd>. When you finish, declare your result so the supervisor can read it
 without watching your output:
-  self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
-  maxx +control sessions set-summary "$self" --summary "<one line: what you did / found>"
-  maxx +control sessions set-state   "$self" --state complete   # or failed
+  mxctl() {
+    maxx +control "$@"
+  }
+  self=$(mxctl sessions register-current | jq -r .result.session.session_id)
+  mxctl sessions set-summary "$self" --summary "<one line: what you did / found>"
+  mxctl sessions set-state   "$self" --state complete   # or failed
 If you need a decision you cannot make, set-state needsInput with a summary naming the question, then wait.
 Do not assume anything about sibling tabs.
 ```
@@ -296,7 +310,7 @@ Do not assume anything about sibling tabs.
 **Progress check** — no prompting, just read declared facts:
 
 ```sh
-maxx +control sessions list --group <group> \
+mxctl sessions list --group <group> \
   | jq '.result.sessions[] | {task:.metadata.task, state:.workflow_state, summary, lifecycle}'
 ```
 
@@ -305,13 +319,13 @@ maxx +control sessions list --group <group> \
 ```text
 Wrap up now. Set-summary on your own session with one line covering what changed and how you verified it,
 then set-state complete (or failed with the reason). Do not print the summary only to the terminal —
-declare it via maxx +control so I can read it explicitly.
+declare it via the control API so I can read it explicitly.
 ```
 
 **Final synthesis** — combine declared results into one report:
 
 ```sh
-maxx +control sessions list --group <group> \
+mxctl sessions list --group <group> \
   | jq -r '.result.sessions[] | "- \(.metadata.task // .title) [\(.workflow_state // "no state")]: \(.summary // "(no summary declared)")"'
 # Then write the report from those declared lines + each child's events/metadata. Cite them.
 ```
@@ -319,8 +333,8 @@ maxx +control sessions list --group <group> \
 **Close / archive** — clean up children you created:
 
 ```sh
-maxx +control sessions archive "$child" --reason "work merged"   # close surface, keep the record + audit log
-maxx +control sessions cancel  "$child"                          # cancel/close (idempotent)
+mxctl sessions archive "$child" --reason "work merged"   # close surface, keep the record + audit log
+mxctl sessions cancel  "$child"                          # cancel/close (idempotent)
 ```
 
 ## Permission modes for child workers
@@ -328,7 +342,7 @@ maxx +control sessions cancel  "$child"                          # cancel/close 
 A child stalls forever if it hits an approval prompt you are not watching.
 Choose a non-stalling mode for managed workers, and surface it explicitly. These
 are the **launcher** `--command` values (no task text — deliver the prompt with
-`--action input`, per _spawn_ above):
+`--action submit`, per _spawn_ above):
 
 - **Claude Code:** `claude --permission-mode acceptEdits` (also `default`,
   `plan`, `dontAsk`).
@@ -339,7 +353,7 @@ are the **launcher** `--command` values (no task text — deliver the prompt wit
 bypassPermissions`, `codex --dangerously-bypass-approvals-and-sandbox`) unless
 the user explicitly asked for it. A stalled child is recoverable anyway: it
 declares `needsInput` (or shows `needsInput` in `list-tabs`), and you answer with
-`--action input` or a key press.
+`--action submit` or a key press.
 
 ## Cleanup
 

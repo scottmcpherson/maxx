@@ -19,7 +19,7 @@ to visible Maxx tabs.
 | One-shot runner      | `maxx +runner run`        | [Automation runner][automation-runner]   |
 | Polling runner       | `maxx +runner poll`       | [Automation runner][automation-runner]   |
 | Webhook listener     | `maxx +webhook serve`     | [Webhook ingestion][webhook-ingestion]   |
-| Capability policy    | `maxx +control policy`    | [Control API][control-api]               |
+| Capability policy    | `maxx +control policy`  | [Control API][control-api]               |
 
 [connector-adapters]: {{ '/connector-adapters.html' | relative_url }}
 [automation-runner]: {{ '/automation-runner.html' | relative_url }}

@@ -12,6 +12,7 @@ Usage:
     ./client.py list
     ./client.py update <session_id> --status waiting_for_review
     ./client.py action <session_id> --action focus
+    ./client.py action <session_id> --action submit --input "run tests"
     ./client.py action <session_id> --action interrupt --signal SIGTERM
     ./client.py cancel <session_id>
 

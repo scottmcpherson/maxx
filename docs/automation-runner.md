@@ -182,14 +182,16 @@ The resolved prompt reaches the launched command per `--prompt-delivery`:
 - `env` (default) — carried in the `sessions.create` request as
   `MAXX_CONNECTOR_PROMPT`.
 - `stdin` — after the tab is created, the runner sends a `sessions.action`
-  `input` request that types the prompt into the new session. That follow-up is
+  `submit` request that pastes the prompt into the new session and sends Enter.
+  That follow-up is
   attributed to the **same policy `caller`** as the create (so `input:send` is
   evaluated against the configured source, never silently the trusted local
   source), and its response is checked: if delivery is denied or fails, the
   activity record carries an `error_code` and the command exits non-zero. The
   launch itself is still recorded (the tab exists; re-firing would duplicate it),
-  so re-deliver the prompt explicitly with `sessions action <id> --action input`
-  rather than re-running the trigger.
+  so re-deliver the prompt explicitly with
+  `sessions action <id> --action submit --input <prompt>` rather than re-running
+  the trigger.
 - `file` — the runner writes the prompt to a `0600` temp file (a per-launch
   unique `maxx-prompt-<event-id>-<pid>-<nanos>.txt` in the control directory,
   created exclusively so concurrent launches never overwrite each other) and
@@ -221,7 +223,7 @@ is a deliberate follow-up, not an inference the runner makes: it would require a
 create-or-attach lookup against the control registry, and conflating "the tab
 named X" with a workflow target is exactly the kind of guess Maxx avoids. Until
 that lands, a caller that wants to drive an existing session does so explicitly
-with the Control API (`sessions action <id> --action input`).
+with the Control API (`sessions action <id> --action submit --input <prompt>`).
 
 ## Errors
 

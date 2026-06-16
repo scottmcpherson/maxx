@@ -3,7 +3,8 @@
 //!
 //!   * `maxx-tabs` — open and manage visible tabs via `maxx-agent-hook`.
 //!   * `maxx-supervisor-workflows` — coordinate child tabs from a parent
-//!     session via the `maxx +control` API (spawn/declare/watch/intervene/
+//!     session via the `maxx +control` API
+//!     (spawn/declare/watch/intervene/
 //!     summarize/delegate).
 //!
 //! Claude Code discovers personal skills in `~/.claude/skills` (or
@@ -250,7 +251,11 @@ test "every bundled skill has required frontmatter and ownership marker" {
 test "tabs skill teaches new-tab; supervisor skill teaches the control API" {
     const testing = std.testing;
     try testing.expect(std.mem.indexOf(u8, tabs_skill.content, "maxx-agent-hook new-tab") != null);
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "maxx +control sessions create") != null);
+    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "maxx +control") != null);
+    const old_control_spelling = "ghostty " ++ "+control";
+    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, old_control_spelling) == null);
+    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "mxctl sessions create") != null);
+    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "--action submit") != null);
     // The supervisor skill must keep the no-inference rule prominent.
     try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "no-inference") != null or
         std.mem.indexOf(u8, supervisor_skill.content, "no inference") != null);

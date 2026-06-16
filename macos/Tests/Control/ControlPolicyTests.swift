@@ -287,6 +287,7 @@ struct ControlPolicyMappingTests {
     @Test func actionSubVerbsMapToDistinctCapabilities() {
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "focus")) == .tabsFocus)
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "input")) == .inputSend)
+        #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "submit")) == .inputSend)
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "interrupt")) == .keysPress)
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "cancel")) == .tabsClose)
         #expect(ControlPolicyMapping.capability(for: .sessionsAction, params: params(action: "close")) == .tabsClose)
@@ -486,7 +487,7 @@ struct ControlPolicyEnforcementTests {
         let registry = makeRegistry()
         let host = FakeControlSessionHost()
         let id = seedSession(registry, host)
-        for action in ["focus", "input", "interrupt", "close"] {
+        for action in ["focus", "input", "submit", "interrupt", "close"] {
             let response = registry.handle(
                 .init(token: "t", method: .sessionsAction,
                       params: .init(id: id, action: action, input: "x")),

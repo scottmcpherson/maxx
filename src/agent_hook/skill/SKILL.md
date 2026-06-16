@@ -179,9 +179,9 @@ you plan to manage the tab later, and use `list-tabs` to rediscover them.
 For more than ad-hoc multi-tab work — fanning a task out across child tabs,
 tracking explicit per-child state/metadata, grouping them, and waiting on or
 summarizing the group — use the **`maxx-supervisor-workflows`** skill. It drives
-the `maxx +control` API, which gives each child a stable session id plus
-explicit state, metadata, parent/group, and watch/wait primitives. This skill
-stays focused on opening and managing individual tabs.
+the control API (`maxx +control`), which gives each child a stable session id
+plus explicit state, metadata, parent/group, and watch/wait primitives. This
+skill stays focused on opening and managing individual tabs.
 
 ## Notes
 

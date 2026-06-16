@@ -78,7 +78,7 @@ ZIG_GLOBAL_CACHE_DIR=/tmp/offline-cache ./nix/build-support/fetch-zig-cache.sh
 2. Next, we build Ghostty. This step requires no internet access:
 
 ```sh
-DESTDIR=/tmp/ghostty \
+DESTDIR=/tmp/maxx \
 zig build \
   --prefix /usr \
   --system /tmp/offline-cache/p \
@@ -87,10 +87,10 @@ zig build \
 ```
 
 The build options are covered in the next section, but this will build
-and install Ghostty to `/tmp/ghostty` with the prefix `/usr` (i.e. the
-binary will be at `/tmp/ghostty/usr/bin/ghostty`). This style is common
+and install Maxx to `/tmp/maxx` with the prefix `/usr` (i.e. the
+binary will be at `/tmp/maxx/usr/bin/maxx`). This style is common
 for system packages which separate a build and install step, since the
-install step can then be done with a `mv` or `cp` command (from `/tmp/ghostty`
+install step can then be done with a `mv` or `cp` command (from `/tmp/maxx`
 to wherever the package manager expects it).
 
 ### Build Options

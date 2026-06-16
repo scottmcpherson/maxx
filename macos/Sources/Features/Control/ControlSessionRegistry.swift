@@ -55,6 +55,9 @@ protocol ControlSurfaceHandle {
     var isProcessAlive: Bool { get }
     func focus()
     func sendInput(_ text: String)
+    /// Paste text, then synthesize an Enter key press/release. This is distinct
+    /// from `sendInput`, which is paste-only.
+    func submitInput(_ text: String)
     /// Interrupt the foreground process group. With `signal == nil`, deliver
     /// Ctrl-C (ETX) through the tty; with a signal number, send it to the
     /// foreground process group. Returns false if there was no foreground
@@ -846,6 +849,13 @@ final class ControlSessionRegistry {
             }
             try requireLiveSurface(session, host: host).sendInput(input)
             return .success(.init(session: view(of: session, host: host), applied: "input"))
+
+        case "submit":
+            guard let input = params?.input else {
+                throw ControlError(.invalidRequest, "submit action requires 'input' text")
+            }
+            try requireLiveSurface(session, host: host).submitInput(input)
+            return .success(.init(session: view(of: session, host: host), applied: "submit"))
 
         case "interrupt":
             let handle = try requireLiveSurface(session, host: host)

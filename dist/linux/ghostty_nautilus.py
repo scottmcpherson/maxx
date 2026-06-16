@@ -27,7 +27,7 @@ _ = gettext.translation(DOMAIN, locale_dir, fallback=True).gettext
 
 def open_in_ghostty_activated(_menu, paths):
     for path in paths:
-        cmd = ['ghostty', f'--working-directory={path}', '--gtk-single-instance=false']
+        cmd = ['maxx', f'--working-directory={path}', '--gtk-single-instance=false']
         Gio.Subprocess.new(cmd, Gio.SubprocessFlags.NONE)
 
 

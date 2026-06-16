@@ -11,7 +11,7 @@ const ghostty_terminfo = @import("../terminfo/main.zig").ghostty;
 const log = std.log.scoped(.ssh);
 
 const usage =
-    \\Usage: ghostty +ssh [flags] [--] <ssh args...>
+    \\Usage: maxx +ssh [flags] [--] <ssh args...>
     \\
     \\Flags:
     \\  --forward-env[=bool]  Enable TERM / SendEnv forwarding. Default: true.
