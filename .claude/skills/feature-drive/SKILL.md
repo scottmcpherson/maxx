@@ -1,25 +1,27 @@
 ---
 name: feature-drive
-description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work on a branch, implement, build and exercise the running app with Peekaboo screenshots, run /code-review, attach evidence, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
+description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work in a dedicated git worktree, implement, build and exercise the running app with Peekaboo screenshots, run /code-review, attach evidence, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
 ---
 
 # Drive a Linear issue to done
 
 The issue says **what** to build; this skill is the invariant **procedure** for getting it done. "Done" includes the Linear bookkeeping — code merged with a stale issue is not done.
 
-Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGENTS.md` for build/test/format commands and `WORKFLOW.md` for the branch-and-PR rules; this skill assumes both.
+Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGENTS.md` for build/test/format commands; this skill assumes it.
 
 ## 1. Take the issue
 
 1. **ID given** (e.g. `MAX-123`)? `get_issue` it. **No ID?** `list_issues` (team Maxx, unstarted states, ordered by priority) and propose the highest-priority unblocked issue before starting.
 2. Read the description, acceptance criteria, comments, and relations. **If it's blocked by unfinished issues, stop and report the blockers** — never start blocked work.
 3. `save_issue` → state **In Progress**. If the issue is unassigned, assign it to yourself (`me`); if it already has an assignee, leave it.
-4. Branch from an up-to-date `main` (per `WORKFLOW.md`) — never work directly on `main`:
+4. Create an isolated worktree from the freshest remote state (parallel-safe) — never work directly on `main`. All drive worktrees live under a single central tree, namespaced by repo, **outside** the checkout — never as siblings in `~/Developer` and never inside the repo (a worktree is a full checkout, so nesting it makes IDEs/Xcode/file watchers recurse into duplicate copies). From the repo root:
    ```
-   git switch main && git pull --ff-only
-   git switch -c <branch>
+   repo=$(basename "$(git rev-parse --show-toplevel)")
+   wt="$HOME/Developer/worktrees/$repo/max-<n>"
+   git fetch origin && git worktree add "$wt" -b <branch> origin/main
+   cd "$wt"
    ```
-   Use the issue's `gitBranchName` from `get_issue` (it auto-links the PR to the issue via the GitHub integration); otherwise `<type>/max-<n>-<short-slug>`, e.g. `fix/max-123-tab-title-crash`.
+   Use the absolute `$wt` path, not a relative `../…` one (relative `..` breaks the moment a command runs from a subdir). The leaf is `max-<n>` — not the full branch, whose `<type>/…` slash would create a stray nesting level. `<branch>` is the issue's `gitBranchName` from `get_issue` (it auto-links the PR to the issue via the GitHub integration); fall back to `<type>/max-<n>-<short-slug>` (e.g. `fix/max-123-tab-title-crash`) if absent. Branch from `origin/main`, never from local HEAD — fetch-then-branch picks up the latest without ever running `git pull` into the main checkout, so it can't disturb a dirty main or sibling worktrees no matter how many drives run in parallel. Do all the work from inside `$wt`.
 
 ## 2. Implement
 
@@ -31,9 +33,9 @@ Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGEN
 
 1. **Tests & formatting** for what you touched — don't run the full suite blindly:
    - `zig build test -Dtest-filter=<name>` for affected Zig tests, plus `zig fmt .` (and `swiftlint lint --strict --fix` / `prettier -w .` if you touched Swift / other files).
-2. **Build and drive the app.** Build with `zig build`, then launch the dev build on its **own** control socket so it never fights an installed Maxx over the shared per-user socket:
+2. **Build and drive the app.** From the worktree, build with `zig build`, then launch the dev build on its **own** control socket — namespaced per issue so parallel drives never fight each other (or an installed Maxx) over a shared per-user socket:
    ```
-   open -n --env MAXX_CONTROL_DIR=/tmp/maxx-control-dev zig-out/Maxx.app
+   open -n --env MAXX_CONTROL_DIR=/tmp/maxx-control-max-<n> zig-out/Maxx.app
    ```
    Pass that same `MAXX_CONTROL_DIR` to every `ghostty +control …` call (the control API is the headless way to drive and observe a change end to end). Take **screenshots with Peekaboo** — the `peekaboo` CLI runs from Bash with no per-call approval and captures a window by pid/bundle id even when it isn't frontmost (so no Spaces juggling, and no computer-use MCP). Target the dev build by pid or `--app com.scottmcpherson.maxx.debug` (plain `Maxx` collides with an installed build):
    ```
@@ -47,7 +49,8 @@ Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGEN
 1. Tick the acceptance-criteria checkboxes in the issue description (`save_issue`); any box left unticked gets a written reason.
 2. Attach each screenshot (or clip) to the issue: `prepare_attachment_upload` (contentType `image/png` or `video/mp4`, exact byte `size`) → PUT the raw bytes to the returned signed URL with its headers verbatim → `create_attachment_from_upload`. One file at a time — signed URLs expire fast, so prepare/PUT/finalize each before starting the next. Screenshots can also embed inline in the completion comment.
 3. Completion comment: what changed (areas/files), how it was verified (what you ran, what you watched in the app), and anything deferred and why.
-4. Commit on the branch following the repo's commit convention (the `writing-commit-messages` skill — `<subsystem>: <summary>`, e.g. `terminal: fix tab title crash`), then push and open a PR (`gh pr create`) with `Fixes MAX-<n>` in the body so Linear links and closes it on merge. Merged or user-confirmed → state **Done**; awaiting review → state **In Review** and say so in your report.
+4. Commit on the branch following the repo's commit convention (the `writing-commit-messages` skill — `<subsystem>: <summary>`, e.g. `terminal: fix tab title crash`), then push and open a PR (`gh pr create`) with `Fixes MAX-<n>` in the body so Linear links and closes it on merge. Let required CI and review pass before merging — never merge red. Merged or user-confirmed → state **Done**; awaiting review → state **In Review** and say so in your report.
+5. **Worktree removal is intentionally not done here** — the drive session ends at PR-open, long before the merge/close that makes a worktree safe to remove, so a reap step here could never run. Reap a merged drive's worktree separately: `git worktree remove "$wt"` once the PR has landed, then `/commit-commands:clean_gone` after the remote branch is deleted.
 
 ## Failure honesty
 

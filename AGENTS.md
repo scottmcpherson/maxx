@@ -80,6 +80,8 @@ A file for [guiding coding agents](https://agents.md/).
   add focused regression tests for the class, and summarize the sweep in the PR
   response before requesting another review.
 
-## Git Workflow
+## Releases
 
-- Follow `WORKFLOW.md` for branch, feature, and release workflow.
+- Per-issue work goes through the `feature-drive` skill, which stops at PR-open.
+  Releases are out of scope for that flow: do not tag, push tags, or publish
+  unless explicitly asked, and when you are, follow `RELEASE.md`.
