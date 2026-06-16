@@ -28,8 +28,9 @@ Zig builds, so simply run `zig build` **without any `-Doptimize` flags**.
 
 If your ambient `zig` is not the version required by `build.zig.zon`, use the
 repo wrapper instead: `./tools/zig build`. The wrapper prefers `MAXX_ZIG`,
-Homebrew `zig@0.15`, a matching `zig` on `PATH`, the Nix dev shell, and finally
-a cached upstream Zig download, in that order.
+Homebrew `zig@0.15`, a matching `zig` on `PATH`, the Nix dev shell, a cached
+verified upstream Zig download, and finally a fresh verified upstream download,
+in that order.
 
 There are many more build steps than just `zig build`, some of which are listed
 here:
