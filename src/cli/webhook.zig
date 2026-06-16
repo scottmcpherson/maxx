@@ -174,6 +174,14 @@ fn runValidate(alloc: Allocator, cmd: Command, stderr: *std.io.Writer) !u8 {
         try json.write(r.command);
         try json.objectField("auth");
         try json.write(@tagName(r.auth.mode));
+        if (r.predicates.len > 0) {
+            try json.objectField("predicates");
+            try json.beginArray();
+            for (r.predicates) |p| {
+                try p.writeJson(&json);
+            }
+            try json.endArray();
+        }
         try json.endObject();
     }
     try json.endArray();

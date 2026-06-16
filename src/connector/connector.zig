@@ -13,6 +13,8 @@
 //!   * `Template`/`LaunchTemplate` — the per-connector launch configuration, and
 //!     `resolve` which turns a template + event into a `LaunchRequest` (the
 //!     concrete command/context/provenance for a tab).
+//!   * `Predicate` — exact checks over explicit adapter fields, used by runners
+//!     and webhook routes to filter events before launch side effects.
 //!   * `linear`, `github` — the starter adapters.
 //!
 //! Resolving a launch is pure and lives here. *Executing* a launch — sending the
@@ -24,6 +26,7 @@ const std = @import("std");
 
 pub const Adapter = @import("Adapter.zig");
 pub const TriggerEvent = @import("Event.zig");
+pub const Predicate = @import("Predicate.zig");
 pub const Template = @import("Template.zig");
 pub const LaunchTemplate = Template.LaunchTemplate;
 pub const LaunchRequest = Template.LaunchRequest;
@@ -53,6 +56,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = Adapter;
     _ = TriggerEvent;
+    _ = Predicate;
     _ = Template;
     _ = @import("json_helpers.zig");
     _ = linear;

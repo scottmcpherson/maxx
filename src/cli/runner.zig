@@ -39,6 +39,7 @@ const ParseError = error{
     InvalidTriggerType,
     InvalidEnv,
     InvalidFireOn,
+    InvalidPredicate,
     HelpRequested,
 } || Allocator.Error;
 
@@ -70,6 +71,7 @@ const Command = struct {
     dry_run: bool = false,
     json: bool = false,
     env: std.ArrayList(Template.EnvEntry) = .empty,
+    predicates: std.ArrayList(connector.Predicate) = .empty,
 };
 
 /// The `+runner` action is the automation trigger runner: it receives a
@@ -101,7 +103,9 @@ const Command = struct {
 ///     (display name; defaults to the source), `--trigger-type script|webhook_relay`
 ///     (default `script`), `--dedup-key <key>` (override the dedup key; defaults
 ///     to the adapter event id), `--no-dedup`, `--state-file <path>`,
-///     `--received-at <iso8601>`, `--dry-run`, and `--json`.
+///     `--predicate FIELD=VALUE`, `--predicate-bool FIELD=true|false`,
+///     `--predicate-present FIELD`, `--received-at <iso8601>`, `--dry-run`, and
+///     `--json`.
 ///
 ///   * `poll`: run a configured check and fire only when it exits with a
 ///     configured code. The check's stdout is the event payload. Flags: `--check
@@ -158,6 +162,10 @@ pub fn run(alloc: Allocator) !u8 {
         },
         error.InvalidFireOn => {
             try stderr.print("error: --fire-on expects exit codes like 0 or 0,3\n", .{});
+            return 1;
+        },
+        error.InvalidPredicate => {
+            try stderr.print("error: predicate flags expect FIELD=VALUE, FIELD=true|false, or FIELD\n", .{});
             return 1;
         },
         error.UnknownFlag => {
@@ -253,6 +261,20 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
         return 1;
     };
 
+    const received_at = cmd.received_at orelse try runner.nowIso(alloc);
+    const trigger_name = cmd.trigger orelse source;
+
+    if (connector.Predicate.firstMismatch(cmd.predicates.items, event) != null) {
+        try printRecord(alloc, filteredRecord(.{
+            .trigger = trigger_name,
+            .trigger_type = trigger_type,
+            .received_at = received_at,
+            .event = event,
+            .command = command,
+        }));
+        return 0;
+    }
+
     const template: Template.LaunchTemplate = .{
         .command = command,
         .cwd = cmd.cwd,
@@ -262,8 +284,6 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
         .caller = cmd.caller,
         .group = cmd.group,
     };
-
-    const received_at = cmd.received_at orelse try runner.nowIso(alloc);
 
     var diag: Template.Diagnostic = .{};
     const request = connector.resolve(alloc, template, event, .{
@@ -330,7 +350,6 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
 
     var sock = SocketSender{ .socket_path = socket_path };
 
-    const trigger_name = cmd.trigger orelse source;
     var rec = try runner.dispatch(alloc, .{
         .trigger = trigger_name,
         .trigger_type = trigger_type,
@@ -387,7 +406,30 @@ fn runDispatch(alloc: Allocator, cmd: Command, mode: Mode, stderr: *std.io.Write
         // success: the tab exists, but something went wrong, so signal non-zero.
         .launched => if (rec.error_code != null) @as(u8, 1) else 0,
         .duplicate, .dry_run => 0,
+        .filtered => 0,
         .failed => 1,
+    };
+}
+
+const FilteredRecordInput = struct {
+    trigger: []const u8,
+    trigger_type: runner.TriggerType,
+    received_at: []const u8,
+    event: connector.TriggerEvent,
+    command: []const u8,
+};
+
+fn filteredRecord(in: FilteredRecordInput) runner.ActivityRecord {
+    return .{
+        .trigger = in.trigger,
+        .trigger_type = in.trigger_type,
+        .received_at = in.received_at,
+        .source = in.event.source,
+        .event_id = in.event.id,
+        .dedup_key = "",
+        .command = in.command,
+        .title = in.event.title,
+        .outcome = .filtered,
     };
 }
 
@@ -548,6 +590,13 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             const eq = std.mem.indexOfScalar(u8, v, '=') orelse return error.InvalidEnv;
             if (eq == 0) return error.InvalidEnv;
             try cmd.env.append(alloc, .{ .key = v[0..eq], .value = v[eq + 1 ..] });
+        } else if (try flagValue(alloc, arg, iter, "--predicate")) |v| {
+            try cmd.predicates.append(alloc, try parseStringPredicate(v));
+        } else if (try flagValue(alloc, arg, iter, "--predicate-bool")) |v| {
+            try cmd.predicates.append(alloc, try parseBoolPredicate(v));
+        } else if (try flagValue(alloc, arg, iter, "--predicate-present")) |v| {
+            if (v.len == 0) return error.InvalidPredicate;
+            try cmd.predicates.append(alloc, connector.Predicate.present(v));
         } else if (std.mem.eql(u8, arg, "--no-dedup")) {
             cmd.no_dedup = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
@@ -560,6 +609,21 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
     }
 
     return cmd;
+}
+
+fn parseStringPredicate(v: []const u8) ParseError!connector.Predicate {
+    const eq = std.mem.indexOfScalar(u8, v, '=') orelse return error.InvalidPredicate;
+    if (eq == 0) return error.InvalidPredicate;
+    return connector.Predicate.equals(v[0..eq], v[eq + 1 ..]);
+}
+
+fn parseBoolPredicate(v: []const u8) ParseError!connector.Predicate {
+    const eq = std.mem.indexOfScalar(u8, v, '=') orelse return error.InvalidPredicate;
+    if (eq == 0) return error.InvalidPredicate;
+    const value = v[eq + 1 ..];
+    if (std.mem.eql(u8, value, "true")) return connector.Predicate.equalsBool(v[0..eq], true);
+    if (std.mem.eql(u8, value, "false")) return connector.Predicate.equalsBool(v[0..eq], false);
+    return error.InvalidPredicate;
 }
 
 fn parseFireOn(alloc: Allocator, cmd: *Command, v: []const u8) ParseError!void {
@@ -615,6 +679,27 @@ test "parseCommand run with flags" {
     try testing.expectEqual(@as(usize, 1), cmd.env.items.len);
 }
 
+test "parseCommand run with predicate flags" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "runner run --source github --command codex --predicate object.type=pull_request --predicate-bool pull_request.merged=true --predicate-present repo.full_name",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expectEqual(@as(usize, 3), cmd.predicates.items.len);
+    try testing.expectEqualStrings("object.type", cmd.predicates.items[0].field);
+    try testing.expectEqual(connector.Predicate.Op.equals, cmd.predicates.items[0].op);
+    try testing.expectEqualStrings("pull_request", cmd.predicates.items[0].string_value.?);
+    try testing.expectEqual(connector.Predicate.Op.equals_bool, cmd.predicates.items[1].op);
+    try testing.expectEqual(true, cmd.predicates.items[1].bool_value);
+    try testing.expectEqual(connector.Predicate.Op.present, cmd.predicates.items[2].op);
+}
+
 test "parseCommand poll with fire-on list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -662,6 +747,24 @@ test "parseCommand rejects bad fire-on and unknown flag" {
         var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, "runner run --bogus");
         defer iter.deinit();
         try testing.expectError(error.UnknownFlag, parseCommand(alloc, &iter));
+    }
+}
+
+test "parseCommand rejects malformed predicates" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    for ([_][]const u8{
+        "runner run --predicate missing_equals",
+        "runner run --predicate =value",
+        "runner run --predicate-bool flag=yes",
+        "runner run --predicate-bool =true",
+        "runner run --predicate-present=",
+    }) |line| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, line);
+        defer iter.deinit();
+        try testing.expectError(error.InvalidPredicate, parseCommand(alloc, &iter));
     }
 }
 

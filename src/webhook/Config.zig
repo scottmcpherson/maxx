@@ -69,6 +69,10 @@ pub const Route = struct {
     /// the adapter's `event.id` is the object id, so keying on it would wrongly
     /// drop a later legitimate event for the same object.
     dedup_header: ?[]const u8 = null,
+    /// Exact predicates over explicit adapter fields. All must match before the
+    /// route resolves templates, writes payload files, checks/records dedup, or
+    /// launches.
+    predicates: []const connector.Predicate = &.{},
 
     /// Build the connector launch template this route resolves to.
     pub fn template(self: Route) Template.LaunchTemplate {
@@ -204,6 +208,7 @@ fn parseRoute(
         .env;
 
     const env = try parseEnv(alloc, obj, path, diag);
+    const predicates = try parsePredicates(alloc, obj, path, diag);
 
     const trigger: []const u8 = if (jh.getNonEmptyString(obj, "trigger")) |t|
         try alloc.dupe(u8, t)
@@ -234,6 +239,7 @@ fn parseRoute(
         .auth = route_auth,
         .secret_env = secret_env,
         .dedup_header = dedup_header,
+        .predicates = predicates,
     };
 }
 
@@ -291,6 +297,50 @@ fn parseEnv(alloc: Allocator, obj: std.json.ObjectMap, path: []const u8, diag: ?
             .key = try alloc.dupe(u8, key),
             .value = try alloc.dupe(u8, value),
         });
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+fn parsePredicates(alloc: Allocator, obj: std.json.ObjectMap, path: []const u8, diag: ?*Diagnostic) Error![]const connector.Predicate {
+    const predicates_val = obj.get("predicates") orelse return &.{};
+    if (predicates_val != .array) return fail(diag, alloc, "route \"{s}\" \"predicates\" must be an array", .{path});
+
+    var list: std.ArrayList(connector.Predicate) = .empty;
+    for (predicates_val.array.items, 0..) |pv, i| {
+        if (pv != .object) return fail(diag, alloc, "route \"{s}\" predicates[{d}] must be an object", .{ path, i });
+        const pred_obj = pv.object;
+        const field = jh.getNonEmptyString(pred_obj, "field") orelse
+            return fail(diag, alloc, "route \"{s}\" predicates[{d}] requires a non-empty \"field\"", .{ path, i });
+
+        var op_count: usize = 0;
+        var pred: connector.Predicate = undefined;
+
+        if (pred_obj.get("equals")) |v| {
+            if (v != .string) return fail(diag, alloc, "route \"{s}\" predicates[{d}] \"equals\" must be a string", .{ path, i });
+            op_count += 1;
+            pred = connector.Predicate.equals(try alloc.dupe(u8, field), try alloc.dupe(u8, v.string));
+        }
+        if (pred_obj.get("equals_bool")) |v| {
+            if (v != .bool) return fail(diag, alloc, "route \"{s}\" predicates[{d}] \"equals_bool\" must be true or false", .{ path, i });
+            op_count += 1;
+            pred = connector.Predicate.equalsBool(try alloc.dupe(u8, field), v.bool);
+        }
+        if (pred_obj.get("present")) |v| {
+            if (v != .bool or !v.bool)
+                return fail(diag, alloc, "route \"{s}\" predicates[{d}] \"present\" must be true", .{ path, i });
+            op_count += 1;
+            pred = connector.Predicate.present(try alloc.dupe(u8, field));
+        }
+
+        if (op_count != 1) {
+            return fail(
+                diag,
+                alloc,
+                "route \"{s}\" predicates[{d}] must set exactly one of \"equals\", \"equals_bool\", or \"present\"",
+                .{ path, i },
+            );
+        }
+        try list.append(alloc, pred);
     }
     return list.toOwnedSlice(alloc);
 }
@@ -458,6 +508,11 @@ test "parses all optional route fields" {
         \\      "trigger": "gh-issues",
         \\      "max_body_bytes": 4096,
         \\      "dedup_header": "X-GitHub-Delivery",
+        \\      "predicates": [
+        \\        { "field": "object.type", "equals": "pull_request" },
+        \\        { "field": "pull_request.merged", "equals_bool": true },
+        \\        { "field": "repo.full_name", "present": true }
+        \\      ],
         \\      "env": [{ "key": "K", "value": "${source}" }],
         \\      "auth": { "mode": "token", "secret_env": "T", "header": "Authorization", "prefix": "Bearer " }
         \\    }
@@ -477,6 +532,13 @@ test "parses all optional route fields" {
     try testing.expectEqualStrings("K", r.env[0].key);
     try testing.expectEqual(auth.Mode.token, r.auth.mode);
     try testing.expectEqualStrings("X-GitHub-Delivery", r.dedup_header.?);
+    try testing.expectEqual(@as(usize, 3), r.predicates.len);
+    try testing.expectEqualStrings("object.type", r.predicates[0].field);
+    try testing.expectEqual(connector.Predicate.Op.equals, r.predicates[0].op);
+    try testing.expectEqualStrings("pull_request", r.predicates[0].string_value.?);
+    try testing.expectEqual(connector.Predicate.Op.equals_bool, r.predicates[1].op);
+    try testing.expectEqual(true, r.predicates[1].bool_value);
+    try testing.expectEqual(connector.Predicate.Op.present, r.predicates[2].op);
 }
 
 fn expectFail(bytes: []const u8, needle: []const u8) !void {
@@ -530,6 +592,33 @@ test "rejects malformed template placeholders (in a templated field)" {
     try expectFail(
         \\{"routes":[{"path":"/h","source":"linear","command":"c","title":"claude ${}","auth":{"mode":"none"}}]}
     , "empty ${}");
+}
+
+test "rejects malformed predicates" {
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":{},"auth":{"mode":"none"}}]}
+    , "\"predicates\" must be an array");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[1],"auth":{"mode":"none"}}]}
+    , "predicates[0] must be an object");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"equals":"Todo"}],"auth":{"mode":"none"}}]}
+    , "requires a non-empty \"field\"");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name"}],"auth":{"mode":"none"}}]}
+    , "must set exactly one");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","equals":"Todo","present":true}],"auth":{"mode":"none"}}]}
+    , "must set exactly one");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","equals":true}],"auth":{"mode":"none"}}]}
+    , "\"equals\" must be a string");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"field":"pull_request.merged","equals_bool":"true"}],"auth":{"mode":"none"}}]}
+    , "\"equals_bool\" must be true or false");
+    try expectFail(
+        \\{"routes":[{"path":"/h","source":"linear","command":"c","predicates":[{"field":"issue.state.name","present":false}],"auth":{"mode":"none"}}]}
+    , "\"present\" must be true");
 }
 
 test "rejects ${...} placeholders in the command (shell-injection guard)" {

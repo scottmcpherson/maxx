@@ -17,8 +17,8 @@ records what happened. It assigns no workflow meaning to anything.
   process with an explicit command/cwd/env, attaching provenance, and exposing
   the normal tab/session controls (inspect, stop, restart).
 - The runner is the **thin glue** between a trigger source and that surface:
-  receive event → resolve configured action → suppress duplicates → launch →
-  record.
+  receive event → filter explicit predicates → resolve configured action →
+  suppress duplicates → launch → record.
 - Workflow reasoning lives **downstream**, in the launched command (its prompt,
   skill, or upstream configuration) — never in the runner.
 
@@ -29,12 +29,14 @@ Every trigger, regardless of type, flows through one pipeline mirroring
 
 1. **Receive** the payload bytes. Three trigger types deliver them; all converge
    on a structured payload handed to a connector adapter.
-2. **Resolve** the payload (adapter → `TriggerEvent`) and the configured launch
+2. **Filter** with configured predicates over explicit adapter fields. A
+   mismatch records `filtered` and stops before launch side effects.
+3. **Resolve** the payload (adapter → `TriggerEvent`) and the configured launch
    template (`connector.resolve` → `LaunchRequest`).
-3. **Suppress duplicates** against the persistent dedup store.
-4. **Execute**: inject the capability token, send `sessions.create` to the
+4. **Suppress duplicates** against the persistent dedup store.
+5. **Execute**: inject the capability token, send `sessions.create` to the
    running Maxx, and deliver the prompt out of band for `stdin`/`file` delivery.
-5. **Record** an activity record and mark the event seen.
+6. **Record** an activity record and mark the event seen.
 
 ## Trigger types
 
@@ -72,6 +74,33 @@ The polling case has a precise boundary worth stating outright:
 So a polling check is a pure data source: "exit `0` means an event occurred; here
 is its payload." What that event _means_ is the adapter's and the launched
 command's concern.
+
+## Predicate filtering
+
+`run` and `poll` accept the same predicate model as webhook routes:
+
+- `--predicate FIELD=VALUE` — exact string equality.
+- `--predicate-bool FIELD=true|false` — exact boolean equality.
+- `--predicate-present FIELD` — field must be present.
+
+All predicates must match. They are evaluated after the adapter parses the
+payload and before template resolution, control-dir lookup, duplicate
+suppression, prompt-file writes, or launch. A mismatch prints an activity record
+with `outcome: "filtered"` and exits `0`; nothing is recorded as seen.
+
+Examples:
+
+```sh
+# Launch only for Linear issue payloads whose explicit state name is Todo.
+maxx +runner run --source linear --command 'claude' \
+    --predicate issue.state.name=Todo --payload event.json
+
+# Launch only for GitHub pull_request payloads whose explicit merged flag is true.
+maxx +runner run --source github --command 'codex run cleanup-merged-pr' \
+    --predicate object.type=pull_request \
+    --predicate-bool pull_request.merged=true \
+    --payload delivered.json
+```
 
 ## Duplicate suppression
 
@@ -144,9 +173,9 @@ The resolved prompt reaches the launched command per `--prompt-delivery`:
   (`runner.trigger`, `runner.trigger_type`, `runner.received_at`).
 - Every invocation prints a JSON **activity record**: the trigger name, type,
   received time, source, event id, dedup key, the command/title launched, the
-  outcome (`launched` / `duplicate` / `failed` / `dry_run`), the resulting
-  `session_id`, and any `error_code`/`error_message`. `maxx +runner list-seen`
-  prints the recorded suppression entries.
+  outcome (`launched` / `duplicate` / `failed` / `dry_run` / `filtered`), the
+  resulting `session_id`, and any `error_code`/`error_message`.
+  `maxx +runner list-seen` prints the recorded suppression entries.
 
 ## Target tab behavior
 
@@ -182,6 +211,12 @@ maxx +runner run --source github --command 'codex' \
 maxx +runner poll --source linear --command 'claude ${issue.identifier}' \
     --trigger linear-poll --check './scripts/poll-linear.sh' --fire-on 0
 
+# Add predicates to run/poll payloads before any launch side effects.
+maxx +runner poll --source github --command 'codex run cleanup-merged-pr' \
+    --trigger gh-pr-merged --check './scripts/poll-gh-pr.sh' \
+    --predicate object.type=pull_request \
+    --predicate-bool pull_request.merged=true
+
 # Attribute the launch to a policy source and group it for a supervisor.
 maxx +runner run --source linear --command 'claude' \
     --as linear-webhook --group 'issue-${issue.identifier}' --payload event.json
@@ -193,9 +228,9 @@ cat event.json | maxx +runner run --source linear --command 'claude' --dry-run
 maxx +runner list-seen
 ```
 
-`run`/`poll` exit `0` for `launched`, `duplicate`, `dry_run`, and a poll that did
-not fire (nothing to do); they exit `1` for a failed launch or a configuration
-error.
+`run`/`poll` exit `0` for `launched`, `duplicate`, `dry_run`, `filtered`, and a
+poll that did not fire (nothing to do); they exit `1` for a failed launch or a
+configuration error.
 
 > **Grouped launches and policy.** A `sessions.create` that sets `--group` is
 > gated by the control server on **both** `tabs:spawn` and `groups:create`. The
@@ -213,6 +248,7 @@ pure and exhaustively testable while execution stays small and local:
 | Concern                              | `+connector resolve` | `+runner` |
 | ------------------------------------ | -------------------- | --------- |
 | Parse payload → `TriggerEvent`       | ✓                    | ✓         |
+| Evaluate explicit predicates         | —                    | ✓         |
 | Resolve template → `sessions.create` | ✓                    | ✓         |
 | Inject capability token              | —                    | ✓         |
 | Send to the running Maxx             | —                    | ✓         |

@@ -86,6 +86,8 @@ pub const Outcome = enum {
     failed,
     /// `--dry-run`: resolved and dedup-checked, but nothing was sent or recorded.
     dry_run,
+    /// Explicit predicates did not match; nothing was resolved, sent, or recorded.
+    filtered,
 };
 
 /// Everything needed to dispatch one already-resolved event.

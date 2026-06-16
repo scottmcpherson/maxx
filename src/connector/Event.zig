@@ -17,11 +17,33 @@ const TriggerEvent = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// One extra explicit payload field. String and boolean values stay typed so
+/// trigger predicates can perform exact structured comparisons. Placeholder
+/// substitution renders booleans as the JSON spellings `true`/`false`.
+pub const FieldValue = union(enum) {
+    string: []const u8,
+    bool: bool,
+
+    pub fn asString(self: FieldValue) ?[]const u8 {
+        return switch (self) {
+            .string => |s| s,
+            .bool => |b| if (b) "true" else "false",
+        };
+    }
+
+    pub fn writeJson(self: FieldValue, json: *std.json.Stringify) !void {
+        switch (self) {
+            .string => |s| try json.write(s),
+            .bool => |b| try json.write(b),
+        }
+    }
+};
+
 /// Map of extra explicit payload fields, keyed by dotted names like
-/// "issue.identifier" or "repo.full_name". Surfaced as launch-template
-/// placeholders and as provenance. Insertion order is preserved for stable
-/// output.
-pub const Fields = std.StringArrayHashMapUnmanaged([]const u8);
+/// "issue.identifier", "repo.full_name", or "pull_request.merged". Surfaced as
+/// launch-template placeholders and as structured predicate inputs. Insertion
+/// order is preserved for stable output.
+pub const Fields = std.StringArrayHashMapUnmanaged(FieldValue);
 
 /// Connector source name, e.g. "linear" or "github". Set by the adapter and
 /// matched against the launch configuration and `+connector --source`.
@@ -57,12 +79,20 @@ fields: Fields = .{},
 /// the typed fields above; anything else falls through to `fields`. Returns
 /// null when the value is absent (the caller decides whether that is an error).
 pub fn lookup(self: TriggerEvent, name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "source")) return self.source;
-    if (std.mem.eql(u8, name, "id")) return self.id;
-    if (std.mem.eql(u8, name, "type")) return self.type;
-    if (std.mem.eql(u8, name, "title")) return self.title;
-    if (std.mem.eql(u8, name, "url")) return self.url;
-    if (std.mem.eql(u8, name, "prompt")) return self.prompt;
+    const value = self.lookupValue(name) orelse return null;
+    return value.asString();
+}
+
+/// Look up a field while preserving its source type for exact predicate
+/// evaluation. Well-known event fields are strings; extra fields may be strings
+/// or booleans.
+pub fn lookupValue(self: TriggerEvent, name: []const u8) ?FieldValue {
+    if (std.mem.eql(u8, name, "source")) return .{ .string = self.source };
+    if (std.mem.eql(u8, name, "id")) return .{ .string = self.id };
+    if (std.mem.eql(u8, name, "type")) return .{ .string = self.type };
+    if (std.mem.eql(u8, name, "title")) return .{ .string = self.title };
+    if (std.mem.eql(u8, name, "url")) return if (self.url) |v| .{ .string = v } else null;
+    if (std.mem.eql(u8, name, "prompt")) return if (self.prompt) |v| .{ .string = v } else null;
     return self.fields.get(name);
 }
 
@@ -77,7 +107,18 @@ pub fn putField(
 ) Allocator.Error!void {
     const v = value orelse return;
     if (v.len == 0) return;
-    try self.fields.put(alloc, try alloc.dupe(u8, key), try alloc.dupe(u8, v));
+    try self.fields.put(alloc, try alloc.dupe(u8, key), .{ .string = try alloc.dupe(u8, v) });
+}
+
+/// Insert an extra explicit boolean field.
+pub fn putBoolField(
+    self: *TriggerEvent,
+    alloc: Allocator,
+    key: []const u8,
+    value: ?bool,
+) Allocator.Error!void {
+    const v = value orelse return;
+    try self.fields.put(alloc, try alloc.dupe(u8, key), .{ .bool = v });
 }
 
 /// Write the event as a JSON object for human inspection (`+connector resolve`).
@@ -106,7 +147,7 @@ pub fn writeJson(self: TriggerEvent, json: *std.json.Stringify) !void {
         var it = self.fields.iterator();
         while (it.next()) |entry| {
             try json.objectField(entry.key_ptr.*);
-            try json.write(entry.value_ptr.*);
+            try entry.value_ptr.*.writeJson(json);
         }
         try json.endObject();
     }
@@ -132,6 +173,9 @@ test "lookup resolves typed fields and extra fields" {
     try testing.expectEqualStrings("Fix the thing", ev.lookup("title").?);
     try testing.expectEqualStrings("https://linear.app/x/MAX-10", ev.lookup("url").?);
     try testing.expectEqualStrings("MAX-10", ev.lookup("issue.identifier").?);
+    try ev.putBoolField(alloc, "pull_request.merged", true);
+    try testing.expectEqualStrings("true", ev.lookup("pull_request.merged").?);
+    try testing.expectEqual(true, ev.lookupValue("pull_request.merged").?.bool);
     try testing.expect(ev.lookup("prompt") == null);
     try testing.expect(ev.lookup("nonexistent") == null);
 }
@@ -152,5 +196,5 @@ test "putField drops null and empty values" {
     try ev.putField(alloc, "b", "");
     try ev.putField(alloc, "c", "value");
     try testing.expectEqual(@as(usize, 1), ev.fields.count());
-    try testing.expectEqualStrings("value", ev.fields.get("c").?);
+    try testing.expectEqualStrings("value", ev.fields.get("c").?.string);
 }
