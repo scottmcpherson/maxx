@@ -190,6 +190,7 @@ extension NSApplication {
             appDelegate.ghostty,
             withBaseConfig: baseConfig
         )
+        var registeredControlSessionID: String?
         if parsedConfiguration.registerControlSession {
             guard let surface = controller.surfaceTree.root?.leftmostLeaf() else {
                 controller.closeWindowImmediately()
@@ -199,9 +200,9 @@ extension NSApplication {
             }
 
             do {
-                _ = try appDelegate.registerAgentHookSpawnedSurface(
+                registeredControlSessionID = try appDelegate.registerAgentHookSpawnedSurface(
                     surfaceID: surface.id,
-                    title: controller.titleOverride,
+                    title: parsedConfiguration.controlSessionTitle ?? controller.titleOverride,
                     configuration: baseConfig ?? Ghostty.SurfaceConfiguration(),
                     location: .window)
             } catch let error as ControlError {
@@ -217,14 +218,24 @@ extension NSApplication {
             }
         }
         let createdWindowID = ScriptWindow.stableID(primaryController: controller)
+        let createdTabID = ScriptTab.stableID(controller: controller)
 
         if let scriptWindow = scriptWindows.first(where: { $0.stableID == createdWindowID }) {
+            if let registeredControlSessionID {
+                scriptWindow.rememberRegisteredControlSession(
+                    tabID: createdTabID,
+                    sessionID: registeredControlSessionID)
+            }
             return scriptWindow
         }
 
         // Fall back to wrapping the created controller if AppKit window ordering
         // has not refreshed yet in the current run loop.
-        return ScriptWindow(primaryController: controller)
+        return ScriptWindow(
+            primaryController: controller,
+            registeredControlSession: registeredControlSessionID.map {
+                (tabID: createdTabID, sessionID: $0)
+            })
     }
 
     /// Handler for the `quit` AppleScript command.
@@ -286,6 +297,7 @@ extension NSApplication {
             return nil
         }
 
+        var registeredControlSessionID: String?
         if parsedConfiguration.registerControlSession {
             guard let surface = createdController.surfaceTree.root?.leftmostLeaf() else {
                 createdController.closeTabImmediately(registerRedo: false)
@@ -295,9 +307,9 @@ extension NSApplication {
             }
 
             do {
-                _ = try appDelegate.registerAgentHookSpawnedSurface(
+                registeredControlSessionID = try appDelegate.registerAgentHookSpawnedSurface(
                     surfaceID: surface.id,
-                    title: createdController.titleOverride,
+                    title: parsedConfiguration.controlSessionTitle ?? createdController.titleOverride,
                     configuration: baseConfig ?? Ghostty.SurfaceConfiguration(),
                     location: .tab)
             } catch let error as ControlError {
@@ -315,13 +327,30 @@ extension NSApplication {
 
         let createdTabID = ScriptTab.stableID(controller: createdController)
 
-        if let targetWindow,
-           let scriptTab = targetWindow.valueInTabs(uniqueID: createdTabID) {
-            return scriptTab
+        if let targetWindow {
+            if let registeredControlSessionID {
+                targetWindow.rememberRegisteredControlSession(
+                    tabID: createdTabID,
+                    sessionID: registeredControlSessionID)
+            }
+            if let scriptTab = targetWindow.tab(
+                uniqueID: createdTabID,
+                registeredControlSessionID: registeredControlSessionID
+            ) {
+                return scriptTab
+            }
         }
 
         for scriptWindow in scriptWindows {
-            if let scriptTab = scriptWindow.valueInTabs(uniqueID: createdTabID) {
+            if let registeredControlSessionID {
+                scriptWindow.rememberRegisteredControlSession(
+                    tabID: createdTabID,
+                    sessionID: registeredControlSessionID)
+            }
+            if let scriptTab = scriptWindow.tab(
+                uniqueID: createdTabID,
+                registeredControlSessionID: registeredControlSessionID
+            ) {
                 return scriptTab
             }
         }
@@ -329,7 +358,15 @@ extension NSApplication {
         // Fall back to wrapping the created controller if AppKit tab-group
         // bookkeeping has not fully refreshed in the current run loop.
         let fallbackWindow = ScriptWindow(primaryController: createdController)
-        return ScriptTab(window: fallbackWindow, controller: createdController)
+        if let registeredControlSessionID {
+            fallbackWindow.rememberRegisteredControlSession(
+                tabID: createdTabID,
+                sessionID: registeredControlSessionID)
+        }
+        return ScriptTab(
+            window: fallbackWindow,
+            controller: createdController,
+            registeredControlSessionID: registeredControlSessionID)
     }
 }
 
@@ -338,6 +375,7 @@ extension NSApplication {
 @MainActor
 extension NSApplication {
     private static let agentHookControlSessionMarker = "MAXX_AGENT_HOOK_CONTROL_SESSION"
+    private static let agentHookTitleMarker = "MAXX_AGENT_HOOK_TITLE"
 
     /// Whether Ghostty should currently accept AppleScript interactions.
     var isAppleScriptEnabled: Bool {
@@ -363,16 +401,24 @@ extension NSApplication {
     /// Control API session for this spawn; it is never passed to the child.
     fileprivate func scriptSurfaceConfiguration(
         for command: NSScriptCommand
-    ) -> (configuration: Ghostty.SurfaceConfiguration?, registerControlSession: Bool)? {
+    ) -> (
+        configuration: Ghostty.SurfaceConfiguration?,
+        registerControlSession: Bool,
+        controlSessionTitle: String?
+    )? {
         guard let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary else {
-            return (nil, false)
+            return (nil, false, nil)
         }
 
         do {
             var configuration = try Ghostty.SurfaceConfiguration(scriptRecord: scriptRecord)
             let marker = configuration.environmentVariables.removeValue(
                 forKey: Self.agentHookControlSessionMarker)
-            return (configuration, marker == "1")
+            let registerControlSession = marker == "1"
+            let title = registerControlSession
+                ? configuration.environmentVariables.removeValue(forKey: Self.agentHookTitleMarker)
+                : nil
+            return (configuration, registerControlSession, title)
         } catch {
             command.scriptErrorNumber = errAECoercionFail
             command.scriptErrorString = error.localizedDescription

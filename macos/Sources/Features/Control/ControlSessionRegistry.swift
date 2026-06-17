@@ -748,10 +748,12 @@ final class ControlSessionRegistry {
         return view(of: session, host: host)
     }
 
-    /// Return the durable session id for a live, current-run surface if this
-    /// registry owns one. Used only by in-process UI/AppleScript wrappers.
-    func sessionID(forLiveSurface surfaceID: UUID, host: ControlSessionHost) -> String? {
-        liveSession(for: surfaceID, host: host)?.id.uuidString
+    /// Return the durable session id for a registered, current-run surface if
+    /// this registry owns one. Unlike live control actions, this lookup is used
+    /// by the in-process spawn reply path and intentionally does not require the
+    /// child process to still be alive by the time AppleScript reads the property.
+    func sessionID(forRegisteredSurface surfaceID: UUID) -> String? {
+        currentRunSession(for: surfaceID)?.id.uuidString
     }
 
     private func liveSession(
@@ -760,14 +762,28 @@ final class ControlSessionRegistry {
     ) -> ControlSession? {
         sessions.values
             .filter({
-                $0.surfaceID == surfaceID
-                    && !$0.restoredFromPreviousRun
-                    && !$0.canceled
-                    && !$0.archived
+                isCurrentRunSession($0, surfaceID: surfaceID)
                     && liveSurface(of: $0, host: host) != nil
             })
             .sorted(by: { $0.createdAt < $1.createdAt })
             .first
+    }
+
+    private func currentRunSession(for surfaceID: UUID) -> ControlSession? {
+        sessions.values
+            .filter({ isCurrentRunSession($0, surfaceID: surfaceID) })
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .first
+    }
+
+    private func isCurrentRunSession(
+        _ session: ControlSession,
+        surfaceID: UUID
+    ) -> Bool {
+        session.surfaceID == surfaceID
+            && !session.restoredFromPreviousRun
+            && !session.canceled
+            && !session.archived
     }
 
     private func get(

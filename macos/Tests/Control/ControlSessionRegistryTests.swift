@@ -227,10 +227,37 @@ struct ControlSessionRegistryTests {
 
         #expect(session.surfaceID == surfaceID.uuidString)
         #expect(session.command == "npm run dev")
+        #expect(session.title == "Server")
         #expect(session.cwd == "/srv/app")
         #expect(session.agentType == nil)
         #expect(registry.count == 1)
-        #expect(registry.sessionID(forLiveSurface: surfaceID, host: host) == session.sessionID)
+        #expect(registry.sessionID(forRegisteredSurface: surfaceID) == session.sessionID)
+    }
+
+    @Test func registeredSpawnedSurfaceSessionIDSurvivesQuickExit() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(title: "Quick", workingDirectory: "/tmp")
+
+        let session = try registry.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "Quick",
+            command: "echo done",
+            cwd: "/tmp",
+            env: [:],
+            location: .tab),
+            host: host)
+
+        host.surfaces[surfaceID]?.exists = false
+
+        #expect(registry.sessionID(forRegisteredSurface: surfaceID) == session.sessionID)
+
+        let fetched = registry.handle(
+            request(.sessionsGet, params(id: session.sessionID)),
+            host: host)
+        #expect(fetched.ok)
+        #expect(fetched.result?.session?.sessionID == session.sessionID)
+        #expect(fetched.result?.session?.lifecycle == "closed")
     }
 
     @Test func registerSpawnedSurfaceFailsWithoutLiveSurface() {

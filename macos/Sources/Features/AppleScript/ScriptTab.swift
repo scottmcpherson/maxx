@@ -28,14 +28,41 @@ final class ScriptTab: NSObject {
     /// This can become `nil` if the tab closes while a script is running.
     private weak var controller: BaseTerminalController?
 
+    /// Control session created while building this AppleScript reply.
+    ///
+    /// `maxx-agent-hook new-tab --exec` can launch a command that exits and closes
+    /// its surface before AppleScript asks this wrapper for `control session id`.
+    /// The registration already happened in-process, so keep the durable id here
+    /// for the reply path instead of depending on the surface still being live.
+    private let registeredControlSessionID: String?
+
     /// Called by `ScriptWindow.tabs` / `ScriptWindow.selectedTab`.
     ///
     /// The ID is computed once so object specifiers built from this instance keep
     /// a consistent tab identity.
-    init(window: ScriptWindow, controller: BaseTerminalController) {
+    init(
+        window: ScriptWindow,
+        controller: BaseTerminalController,
+        registeredControlSessionID: String? = nil
+    ) {
         self.stableID = Self.stableID(controller: controller)
         self.window = window
         self.controller = controller
+        self.registeredControlSessionID = registeredControlSessionID
+    }
+
+    /// Build a scripting tab for a just-registered session whose terminal surface
+    /// has already closed. Only properties backed by stable scripting identity or
+    /// the cached control session id can answer meaningfully.
+    init(
+        window: ScriptWindow,
+        stableID: String,
+        registeredControlSessionID: String
+    ) {
+        self.stableID = stableID
+        self.window = window
+        self.controller = nil
+        self.registeredControlSessionID = registeredControlSessionID
     }
 
     /// Exposed as the AppleScript `id` property.
@@ -108,17 +135,18 @@ final class ScriptTab: NSObject {
     @objc(controlSessionID)
     var controlSessionID: String {
         guard NSApp.isAppleScriptEnabled else { return "" }
+        if let registeredControlSessionID { return registeredControlSessionID }
         guard let controller else { return "" }
         guard let appDelegate = NSApp.delegate as? AppDelegate else { return "" }
 
         if let focused = controller.focusedSurface,
            controller.surfaceTree.contains(focused),
-           let sessionID = appDelegate.controlSessionID(forLiveSurface: focused.id) {
+           let sessionID = appDelegate.controlSessionID(forRegisteredSurface: focused.id) {
             return sessionID
         }
 
         for surface in controller.surfaceTree.root?.leaves() ?? [] {
-            if let sessionID = appDelegate.controlSessionID(forLiveSurface: surface.id) {
+            if let sessionID = appDelegate.controlSessionID(forRegisteredSurface: surface.id) {
                 return sessionID
             }
         }

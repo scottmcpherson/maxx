@@ -503,12 +503,12 @@ class AppDelegate: NSObject,
         return session.sessionID
     }
 
-    /// Return the control session id for a live surface if this app run owns
-    /// one. Used by AppleScript tab objects after `maxx-agent-hook new-tab`
-    /// registers the newly spawned surface.
+    /// Return the control session id for a registered current-run surface if
+    /// this app run owns one. Used by AppleScript tab objects after
+    /// `maxx-agent-hook new-tab` registers the newly spawned surface.
     @MainActor
-    func controlSessionID(forLiveSurface surfaceID: UUID) -> String? {
-        controlServer?.sessionID(forLiveSurface: surfaceID)
+    func controlSessionID(forRegisteredSurface surfaceID: UUID) -> String? {
+        controlServer?.sessionID(forRegisteredSurface: surfaceID)
     }
 
     private static func controlRecordedCommand(

@@ -92,13 +92,13 @@ final class ControlServer {
             host: host)
     }
 
-    /// Return the control session id for a live, current-run surface if the
+    /// Return the control session id for a registered current-run surface if the
     /// registry owns one. Used by AppleScript object properties after a tab has
     /// been created and registered.
     @MainActor
-    func sessionID(forLiveSurface surfaceID: UUID) -> String? {
+    func sessionID(forRegisteredSurface surfaceID: UUID) -> String? {
         guard listenFD >= 0 else { return nil }
-        return registry.sessionID(forLiveSurface: surfaceID, host: host)
+        return registry.sessionID(forRegisteredSurface: surfaceID)
     }
 
     private func startThrowing() throws {

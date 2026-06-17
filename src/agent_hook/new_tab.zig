@@ -48,6 +48,7 @@ const script_template =
     \\  set titleText to item 7 of argv
     \\  set envList to {}
     \\  if (count of argv) > 7 then set envList to items 8 thru -1 of argv
+    \\  if titleText is not "" then set envList to envList & {"MAXX_AGENT_HOOK_TITLE=" & titleText}
     \\  set envList to envList & {"MAXX_AGENT_HOOK_CONTROL_SESSION=1"}
     \\  tell application id "%APP_ID%"
     \\    set cfg to {command:commandText, initial input:inputText, initial working directory:cwdPath, wait after command:(waitFlag is "1"), environment variables:envList}
