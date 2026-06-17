@@ -126,35 +126,6 @@ extension Ghostty {
                     }
                 }
 
-                // Agent-provided overlays, pinned top-left and stacked vertically:
-                // the agent-declared workflow-state badge (Control API set-state/
-                // set-summary), the parent/group relationship badge (MAX-6:
-                // create/set-group/set-parent), and the agent-reported metadata
-                // chip (set-metadata etc.). All are shown ONLY when an agent has
-                // explicitly declared/reported them — never inferred from terminal
-                // output — and the metadata chip is never treated as workflow
-                // state. Grouping them here keeps them clear of the top-right
-                // read-only badge and the bottom URL-hover / child-exited bars.
-                if surfaceView.declaredAgentState != nil
-                    || surfaceView.agentRelationship != nil
-                    || !surfaceView.agentMetadata.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let declared = surfaceView.declaredAgentState {
-                            AgentStateBadge(declared: declared)
-                        }
-                        if let relationship = surfaceView.agentRelationship {
-                            AgentRelationshipBadge(relationship: relationship)
-                        }
-                        if !surfaceView.agentMetadata.isEmpty {
-                            AgentMetadataBadge(metadata: surfaceView.agentMetadata)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(8)
-                    .zIndex(1)
-                }
-
                 // Show key state indicator for active key tables and/or pending key sequences
                 KeyStateIndicator(
                     keyTables: surfaceView.keyTables,
@@ -1126,61 +1097,56 @@ extension Ghostty {
 
     // MARK: Agent-Declared State Badge
 
-    /// A badge overlay showing an agent-declared workflow state + summary
+    /// A compact badge showing an agent-declared workflow state
     /// (Control API `set-state` / `set-summary`).
     ///
-    /// Positioned in the top-left corner so it does not collide with the
-    /// top-right read-only badge. It renders only what an agent explicitly
-    /// declared; Maxx never infers any of this from terminal output (see
-    /// docs/no-inference.md). Kept visually separate from the process-lifecycle
-    /// and sidebar agent-activity indicators so it reads as agent-provided, not
-    /// Maxx-derived.
+    /// Rendered in titlebar chrome by `AgentFactsTitlebarView`, not over the
+    /// terminal surface. The inline badge deliberately shows only one compact
+    /// status pill; any declared summary stays in the popover details.
     struct AgentStateBadge: View {
         let declared: ControlDeclaredState
 
         @State private var showingPopover = false
 
         var body: some View {
-            // Leading content only; the enclosing overlay column pins it
-            // top-leading and stacks the metadata chip beneath it.
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let state = declared.state {
-                        HStack(spacing: 5) {
-                            Image(systemName: Self.symbol(for: state))
-                                .font(.system(size: 12))
-                            Text(state.label)
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(badgeBackground(for: state))
-                        .foregroundStyle(Self.color(for: state))
-                    }
-
-                    if let summary = declared.summary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
-                            .frame(maxWidth: 320, alignment: .leading)
-                    }
+            Button {
+                showingPopover.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: Self.inlineSymbol(for: declared))
+                        .font(.system(size: 12))
+                    Text(Self.inlineLabel(for: declared))
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
                 }
-                .onTapGesture { showingPopover = true }
-                .backport.pointerStyle(.link)
-                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                    AgentStatePopoverView(declared: declared)
-                }
-
-                Spacer()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(badgeBackground)
+                .foregroundStyle(inlineColor)
             }
+            .buttonStyle(.plain)
+            .backport.pointerStyle(.link)
+            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                AgentStatePopoverView(declared: declared)
+            }
+            .fixedSize(horizontal: true, vertical: true)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityLabel)
+        }
+
+        static func inlineLabel(for declared: ControlDeclaredState) -> String {
+            declared.state?.label ?? "Agent status"
+        }
+
+        private static func inlineSymbol(for declared: ControlDeclaredState) -> String {
+            if let state = declared.state {
+                return symbol(for: state)
+            }
+            return "text.bubble.fill"
+        }
+
+        private var inlineColor: Color {
+            declared.state.map(Self.color(for:)) ?? .secondary
         }
 
         private var accessibilityLabel: String {
@@ -1190,12 +1156,12 @@ extension Ghostty {
             return parts.isEmpty ? "Agent-declared state" : parts.joined(separator: ". ")
         }
 
-        private func badgeBackground(for state: WorkflowState) -> some View {
+        private var badgeBackground: some View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(.regularMaterial)
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Self.color(for: state).opacity(0.6), lineWidth: 1.5)
+                        .strokeBorder(inlineColor.opacity(0.6), lineWidth: 1.5)
                 )
         }
 
@@ -1264,20 +1230,6 @@ extension Ghostty {
         }
     }
 
-    // MARK: Agent-Reported Metadata Badge
-
-    /// A compact chip listing agent-reported metadata (Control API
-    /// `set-metadata` / `update` / `remove-metadata` / `clear-metadata`, MAX-4).
-    ///
-    /// Rendered in the top-left agent-overlay column beneath the agent-state
-    /// badge (see the combined overlay in `SurfaceWrapper`), deliberately away
-    /// from the bottom URL-hover / child-exited bars it would otherwise overlap.
-    /// It collapses to a single chip (with a key count) and reveals the full
-    /// key/value list in a popover, so a session with many keys never clutters
-    /// the surface. It renders only what an agent explicitly reported; Maxx never
-    /// infers any of it from terminal output and never treats a key as
-    /// authoritative workflow state — the chip and popover are display
-    /// affordances only.
     /// A compact badge showing a tab's explicit parent/group relationship
     /// (MAX-6): a group-label chip and/or a "child" indicator. Shown only when a
     /// caller has explicitly placed the tab in a group or under a parent through
@@ -1290,40 +1242,40 @@ extension Ghostty {
         @State private var showingPopover = false
 
         var body: some View {
-            HStack {
-                Button {
-                    showingPopover.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        if relationship.isChild {
-                            Image(systemName: "arrow.turn.down.right")
-                                .font(.system(size: 11))
-                        }
-                        if let group = relationship.group {
-                            Image(systemName: "rectangle.3.group")
-                                .font(.system(size: 11))
-                            Text(group)
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                        } else if relationship.isChild {
-                            Text("Child tab")
-                                .font(.system(size: 11, weight: .medium))
-                        }
+            Button {
+                showingPopover.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    if relationship.isChild {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.system(size: 11))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
-                    .foregroundStyle(.secondary)
+                    if let group = relationship.group {
+                        Image(systemName: "rectangle.3.group")
+                            .font(.system(size: 11))
+                        Text(group)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: 160, alignment: .leading)
+                    } else if relationship.isChild {
+                        Text("Child tab")
+                            .font(.system(size: 11, weight: .medium))
+                    }
                 }
-                .buttonStyle(.plain)
-                .backport.pointerStyle(.link)
-                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                    AgentRelationshipPopoverView(relationship: relationship)
-                }
-
-                Spacer()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .backport.pointerStyle(.link)
+            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                AgentRelationshipPopoverView(relationship: relationship)
+            }
+            .fixedSize(horizontal: true, vertical: true)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityLabel)
         }
@@ -1381,6 +1333,18 @@ extension Ghostty {
         }
     }
 
+    // MARK: Agent-Reported Metadata Badge
+
+    /// A compact chip listing agent-reported metadata (Control API
+    /// `set-metadata` / `update` / `remove-metadata` / `clear-metadata`, MAX-4).
+    ///
+    /// Rendered in titlebar chrome by `AgentFactsTitlebarView`, deliberately
+    /// outside terminal content. It collapses to a single chip (with a key count)
+    /// and reveals the full key/value list in a popover, so a session with many
+    /// keys never clutters the surface. It renders only what an agent explicitly
+    /// reported; Maxx never infers any of it from terminal output and never
+    /// treats a key as authoritative workflow state; the chip and popover are
+    /// display affordances only.
     struct AgentMetadataBadge: View {
         let metadata: [String: ControlJSONValue]
 
@@ -1391,32 +1355,27 @@ extension Ghostty {
         private var sortedKeys: [String] { metadata.keys.sorted() }
 
         var body: some View {
-            // Leading content only; the enclosing overlay column pins it
-            // top-leading and stacks it under the agent-state badge.
-            HStack {
-                Button {
-                    showingPopover.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "tag.fill")
-                            .font(.system(size: 11))
-                        Text(metadata.count == 1 ? "1 key" : "\(metadata.count) keys")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
-                    .foregroundStyle(.secondary)
+            Button {
+                showingPopover.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "tag.fill")
+                        .font(.system(size: 11))
+                    Text(metadata.count == 1 ? "1 key" : "\(metadata.count) keys")
+                        .font(.system(size: 11, weight: .medium))
                 }
-                .buttonStyle(.plain)
-                .backport.pointerStyle(.link)
-                .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                    AgentMetadataPopoverView(metadata: metadata, sortedKeys: sortedKeys)
-                }
-
-                Spacer()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(.regularMaterial))
+                .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .backport.pointerStyle(.link)
+            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                AgentMetadataPopoverView(metadata: metadata, sortedKeys: sortedKeys)
+            }
+            .fixedSize(horizontal: true, vertical: true)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityLabel)
         }

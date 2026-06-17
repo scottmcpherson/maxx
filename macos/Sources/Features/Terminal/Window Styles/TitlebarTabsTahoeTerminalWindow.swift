@@ -13,6 +13,9 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
     /// the native tabs back into the menu bar.
     override var supportsUpdateAccessory: Bool { false }
 
+    private var tabBarLeadingConstraint: NSLayoutConstraint?
+    private weak var tabBarLeadingReservationContainer: NSView?
+
     deinit {
         tabBarObserver = nil
     }
@@ -141,7 +144,10 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
     /// There are more scenarios to look out for and they're documented within the method.
     func setupTabBar() {
         // We only want to setup the observer once
-        guard tabBarObserver == nil else { return }
+        guard tabBarObserver == nil else {
+            syncTabBarLeadingReservation()
+            return
+        }
 
         guard
             let titlebarView,
@@ -167,19 +173,28 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
 
         // The padding for the tab bar. If we're showing window buttons then
         // we need to offset the window buttons.
-        let leftPadding: CGFloat = switch self.derivedConfig.macosWindowButtons {
+        let windowButtonPadding: CGFloat = switch self.derivedConfig.macosWindowButtons {
         case .hidden: 0
         case .visible: 70
         }
+        let leftPadding = titlebarLeadingReservation(
+            in: container,
+            minimum: windowButtonPadding)
 
         // Constrain the accessory clip view (the parent of the accessory view
         // usually that clips the children) to the container view.
         clipView.translatesAutoresizingMaskIntoConstraints = false
         accessoryView.translatesAutoresizingMaskIntoConstraints = false
 
+        let leadingConstraint = clipView.leftAnchor.constraint(
+            equalTo: container.leftAnchor,
+            constant: leftPadding)
+        tabBarLeadingConstraint = leadingConstraint
+        tabBarLeadingReservationContainer = container
+
         // Setup all our constraints
         NSLayoutConstraint.activate([
-            clipView.leftAnchor.constraint(equalTo: container.leftAnchor, constant: leftPadding),
+            leadingConstraint,
             clipView.rightAnchor.constraint(equalTo: container.rightAnchor),
             clipView.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
             clipView.heightAnchor.constraint(equalTo: container.heightAnchor),
@@ -223,6 +238,27 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
 
         // Clear our observations
         self.tabBarObserver = nil
+        tabBarLeadingConstraint = nil
+        tabBarLeadingReservationContainer = nil
+    }
+
+    override func syncTitlebarLeadingReservation() {
+        syncTabBarLeadingReservation()
+    }
+
+    private func syncTabBarLeadingReservation() {
+        guard let tabBarLeadingConstraint,
+              let container = tabBarLeadingReservationContainer
+        else { return }
+
+        let windowButtonPadding: CGFloat = switch derivedConfig.macosWindowButtons {
+        case .hidden: 0
+        case .visible: 70
+        }
+        tabBarLeadingConstraint.constant = titlebarLeadingReservation(
+            in: container,
+            minimum: windowButtonPadding)
+        container.needsLayout = true
     }
 
     // MARK: NSToolbarDelegate

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import GhosttyKit
 
@@ -29,6 +30,22 @@ class TerminalWindow: NSWindow {
 
     /// Update notification UI in titlebar
     private let updateAccessory = NSTitlebarAccessoryViewController()
+
+    /// Agent-declared facts for the focused surface, hosted in titlebar chrome.
+    private let agentFactsTitlebarModel = AgentFactsTitlebarModel()
+    private var agentFactsModelCancellable: AnyCancellable?
+    private var agentFactsTitlebarLeadingConstraint: NSLayoutConstraint?
+    private var agentFactsTitlebarTrailingConstraint: NSLayoutConstraint?
+
+    private lazy var agentFactsTitlebarView: NonDraggableHostingView<AgentFactsTitlebarView> = {
+        let view = NonDraggableHostingView(rootView: AgentFactsTitlebarView(model: agentFactsTitlebarModel))
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.wantsLayer = true
+        view.layer?.zPosition = 20
+        view.setContentHuggingPriority(.required, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }()
 
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {
@@ -158,6 +175,8 @@ class TerminalWindow: NSWindow {
         // Create our reset zoom titlebar accessory. We have to have a title
         // to do this or AppKit triggers an assertion.
         if styleMask.contains(.titled) {
+            installAgentFactsTitlebarAccessoryIfNeeded()
+
             resetZoomAccessory.layoutAttribute = .right
             resetZoomAccessory.view = NSHostingView(rootView: ResetZoomAccessoryView(
                 viewModel: viewModel,
@@ -264,6 +283,12 @@ class TerminalWindow: NSWindow {
         tabTitleEditor.beginEditing(for: targetWindow)
     }
 
+    func syncAgentFactsSurface(_ surfaceView: Ghostty.SurfaceView?) {
+        installAgentFactsTitlebarAccessoryIfNeeded()
+        agentFactsTitlebarModel.observe(surfaceView)
+        syncAgentFactsTitlebarVisibility()
+    }
+
     func installSidebarIfNeeded(animated: Bool = false) {
         guard derivedConfig.macosTitlebarStyle == .sidebar else {
             sidebarCollapsed = false
@@ -325,6 +350,7 @@ class TerminalWindow: NSWindow {
         sidebarCollapsed = collapsed
         sidebarClosingTitlebarHandoffPending = collapsed && animated
         syncSidebarTitlebarLeadingControls()
+        syncAgentFactsTitlebarPosition()
         if collapsed {
             terminalController?.terminalViewContainer?.removeSidebar(
                 animated: animated,
@@ -361,6 +387,7 @@ class TerminalWindow: NSWindow {
 
         sidebarClosingTitlebarHandoffPending = false
         syncSidebarTitlebarLeadingControls()
+        syncAgentFactsTitlebarPosition()
     }
 
     private func handleSidebarToggleShortcut(_ event: NSEvent) -> Bool {
@@ -480,6 +507,10 @@ class TerminalWindow: NSWindow {
         }
         backgroundView.needsDisplay = true
         installSidebarTitlebarResizeHandle(in: titlebarView, width: width, animated: animated)
+        syncAgentFactsTitlebarPosition(
+            in: titlebarView,
+            sidebarWidth: width,
+            animated: animated)
     }
 
     func removeSidebarTitlebarSidebarChrome() {
@@ -491,6 +522,7 @@ class TerminalWindow: NSWindow {
         sidebarTitlebarResizeHandleCenterXConstraint = nil
         sidebarTitlebarResizeHandle?.removeFromSuperview()
         sidebarTitlebarResizeHandle = nil
+        syncAgentFactsTitlebarPosition()
     }
 
     private func removeSidebarTitlebarChrome() {
@@ -511,6 +543,7 @@ class TerminalWindow: NSWindow {
         installSidebarTitlebarLeadingControls(in: titlebarView)
         sidebarTitlebarBackgroundView?.showsNewSessionButton =
             !sidebarCollapsed || sidebarClosingTitlebarHandoffPending
+        syncAgentFactsTitlebarPosition(in: titlebarView)
     }
 
     private func installSidebarTitlebarLeadingControls(in titlebarView: NSView) {
@@ -719,6 +752,189 @@ class TerminalWindow: NSWindow {
             }
         }
     }
+
+    private func installAgentFactsTitlebarAccessoryIfNeeded() {
+        guard styleMask.contains(.titled) else { return }
+        guard let titlebarView = titlebarContainer?.firstDescendant(withClassName: "NSTitlebarView") else {
+            return
+        }
+
+        if agentFactsTitlebarView.superview !== titlebarView {
+            agentFactsTitlebarLeadingConstraint?.isActive = false
+            agentFactsTitlebarTrailingConstraint?.isActive = false
+            agentFactsTitlebarView.removeFromSuperview()
+            titlebarView.addSubview(agentFactsTitlebarView, positioned: .above, relativeTo: nil)
+
+            let leadingConstraint = agentFactsTitlebarView.leadingAnchor.constraint(
+                equalTo: titlebarView.leadingAnchor,
+                constant: agentFactsLeadingOffset(in: titlebarView))
+            let trailingConstraint = agentFactsTitlebarView.trailingAnchor.constraint(
+                lessThanOrEqualTo: titlebarView.trailingAnchor,
+                constant: -72)
+            trailingConstraint.priority = .defaultHigh
+            NSLayoutConstraint.activate([
+                leadingConstraint,
+                trailingConstraint,
+                agentFactsTitlebarView.centerYAnchor.constraint(equalTo: titlebarView.centerYAnchor),
+                agentFactsTitlebarView.heightAnchor.constraint(lessThanOrEqualTo: titlebarView.heightAnchor),
+            ])
+            agentFactsTitlebarLeadingConstraint = leadingConstraint
+            agentFactsTitlebarTrailingConstraint = trailingConstraint
+        }
+
+        if agentFactsModelCancellable == nil {
+            agentFactsModelCancellable = agentFactsTitlebarModel.$hasFacts
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.syncAgentFactsTitlebarVisibility()
+                }
+        }
+        syncAgentFactsTitlebarVisibility()
+    }
+
+    private func syncAgentFactsTitlebarVisibility() {
+        let hasFacts = agentFactsTitlebarModel.hasFacts
+        agentFactsTitlebarView.isHidden = !hasFacts
+        agentFactsTitlebarView.invalidateIntrinsicContentSize()
+        agentFactsTitlebarView.needsLayout = true
+
+        if derivedConfig.macosTitlebarStyle == .sidebar {
+            syncSidebarTitlebarLeadingControls()
+        }
+
+        syncAgentFactsTitlebarPosition()
+        agentFactsTitlebarView.superview?.layoutSubtreeIfNeeded()
+        syncTitlebarLeadingReservation()
+    }
+
+    private func syncAgentFactsTitlebarPosition(
+        in titlebarView: NSView? = nil,
+        sidebarWidth: CGFloat? = nil,
+        animated: Bool = false
+    ) {
+        guard let titlebarView = titlebarView ?? agentFactsTitlebarView.superview else {
+            return
+        }
+
+        let constant = agentFactsLeadingOffset(
+            in: titlebarView,
+            sidebarWidth: sidebarWidth)
+        if animated {
+            agentFactsTitlebarLeadingConstraint?.animator().constant = constant
+        } else {
+            agentFactsTitlebarLeadingConstraint?.constant = constant
+        }
+    }
+
+    private func agentFactsLeadingOffset(
+        in titlebarView: NSView,
+        sidebarWidth: CGFloat? = nil
+    ) -> CGFloat {
+        let visibleButtonMaxX = [
+            standardWindowButton(.closeButton),
+            standardWindowButton(.miniaturizeButton),
+            standardWindowButton(.zoomButton),
+        ].compactMap { button -> CGFloat? in
+            guard let button, !button.isHiddenOrHasHiddenAncestor else { return nil }
+            return button.convert(button.bounds, to: titlebarView).maxX
+        }.max() ?? 8
+
+        let sidebarControlsMaxX: CGFloat? = if let controls = sidebarTitlebarLeadingControlsView,
+                                               controls.superview === titlebarView,
+                                               !controls.isHiddenOrHasHiddenAncestor {
+            controls.convert(controls.bounds, to: titlebarView).maxX
+        } else {
+            nil
+        }
+
+        return Self.agentFactsLeadingOffset(
+            sidebarMode: derivedConfig.macosTitlebarStyle == .sidebar,
+            visibleButtonMaxX: visibleButtonMaxX,
+            sidebarControlsMaxX: sidebarControlsMaxX,
+            sidebarTrailingX: sidebarTitlebarTrailingEdge(
+                in: titlebarView,
+                widthOverride: sidebarWidth))
+    }
+
+    private func sidebarTitlebarTrailingEdge(
+        in titlebarView: NSView,
+        widthOverride: CGFloat?
+    ) -> CGFloat? {
+        guard derivedConfig.macosTitlebarStyle == .sidebar else { return nil }
+
+        if let widthOverride, widthOverride.isFinite {
+            return max(widthOverride, 0)
+        }
+
+        if let width = sidebarTitlebarWidthConstraint?.constant, width.isFinite {
+            return max(width, 0)
+        }
+
+        if let resizeHandle = sidebarTitlebarResizeHandle,
+           resizeHandle.superview === titlebarView,
+           !resizeHandle.isHiddenOrHasHiddenAncestor {
+            let center = resizeHandle.convert(
+                NSPoint(x: resizeHandle.bounds.midX, y: resizeHandle.bounds.midY),
+                to: titlebarView)
+            if center.x.isFinite {
+                return max(center.x, 0)
+            }
+        }
+
+        if let backgroundView = sidebarTitlebarBackgroundView,
+           backgroundView.superview === titlebarView,
+           !backgroundView.isHiddenOrHasHiddenAncestor {
+            let maxX = backgroundView.convert(backgroundView.bounds, to: titlebarView).maxX
+            if maxX.isFinite {
+                return max(maxX, 0)
+            }
+        }
+
+        return nil
+    }
+
+    static func agentFactsLeadingOffset(
+        sidebarMode: Bool,
+        visibleButtonMaxX: CGFloat,
+        sidebarControlsMaxX: CGFloat?,
+        sidebarTrailingX: CGFloat?
+    ) -> CGFloat {
+        let controlsEdge = max(visibleButtonMaxX, sidebarControlsMaxX ?? 0)
+        guard sidebarMode else {
+            return controlsEdge + 12
+        }
+
+        guard let sidebarTrailingX, sidebarTrailingX.isFinite else {
+            return controlsEdge + 12
+        }
+
+        let sidebarEdge = max(sidebarTrailingX, 0)
+        if sidebarEdge > controlsEdge {
+            return sidebarEdge + 8
+        }
+
+        return controlsEdge + 12
+    }
+
+    func titlebarLeadingReservation(
+        in container: NSView,
+        minimum: CGFloat
+    ) -> CGFloat {
+        guard agentFactsTitlebarModel.hasFacts,
+              !agentFactsTitlebarView.isHidden,
+              agentFactsTitlebarView.window === self
+        else { return minimum }
+
+        let factsMaxX = agentFactsTitlebarView.convert(
+            agentFactsTitlebarView.bounds,
+            to: container
+        ).maxX
+        guard factsMaxX.isFinite, factsMaxX > 0 else { return minimum }
+        return max(minimum, factsMaxX + 8)
+    }
+
+    func syncTitlebarLeadingReservation() {}
 
     // MARK: Tab Key Equivalents
 
@@ -1049,6 +1265,124 @@ private extension NSEvent {
         }
 
         return charactersIgnoringModifiers?.lowercased() == "b"
+    }
+}
+
+@MainActor
+final class AgentFactsTitlebarModel: ObservableObject {
+    @Published private(set) var declared: ControlDeclaredState?
+    @Published private(set) var relationship: ControlRelationship?
+    @Published private(set) var metadata: [String: ControlJSONValue] = [:]
+    @Published private(set) var hasFacts = false
+
+    private var cancellables: Set<AnyCancellable> = []
+
+    func observe(_ surfaceView: Ghostty.SurfaceView?) {
+        cancellables.removeAll()
+        guard let surfaceView else {
+            update(declared: nil, relationship: nil, metadata: [:])
+            return
+        }
+
+        update(
+            declared: surfaceView.declaredAgentState,
+            relationship: surfaceView.agentRelationship,
+            metadata: surfaceView.agentMetadata)
+
+        surfaceView.$declaredAgentState
+            .sink { [weak self] declared in
+                guard let self else { return }
+                self.update(
+                    declared: declared,
+                    relationship: self.relationship,
+                    metadata: self.metadata)
+            }
+            .store(in: &cancellables)
+
+        surfaceView.$agentRelationship
+            .sink { [weak self] relationship in
+                guard let self else { return }
+                self.update(
+                    declared: self.declared,
+                    relationship: relationship,
+                    metadata: self.metadata)
+            }
+            .store(in: &cancellables)
+
+        surfaceView.$agentMetadata
+            .sink { [weak self] metadata in
+                guard let self else { return }
+                self.update(
+                    declared: self.declared,
+                    relationship: self.relationship,
+                    metadata: metadata)
+            }
+            .store(in: &cancellables)
+    }
+
+    func update(
+        declared: ControlDeclaredState?,
+        relationship: ControlRelationship?,
+        metadata: [String: ControlJSONValue]
+    ) {
+        self.declared = declared
+        self.relationship = relationship
+        self.metadata = metadata
+        self.hasFacts = Self.hasFacts(
+            declared: declared,
+            relationship: relationship,
+            metadata: metadata)
+    }
+
+    nonisolated static func hasFacts(
+        declared: ControlDeclaredState?,
+        relationship: ControlRelationship?,
+        metadata: [String: ControlJSONValue]
+    ) -> Bool {
+        visiblePillCount(
+            declared: declared,
+            relationship: relationship,
+            metadata: metadata) > 0
+    }
+
+    nonisolated static func visiblePillCount(
+        declared: ControlDeclaredState?,
+        relationship: ControlRelationship?,
+        metadata: [String: ControlJSONValue]
+    ) -> Int {
+        var count = 0
+        if declared != nil { count += 1 }
+        if relationship != nil { count += 1 }
+        if !metadata.isEmpty { count += 1 }
+        return count
+    }
+}
+
+struct AgentFactsTitlebarView: View {
+    @ObservedObject var model: AgentFactsTitlebarModel
+
+    var body: some View {
+        if model.hasFacts {
+            HStack(spacing: 6) {
+                if let declared = model.declared {
+                    Ghostty.AgentStateBadge(declared: declared)
+                }
+                if let relationship = model.relationship {
+                    Ghostty.AgentRelationshipBadge(relationship: relationship)
+                }
+                if !model.metadata.isEmpty {
+                    Ghostty.AgentMetadataBadge(metadata: model.metadata)
+                }
+            }
+            .padding(.horizontal, 2)
+            .frame(maxWidth: 420, minHeight: 28, alignment: .leading)
+            .clipped()
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Agent facts")
+        } else {
+            Color.clear
+                .frame(width: 0, height: 1)
+        }
     }
 }
 

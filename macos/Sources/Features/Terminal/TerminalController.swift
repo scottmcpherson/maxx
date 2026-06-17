@@ -1125,6 +1125,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         window.contentView = container
         (window as? TerminalWindow)?.installSidebarIfNeeded()
+        (window as? TerminalWindow)?.syncAgentFactsSurface(focusedSurface)
 
         // If we have a default size, we want to apply it.
         if let defaultSize {
@@ -1435,6 +1436,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
+
+        (window as? TerminalWindow)?.syncAgentFactsSurface(to)
 
         // We always cancel our event listener
         surfaceAppearanceCancellables.removeAll()
