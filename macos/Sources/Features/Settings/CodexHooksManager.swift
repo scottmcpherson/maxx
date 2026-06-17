@@ -188,7 +188,7 @@ enum CodexHooksManager {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
             return false
         }
-        return content.contains("managed by maxx-agent")
+        return content.contains("managed by maxx-agent;")
     }
 
     /// The bundled `maxx-agent` helper, if present and executable.

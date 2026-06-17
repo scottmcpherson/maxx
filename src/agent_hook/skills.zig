@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 
 /// Marker that identifies skill files we own. Uninstall refuses to delete
 /// files without it so we never destroy a user's hand-written skill.
-const ownership_marker = "managed by maxx-agent";
+const ownership_marker = "managed by maxx-agent;";
 
 /// Markers written by older releases; still count as ours.
 const legacy_maxx_agent_hook_ownership_marker = "managed by maxx-agent-hook";

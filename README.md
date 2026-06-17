@@ -72,9 +72,9 @@ layer for people running multiple coding agents in parallel.
 ## Agent Tab Control
 
 Maxx is not just a terminal for running agents; it is a terminal that agents
-can understand. The bundled `maxx-agent` helper and optional `maxx-agent`
-skill let supported agents work with the running Maxx window instead of
-spawning hidden background processes.
+can understand. The bundled `maxx-agent` helper and matching optional skill let
+supported agents work with the running Maxx window instead of spawning hidden
+background processes.
 
 With the skill installed from Maxx Settings, Claude Code and Codex can:
 
