@@ -342,15 +342,15 @@ extension NSApplication {
         }
 
         for scriptWindow in scriptWindows {
-            if let registeredControlSessionID {
-                scriptWindow.rememberRegisteredControlSession(
-                    tabID: createdTabID,
-                    sessionID: registeredControlSessionID)
-            }
             if let scriptTab = scriptWindow.tab(
                 uniqueID: createdTabID,
                 registeredControlSessionID: registeredControlSessionID
             ) {
+                if let registeredControlSessionID {
+                    scriptWindow.rememberRegisteredControlSession(
+                        tabID: createdTabID,
+                        sessionID: registeredControlSessionID)
+                }
                 return scriptTab
             }
         }

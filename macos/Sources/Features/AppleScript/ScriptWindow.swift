@@ -113,14 +113,15 @@ final class ScriptWindow: NSObject {
         uniqueID: String,
         registeredControlSessionID: String? = nil
     ) -> ScriptTab? {
+        let rememberedSessionID = registeredControlSessionIDs[uniqueID]
         let cachedSessionID = registeredControlSessionID
-            ?? self.registeredControlSessionIDs[uniqueID]
+            ?? rememberedSessionID
         guard let controller = controller(tabID: uniqueID) else {
-            guard let cachedSessionID else { return nil }
+            guard let rememberedSessionID else { return nil }
             return ScriptTab(
                 window: self,
                 stableID: uniqueID,
-                registeredControlSessionID: cachedSessionID)
+                registeredControlSessionID: rememberedSessionID)
         }
         return ScriptTab(
             window: self,
