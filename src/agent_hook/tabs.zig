@@ -209,7 +209,7 @@ pub fn runListTabs(alloc: Allocator, args: []const [:0]u8) !void {
 
 pub fn runCloseTab(alloc: Allocator, args: []const [:0]u8) !void {
     requireDarwin();
-    if (args.len != 1) osa.fail("usage: maxx-agent-hook close-tab <tab-id>", .{});
+    if (args.len != 1) osa.fail("usage: maxx-agent close-tab <tab-id>", .{});
 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
@@ -224,7 +224,7 @@ pub fn runCloseTab(alloc: Allocator, args: []const [:0]u8) !void {
 pub fn runRenameTab(alloc: Allocator, args: []const [:0]u8) !void {
     requireDarwin();
     if (args.len < 2) {
-        osa.fail("usage: maxx-agent-hook rename-tab <tab-id|current> <new name>", .{});
+        osa.fail("usage: maxx-agent rename-tab <tab-id|current> <new name>", .{});
     }
 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -241,8 +241,8 @@ pub fn runRenameTab(alloc: Allocator, args: []const [:0]u8) !void {
 pub fn runSend(alloc: Allocator, args: []const [:0]u8) !void {
     requireDarwin();
 
-    const usage = "usage: maxx-agent-hook send [--no-enter] <terminal-id> <text>\n" ++
-        "       maxx-agent-hook send --key <key-name> <terminal-id>";
+    const usage = "usage: maxx-agent send [--no-enter] <terminal-id> <text>\n" ++
+        "       maxx-agent send --key <key-name> <terminal-id>";
 
     var rest: []const [:0]u8 = args;
     var press_enter = true;

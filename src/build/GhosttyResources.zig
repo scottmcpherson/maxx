@@ -27,11 +27,11 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 
     deps.help_strings.addImport(build_data_exe);
 
-    // Agent hook helper and shims used by macOS terminals to surface
+    // Agent helper and shims used by macOS terminals to surface
     // Claude/Codex lifecycle state without watching terminal output.
     {
         const agent_hook_exe = b.addExecutable(.{
-            .name = "maxx-agent-hook",
+            .name = "maxx-agent",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/agent_hook/main.zig"),
                 .target = cfg.target,
@@ -44,7 +44,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 
         const helper_install = b.addInstallFile(
             agent_hook_exe.getEmittedBin(),
-            "share/ghostty/bin/maxx-agent-hook",
+            "share/ghostty/bin/maxx-agent",
         );
         try steps.append(b.allocator, &helper_install.step);
 

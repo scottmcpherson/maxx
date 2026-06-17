@@ -696,7 +696,7 @@ final class ControlSessionRegistry {
 
     /// Register a surface that Maxx just created through an in-process spawn
     /// path outside `sessions.create`, such as the AppleScript-backed
-    /// `maxx-agent-hook new-tab` command.
+    /// `maxx-agent new-tab` command.
     ///
     /// This is deliberately not a public Control API adoption endpoint: callers
     /// cannot name arbitrary surface ids over the socket. The app passes the

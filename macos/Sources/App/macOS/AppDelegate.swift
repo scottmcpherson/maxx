@@ -478,7 +478,7 @@ class AppDelegate: NSObject,
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 
-    /// Register a tab/window surface that `maxx-agent-hook new-tab` just created
+    /// Register a tab/window surface that `maxx-agent new-tab` just created
     /// through the AppleScript bridge. This keeps the durable Control API handle
     /// tied to the explicit spawn path without exposing arbitrary surface-id
     /// adoption over the external control socket.
@@ -505,7 +505,7 @@ class AppDelegate: NSObject,
 
     /// Return the control session id for a registered current-run surface if
     /// this app run owns one. Used by AppleScript tab objects after
-    /// `maxx-agent-hook new-tab` registers the newly spawned surface.
+    /// `maxx-agent new-tab` registers the newly spawned surface.
     @MainActor
     func controlSessionID(forRegisteredSurface surfaceID: UUID) -> String? {
         controlServer?.sessionID(forRegisteredSurface: surfaceID)

@@ -1,36 +1,35 @@
-//! Installs the Maxx agent skills that teach Claude Code and Codex how to
-//! drive the running app:
-//!
-//!   * `maxx-tabs` — open and manage visible tabs via `maxx-agent-hook`.
-//!   * `maxx-supervisor-workflows` — coordinate child tabs from a parent
-//!     session via the `maxx +control` API
-//!     (spawn/declare/watch/intervene/
-//!     summarize/delegate).
+//! Installs the unified Maxx agent skill that teaches Claude Code and Codex
+//! how to open visible tabs with `maxx-agent` and coordinate them through the
+//! `maxx +control` API.
 //!
 //! Claude Code discovers personal skills in `~/.claude/skills` (or
 //! `$CLAUDE_CONFIG_DIR/skills`). Codex discovers user skills in
 //! `~/.agents/skills`, the cross-agent standard location.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 
 /// Marker that identifies skill files we own. Uninstall refuses to delete
 /// files without it so we never destroy a user's hand-written skill.
-const ownership_marker = "managed by maxx-agent-hook";
+const ownership_marker = "managed by maxx-agent";
 
 /// Markers written by older releases; still count as ours.
+const legacy_maxx_agent_hook_ownership_marker = "managed by maxx-agent-hook";
 const legacy_madmaxx_ownership_marker = "managed by madmaxx-agent-hook";
 const legacy_ghostty_ownership_marker = "managed by ghostty-agent-hook";
 const legacy_ownership_markers = [_][]const u8{
+    legacy_maxx_agent_hook_ownership_marker,
     legacy_madmaxx_ownership_marker,
     legacy_ghostty_ownership_marker,
 };
 
-/// Skill directory names used by older releases of the `maxx-tabs` skill.
-/// Install and uninstall remove them (when we own them) so upgrades don't
-/// leave stale copies behind.
-const legacy_tabs_skill_dir_names = [_][]const u8{
+/// Skill directory names used by older releases. Install and uninstall remove
+/// them (when we own them) so upgrades don't leave stale copies behind.
+const legacy_agent_skill_dir_names = [_][]const u8{
+    "maxx-tabs",
+    "maxx-supervisor-workflows",
     "madmaxx-tabs",
 };
 
@@ -42,23 +41,18 @@ pub const Skill = struct {
     legacy_dir_names: []const []const u8 = &.{},
 };
 
-pub const tabs_skill: Skill = .{
-    .dir_name = "maxx-tabs",
+pub const agent_skill: Skill = .{
+    .dir_name = "maxx-agent",
     .content = @embedFile("skill/SKILL.md"),
-    .legacy_dir_names = &legacy_tabs_skill_dir_names,
-};
-
-pub const supervisor_skill: Skill = .{
-    .dir_name = "maxx-supervisor-workflows",
-    .content = @embedFile("skill/supervisor.md"),
+    .legacy_dir_names = &legacy_agent_skill_dir_names,
 };
 
 /// Every skill we install. Order is install order.
-pub const skills = [_]Skill{ tabs_skill, supervisor_skill };
+pub const skills = [_]Skill{agent_skill};
 
 // Back-compat aliases for callers/tests that referenced the single-skill names.
-pub const skill_dir_name = tabs_skill.dir_name;
-pub const skill_content = tabs_skill.content;
+pub const skill_dir_name = agent_skill.dir_name;
+pub const skill_content = agent_skill.content;
 
 fn isOwnedContent(content: []const u8) bool {
     if (std.mem.indexOf(u8, content, ownership_marker) != null) return true;
@@ -221,6 +215,8 @@ fn readFileAllocIfExists(alloc: Allocator, path: []const u8) ![]const u8 {
 }
 
 fn printStatus(prefix: []const u8, path: []const u8) !void {
+    if (builtin.is_test) return;
+
     var buffer: [1024]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buffer);
     try stdout.interface.writeAll(prefix);
@@ -248,18 +244,22 @@ test "every bundled skill has required frontmatter and ownership marker" {
     }
 }
 
-test "tabs skill teaches new-tab; supervisor skill teaches the control API" {
+test "unified skill teaches tab creation and supervisor control API" {
     const testing = std.testing;
-    try testing.expect(std.mem.indexOf(u8, tabs_skill.content, "maxx-agent-hook new-tab") != null);
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "maxx +control") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "maxx-agent new-tab") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "session_id") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "maxx +control") != null);
     const old_control_spelling = "ghostty " ++ "+control";
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, old_control_spelling) == null);
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "mxctl sessions create") != null);
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "--action submit") != null);
-    // The supervisor skill must keep the no-inference rule prominent.
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "no-inference") != null or
-        std.mem.indexOf(u8, supervisor_skill.content, "no inference") != null);
-    try testing.expect(std.mem.indexOf(u8, supervisor_skill.content, "not the workflow brain") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, old_control_spelling) == null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "sessions create") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "--action submit") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "maxx-agent-hook") == null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "maxx-tabs") == null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "maxx-supervisor-workflows") == null);
+    // The unified skill must keep the no-inference rule prominent.
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "no-inference") != null or
+        std.mem.indexOf(u8, agent_skill.content, "no inference") != null);
+    try testing.expect(std.mem.indexOf(u8, agent_skill.content, "not the workflow brain") != null);
 }
 
 test "write and remove every skill round trip" {
@@ -295,7 +295,7 @@ test "write and remove every skill round trip" {
     }
 }
 
-test "install writes both skills under one root" {
+test "install writes one unified skill under one root" {
     const testing = std.testing;
     const alloc = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -306,12 +306,10 @@ test "install writes both skills under one root" {
 
     try installAll(alloc, root, "installed at ");
 
-    try tmp.dir.access("maxx-tabs/SKILL.md", .{});
-    try tmp.dir.access("maxx-supervisor-workflows/SKILL.md", .{});
+    try tmp.dir.access("maxx-agent/SKILL.md", .{});
 
     try uninstallAll(alloc, root, "removed from ");
-    try testing.expectError(error.FileNotFound, tmp.dir.access("maxx-tabs/SKILL.md", .{}));
-    try testing.expectError(error.FileNotFound, tmp.dir.access("maxx-supervisor-workflows/SKILL.md", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("maxx-agent/SKILL.md", .{}));
 }
 
 test "write and remove refuse foreign skill files" {
@@ -320,61 +318,92 @@ test "write and remove refuse foreign skill files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(tabs_skill.dir_name);
-    const foreign = "---\nname: maxx-tabs\n---\nuser-authored skill\n";
+    try tmp.dir.makePath(agent_skill.dir_name);
+    const foreign = "---\nname: maxx-agent\n---\nuser-authored skill\n";
     try tmp.dir.writeFile(.{
-        .sub_path = tabs_skill.dir_name ++ "/SKILL.md",
+        .sub_path = agent_skill.dir_name ++ "/SKILL.md",
         .data = foreign,
     });
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
 
-    try testing.expectError(error.ForeignSkillExists, writeSkill(alloc, root, tabs_skill));
-    try testing.expectError(error.ForeignSkillExists, removeSkill(alloc, root, tabs_skill));
+    try testing.expectError(error.ForeignSkillExists, writeSkill(alloc, root, agent_skill));
+    try testing.expectError(error.ForeignSkillExists, removeSkill(alloc, root, agent_skill));
 
-    const skill_path = try std.fs.path.join(alloc, &.{ root, tabs_skill.dir_name, "SKILL.md" });
+    const skill_path = try std.fs.path.join(alloc, &.{ root, agent_skill.dir_name, "SKILL.md" });
     defer alloc.free(skill_path);
     const contents = try readFileAllocIfExists(alloc, skill_path);
     defer alloc.free(contents);
     try testing.expectEqualStrings(foreign, contents);
 }
 
-test "install still writes other skills when one path is foreign" {
+test "install reports a foreign unified skill without clobbering it" {
     const testing = std.testing;
     const alloc = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // A hand-written file squats on the supervisor skill's directory.
-    try tmp.dir.makePath(supervisor_skill.dir_name);
-    const foreign = "---\nname: maxx-supervisor-workflows\n---\nuser-authored skill\n";
+    try tmp.dir.makePath(agent_skill.dir_name);
+    const foreign = "---\nname: maxx-agent\n---\nuser-authored skill\n";
     try tmp.dir.writeFile(.{
-        .sub_path = supervisor_skill.dir_name ++ "/SKILL.md",
+        .sub_path = agent_skill.dir_name ++ "/SKILL.md",
         .data = foreign,
     });
 
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
 
-    // Install reports the collision but still writes the non-foreign skill...
     try testing.expectError(error.ForeignSkillExists, installAll(alloc, root, "installed at "));
-    try tmp.dir.access("maxx-tabs/SKILL.md", .{});
-
-    // ...and never clobbers the foreign file.
-    const foreign_path = try std.fs.path.join(alloc, &.{ root, supervisor_skill.dir_name, "SKILL.md" });
+    const foreign_path = try std.fs.path.join(alloc, &.{ root, agent_skill.dir_name, "SKILL.md" });
     defer alloc.free(foreign_path);
     const contents = try readFileAllocIfExists(alloc, foreign_path);
     defer alloc.free(contents);
     try testing.expectEqualStrings(foreign, contents);
 }
 
-test "install migrates legacy-named skill dir we own" {
+test "install leaves foreign legacy skill dirs while writing unified skill" {
     const testing = std.testing;
     const alloc = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
+    try tmp.dir.makePath("maxx-tabs");
+    const foreign = "---\nname: maxx-tabs\n---\nuser-authored skill\n";
+    try tmp.dir.writeFile(.{
+        .sub_path = "maxx-tabs/SKILL.md",
+        .data = foreign,
+    });
+
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+
+    try installAll(alloc, root, "installed at ");
+    try tmp.dir.access("maxx-agent/SKILL.md", .{});
+
+    const foreign_path = try std.fs.path.join(alloc, &.{ root, "maxx-tabs", "SKILL.md" });
+    defer alloc.free(foreign_path);
+    const contents = try readFileAllocIfExists(alloc, foreign_path);
+    defer alloc.free(contents);
+    try testing.expectEqualStrings(foreign, contents);
+}
+
+test "install migrates legacy-named skill dirs we own" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("maxx-tabs");
+    try tmp.dir.writeFile(.{
+        .sub_path = "maxx-tabs/SKILL.md",
+        .data = "---\nname: maxx-tabs\n---\n<!-- " ++ legacy_maxx_agent_hook_ownership_marker ++ " -->\n",
+    });
+    try tmp.dir.makePath("maxx-supervisor-workflows");
+    try tmp.dir.writeFile(.{
+        .sub_path = "maxx-supervisor-workflows/SKILL.md",
+        .data = "---\nname: maxx-supervisor-workflows\n---\n<!-- " ++ legacy_maxx_agent_hook_ownership_marker ++ " -->\n",
+    });
     try tmp.dir.makePath("madmaxx-tabs");
     try tmp.dir.writeFile(.{
         .sub_path = "madmaxx-tabs/SKILL.md",
@@ -384,10 +413,12 @@ test "install migrates legacy-named skill dir we own" {
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
 
-    const written = try writeSkill(alloc, root, tabs_skill);
+    const written = try writeSkill(alloc, root, agent_skill);
     defer alloc.free(written);
 
-    // New skill exists, old-named dir is gone.
-    try tmp.dir.access(tabs_skill.dir_name ++ "/SKILL.md", .{});
+    // New skill exists, old-named dirs are gone.
+    try tmp.dir.access(agent_skill.dir_name ++ "/SKILL.md", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access("maxx-tabs", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("maxx-supervisor-workflows", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access("madmaxx-tabs", .{}));
 }

@@ -374,8 +374,8 @@ extension NSApplication {
 
 @MainActor
 extension NSApplication {
-    private static let agentHookControlSessionMarker = "MAXX_AGENT_HOOK_CONTROL_SESSION"
-    private static let agentHookTitleMarker = "MAXX_AGENT_HOOK_TITLE"
+    private static let agentHookControlSessionMarker = "MAXX_AGENT_CONTROL_SESSION"
+    private static let agentHookTitleMarker = "MAXX_AGENT_TITLE"
 
     /// Whether Ghostty should currently accept AppleScript interactions.
     var isAppleScriptEnabled: Bool {
@@ -397,7 +397,7 @@ extension NSApplication {
 
     /// Parse the optional AppleScript surface configuration and strip the
     /// private hook marker before the terminal process is launched. The marker is
-    /// an in-process request from `maxx-agent-hook new-tab` to create a durable
+    /// an in-process request from `maxx-agent new-tab` to create a durable
     /// Control API session for this spawn; it is never passed to the child.
     fileprivate func scriptSurfaceConfiguration(
         for command: NSScriptCommand

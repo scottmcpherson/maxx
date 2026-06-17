@@ -368,7 +368,7 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&test_run.step);
 
         const agent_hook_test = b.addTest(.{
-            .name = "maxx-agent-hook-test",
+            .name = "maxx-agent-test",
             .filters = test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/agent_hook/main.zig"),

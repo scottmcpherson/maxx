@@ -77,7 +77,7 @@ final class ControlServer {
     }
 
     /// Register a surface created by an in-process app path such as the
-    /// AppleScript-backed `maxx-agent-hook new-tab` command. This is not exposed
+    /// AppleScript-backed `maxx-agent new-tab` command. This is not exposed
     /// over the socket and therefore cannot be used by external clients to adopt
     /// arbitrary visible tabs by id.
     @MainActor

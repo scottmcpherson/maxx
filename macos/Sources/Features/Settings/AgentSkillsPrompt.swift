@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// App-wide controller for the one-time, opt-in prompt that offers to install the
-/// "maxx-tabs" tab-control skill for the agents the user actually has (Claude
+/// "maxx-agent" tab-control skill for the agents the user actually has (Claude
 /// Code and/or Codex). It shows at most one non-modal banner across all windows,
 /// attached to the front terminal window.
 ///
@@ -287,8 +287,8 @@ private struct AgentSkillsPromptBanner: View {
                     .foregroundStyle(Color(nsColor: theme.foreground))
                 Text("Gives agents the ability to create and manage tabs in Maxx — "
                     + "for example, ask one to start another session in a new tab, or "
-                    + "supervise a group of child tabs. Installs the maxx-tabs and "
-                    + "maxx-supervisor-workflows skills in your home folder; you can "
+                    + "supervise a group of child tabs. Installs the maxx-agent "
+                    + "skill in your home folder; you can "
                     + "remove them anytime in Settings.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(nsColor: theme.mutedForeground))
