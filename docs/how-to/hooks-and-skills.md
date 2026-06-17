@@ -8,16 +8,16 @@ section: how-to
 
 # Claude/Codex Hooks and Skills
 
-Maxx ships a `maxx-agent-hook` helper and bundled skills for Claude Code and
-Codex. The skills teach agents how to call Maxx's local control surface, while
-the hook helper translates explicit agent lifecycle events into sidebar status.
+Maxx ships a `maxx-agent` helper and one bundled skill for Claude Code and
+Codex. The skill teaches agents how to call Maxx's local control surface, while
+the helper translates explicit agent lifecycle events into sidebar status.
 
 ## What Gets Installed
 
-- `maxx-tabs`: open, list, rename, prompt, and close visible Maxx tabs. New
-  tabs return a durable Control API `session_id` for follow-up work.
-- `maxx-supervisor-workflows`: coordinate groups of child tabs from a parent
-  session.
+- `maxx-agent`: open, list, rename, prompt, and close visible Maxx tabs, then
+  use the returned durable Control API `session_id` for follow-up work.
+- Advanced `maxx +control` guidance inside the same skill for coordinating
+  groups of child tabs from a parent session.
 - Hook configuration for supported CLIs so Maxx can display agent-declared
   activity state.
 
@@ -38,7 +38,7 @@ Supported agent status indicators come from explicit hook events, control API
 declarations, or terminal-native mechanical facts such as bell/progress escape
 sequences. They do not come from scraping terminal output.
 
-`maxx-agent-hook new-tab` returns a `session_id` handle for the tab it creates,
+`maxx-agent new-tab` returns a `session_id` handle for the tab it creates,
 but that handle is only a control/session identity. Child answers and workflow
 results still need explicit declarations such as `set-summary`, metadata, or an
 event payload.

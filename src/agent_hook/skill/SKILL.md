@@ -1,88 +1,46 @@
 ---
-name: maxx-tabs
-description: Open and manage tabs in the Maxx terminal. New tabs default to starting a Claude Code or Codex session, optionally with an initial prompt; existing tabs can be listed (with agent status), renamed, prompted, and closed. Use when the user asks to open or create a new tab, terminal, session, thread, or window (e.g. "open a new tab", "create a tab and have it do …", "start another session/agent to do …"), or to inspect, rename, message, or close tabs/sessions, or to orchestrate work across multiple tabs.
+name: maxx-agent
+description: Open, manage, and supervise visible tabs in the Maxx terminal. Use when the user asks to open or create a new tab, terminal, session, thread, or window; start another Claude Code or Codex session; inspect, rename, message, or close tabs; or coordinate several child tabs through explicit Control API state, metadata, events, and summaries.
 ---
 
-<!-- managed by maxx-agent-hook; do not edit (reinstalled from Maxx settings) -->
+<!-- managed by maxx-agent; do not edit (reinstalled from Maxx settings) -->
 
-# Maxx terminal tabs
+# Maxx Agent
 
-This session is running inside the Maxx terminal. The `maxx-agent-hook`
-CLI (already on PATH in Maxx terminals) can open new tabs in the running
-app and run commands in them.
+This session is running inside the Maxx terminal. The `maxx-agent` CLI is on
+PATH in Maxx-created terminals and can open visible tabs in the running app.
+The returned Control API `session_id` is the primary durable handle for any
+follow-up.
 
-## What to run in the new tab
+This is the no-inference rule: Maxx is the visible terminal-native
+runtime/control plane, not the workflow brain. Use only explicit facts: ids,
+lifecycle, timestamps, and state/summary/metadata/events declared through the
+Control API or hook path. Never derive a child's result by scraping terminal
+output, reading process names, tab titles, cwd, branch names, PR URLs, or idle
+time. If a status has no explicit declaration, ask the child to declare it or
+report the gap.
 
-Unless the user explicitly names a different command, a new tab starts a new
-agent session: the same CLI you are running as. "Create a new tab" from a
-Claude Code session means a tab running `claude`; from a Codex session it
-means a tab running `codex`.
+## Open a Visible Tab
 
-New session with nothing specific to do:
-
-```sh
-maxx-agent-hook new-tab --title "Claude session" -- claude
-```
-
-New session for a task ("create a tab and have it do …") — pass the task as
-the initial prompt, quoted as a single argument:
-
-```sh
-maxx-agent-hook new-tab --title "Fix auth bug" -- claude "<prompt>"
-```
-
-Add any CLI flags the user asks for (model, permission mode, etc.) before
-the prompt. Use `codex` instead when running as Codex or when the user asks
-for it.
-
-### Permission mode of the new session
-
-Everything after `--` is passed to the agent CLI verbatim, so set the new
-session's autonomy with that CLI's own flags:
-
-- Claude Code: `--permission-mode default|plan|acceptEdits|auto|dontAsk|bypassPermissions`
-
-  ```sh
-  maxx-agent-hook new-tab --title "Fix auth bug" -- claude --permission-mode acceptEdits "<prompt>"
-  ```
-
-- Codex: `--sandbox read-only|workspace-write|danger-full-access`,
-  `--ask-for-approval untrusted|on-failure|on-request|never`, the
-  `--full-auto` shorthand (workspace-write + approval on failure), and
-  `--dangerously-bypass-approvals-and-sandbox` (no sandbox, no approvals —
-  only when the user explicitly asks for it)
-
-  ```sh
-  maxx-agent-hook new-tab --title "Add CSV export" -- codex --full-auto "<prompt>"
-  ```
-
-Rules:
-
-- If the user names a mode (or says "same mode as this session" and you know
-  how this session was launched), pass it through.
-- If the user didn't specify one, pass no permission flags. Maxx then
-  applies the "Agent tab permission mode" configured in its Settings
-  automatically; without that setting the new session gets the agent's
-  normal defaults. Explicit flags always win over the setting.
-- For unattended workers you will manage yourself, suggest a mode that won't
-  stall on approval prompts (Claude Code `--permission-mode acceptEdits`,
-  Codex `--full-auto`) — but never pass a bypass/danger mode the user didn't
-  explicitly ask for. A stalled worker is recoverable anyway: `list-tabs`
-  shows `needsInput` and `send --key enter` answers its prompt.
-
-Run something other than an agent session only when the user explicitly
-names it (a plain shell tab, `htop`, a build, a server, …):
+Unless the user names a different command, a new tab starts another session of
+the same agent CLI you are running. Always give the tab a short meaningful
+title.
 
 ```sh
-maxx-agent-hook new-tab --title "API server" -- npm run dev
+maxx-agent new-tab --title "Claude session" -- claude
+maxx-agent new-tab --title "Fix auth bug" -- claude "<prompt>"
+maxx-agent new-tab --title "Add CSV export" -- codex --full-auto "<prompt>"
 ```
 
-## How it works
+For non-agent work, run the command the user asked for:
 
-The new tab opens in the same window, starts the user's shell, and runs the
-command as if it had been typed. The tab stays open after the command exits.
-On success it prints JSON with the new tab, terminal, window, and control
-session ids:
+```sh
+maxx-agent new-tab --title "API server" -- npm run dev
+```
+
+`new-tab` opens a tab in the same window, starts the user's shell, and runs the
+command as if typed. With `--exec`, it runs the command directly. On success it
+prints JSON:
 
 ```json
 {
@@ -93,116 +51,187 @@ session ids:
 }
 ```
 
-Keep the returned `session_id` for follow-up through `maxx +control sessions
-get <session_id>`, lifecycle/read APIs, and supported actions. Keep
-`terminal_id` too when you need low-level paste/key input with this helper.
-
-Always pass `--title` with a short, meaningful name (2–4 words). Name the
-task when there is one ("Fix auth bug", not "Claude session"); fall back to
-the session name only for a bare new tab.
-
-Options (must come before `--`):
-
-- `--title <name>`: short name for the new tab, shown in the tab bar and
-  sidebar
-- `--cwd <dir>`: working directory for the new tab (defaults to the current
-  working directory, so omit it to spawn work in the same project)
-- `--new-window`: open a new window instead of a tab in the current window
-- `--env KEY=VALUE`: extra environment variables (repeatable)
-- `--exec`: run the command directly instead of typing it into a shell; the
-  tab closes when the command exits unless `--wait` is also given
-- `--wait`: with `--exec`, keep the tab open after the command exits
-
-Everything after `--` is passed as plain arguments with no shell
-interpretation — a bare `>`, `|`, or `&&` is quoted and loses its meaning.
-For redirects, pipes, or command chains, wrap the whole thing in a shell:
+Keep `session_id` for durable follow-up:
 
 ```sh
-maxx-agent-hook new-tab --title "Build and log" -- zsh -c 'make 2>&1 | tee build.log'
+maxx +control sessions get <session-id>
+maxx +control sessions action <session-id> --action submit --input "status?"
+maxx +control sessions wait <session-id> --lifecycle exited --timeout 10m
 ```
 
-## Manage existing tabs
+Keep `terminal_id` only for low-level paste/key interactions through
+`maxx-agent send`, such as permission menus that need a key press.
+
+Options must come before `--`:
+
+- `--title <name>`: short tab title shown in the tab bar and sidebar.
+- `--cwd <dir>`: working directory for the new tab; defaults to the current
+  directory.
+- `--new-window`: open a new window instead of a tab.
+- `--env KEY=VALUE`: extra environment variable for the new tab; repeatable.
+- `--exec`: run the command directly instead of typing it into a shell.
+- `--wait`: with `--exec`, keep the tab open after the command exits.
+
+Everything after `--` is passed as plain arguments with no shell
+interpretation. For redirects, pipes, or command chains, wrap the command in a
+shell:
+
+```sh
+maxx-agent new-tab --title "Build log" -- zsh -c 'make 2>&1 | tee build.log'
+```
+
+## Permission Modes
+
+Everything after `--` goes to the child CLI verbatim, so set autonomy with that
+CLI's own flags:
+
+- Claude Code: `--permission-mode default|plan|acceptEdits|auto|dontAsk|bypassPermissions`
+- Codex: `--sandbox read-only|workspace-write|danger-full-access`,
+  `--ask-for-approval untrusted|on-failure|on-request|never`, `--full-auto`,
+  or `--dangerously-bypass-approvals-and-sandbox`
+
+If the user did not specify a mode, pass no permission flags. Maxx applies the
+Settings default for agent-spawned tabs when one is configured. Never pass a
+bypass or danger mode unless the user explicitly requested it.
+
+## Manage Existing Tabs
 
 List all windows, tabs, and terminals as JSON:
 
 ```sh
-maxx-agent-hook list-tabs
+maxx-agent list-tabs
 ```
 
-Each terminal includes its foreground `pid` and `process` (e.g. `claude`,
-`codex`, or a shell when the agent has exited), plus an `agent` object with
-the last reported activity state when an agent has run there: `running`,
-`needsInput`, `error`, or `idle`. Use this to check on sessions you spawned —
-`"process": "claude"` with `"state": "needsInput"` means that session is
-waiting for input.
+Each terminal includes ids, foreground process details, and the last
+agent-declared activity state when available. Use this for visible tab
+management, not for deciding whether work succeeded.
 
-Rename a tab (the name shows in the tab bar and sidebar):
+Rename a tab:
 
 ```sh
-maxx-agent-hook rename-tab <tab-id> <new name>
+maxx-agent rename-tab <tab-id> <new name>
+maxx-agent rename-tab current <new name>
 ```
 
-Use `current` as the tab id to rename the tab this session is running in —
-e.g. when the user says "rename this tab":
+Send text to a terminal and press Enter:
 
 ```sh
-maxx-agent-hook rename-tab current <new name>
+maxx-agent send <terminal-id> <text>
 ```
 
-(Your own terminal id is `$GHOSTTY_AGENT_SURFACE_ID`; match it against
-`list-tabs` terminal ids — case-insensitively — if you ever need to find
-your own tab or window explicitly.)
-
-Type a prompt or command into an existing tab's terminal and submit it:
+Type without submitting:
 
 ```sh
-maxx-agent-hook send <terminal-id> <text>
+maxx-agent send --no-enter <terminal-id> <text>
 ```
 
-This pastes the text and presses Enter — use it to prompt an agent session
-running in another tab, or to run a command in another tab's shell. Pass
-`--no-enter` before the terminal id to type without submitting. Give the
-session a moment to act, then check on it with `list-tabs`.
-
-Menu and permission prompts inside a session respond to key presses, not
-pasted text. To answer them, press keys instead:
+Press a menu/permission key:
 
 ```sh
-maxx-agent-hook send --key enter <terminal-id>
+maxx-agent send --key enter <terminal-id>
 ```
 
-`--key` presses a single named key (`enter`, `arrowUp`, `arrowDown`, `tab`,
-`escape`, digits like `digit1`/`digit2`, …) — e.g. `--key enter` confirms
-the highlighted option of a permission prompt.
-
-Close a tab:
+Close a tab only when you created it or the user explicitly asked:
 
 ```sh
-maxx-agent-hook close-tab <tab-id>
+maxx-agent close-tab <tab-id>
 ```
 
-Closing is immediate and does not ask for confirmation — it kills whatever
-is running in the tab. Only close tabs you created, or tabs the user
-explicitly asked to close.
+## When to Use `sessions create`
 
-`new-tab` prints the ids of the control session, tab, and terminal it created.
-Use the `session_id` for durable follow-up through the Control API. Use
-`terminal_id` for low-level `send` input, and use `list-tabs` to rediscover
-visible tabs when needed.
+Use `maxx-agent new-tab` for normal visible child tab creation. It returns a
+`session_id`, works for agent and non-agent commands, and is the simplest path
+when you just need a visible tab plus a durable follow-up handle.
 
-## Supervising several child tabs
+Use `maxx +control sessions create` when create-time structure materially
+matters:
 
-For more than ad-hoc multi-tab work — fanning a task out across child tabs,
-tracking explicit per-child state/metadata, grouping them, and waiting on or
-summarizing the group — use the **`maxx-supervisor-workflows`** skill. This
-skill opens visible tabs and returns their durable `session_id`; the supervisor
-skill shows how to use that handle with explicit state, metadata, parent/group,
-and watch/wait primitives.
+- set `parent`, `group`, `metadata`, or `agent-type` atomically at spawn time
+- deliver untrusted or variable prompt text out of band with `--action submit`
+- supervise several children and wait on explicit events or declarations
+- restart, archive, or audit sessions through the Control API
+
+`sessions create --command` runs in the child's login shell. Do not interpolate
+user-provided prompt text into `--command`; shell syntax inside the prompt would
+be evaluated. Launch the agent as the command, then submit the task as literal
+input.
+
+## Advanced Supervision
+
+Register the parent tab and keep its id:
+
+```sh
+parent_session=$(maxx +control sessions register-current \
+  | jq -r .result.session.session_id)
+```
+
+Create a child with explicit relationships and metadata:
+
+```sh
+child=$(maxx +control sessions create \
+  --title "Fix parser" \
+  --cwd "$PWD" \
+  --agent-type codex \
+  --parent "$parent_session" \
+  --group parser-work \
+  --metadata role=worker \
+  --metadata task=MAX-123 \
+  --command 'codex --full-auto' \
+  | jq -r .result.session.session_id)
+
+maxx +control sessions action "$child" --action submit \
+  --input 'Fix the parser overflow in src/parse.zig; run the parser tests. When done, declare a summary and state through maxx +control.'
+```
+
+Ask children to declare their own status from inside their tab:
+
+```sh
+self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
+maxx +control sessions set-summary "$self" --summary "Parser overflow fixed; parser tests pass"
+maxx +control sessions set-state "$self" --state complete
+maxx +control sessions set-metadata "$self" --key linear.issue --value MAX-123
+maxx +control sessions emit-event "$self" --event tests.passed --payload-json '{"filter":"parser"}'
+```
+
+Watch and wait on explicit facts:
+
+```sh
+maxx +control sessions watch "$child" --json
+maxx +control sessions wait "$child" --event tests.passed --timeout 30m
+maxx +control sessions wait "$child" --lifecycle exited --timeout 1h
+maxx +control stream wait --group parser-work --all declared:complete --timeout 1h
+```
+
+A mechanical `exited` event does not mean success. Pair it with a declared
+`complete` or `failed` state and an agent-authored summary before reporting a
+result.
+
+Intervene only on explicit need:
+
+```sh
+maxx +control sessions action "$child" --action focus
+maxx +control sessions action "$child" --action submit --input "Proceed with option 2."
+maxx-agent send --key enter <terminal-id>
+```
+
+Synthesize from declared facts:
+
+```sh
+maxx +control sessions list --group parser-work \
+  | jq '.result.sessions[] | {id:.session_id, state:.workflow_state, summary, metadata, lifecycle}'
+maxx +control sessions events "$child"
+```
+
+Build your final report from declared `workflow_state`, `summary`, metadata,
+events, and mechanical lifecycle. Do not use scrollback, titles, paths, process
+names, or idle time as proof.
 
 ## Notes
 
-- Only works inside Maxx terminals: it requires `GHOSTTY_AGENT_SURFACE_ID`
-  in the environment. If that variable is missing, tell the user this only
-  works from a Maxx tab.
-- Don't use this for quick shell commands you could run yourself; use it when
-  the user wants a separate, visible tab or session.
+- `maxx-agent` only works inside Maxx terminals because it needs
+  `GHOSTTY_AGENT_SURFACE_ID`.
+- To target a specific dev build, export `MAXX_CONTROL_DIR` and pass the same
+  value to every `maxx +control` call.
+- Use this skill only when the user wants a separate visible tab/session or a
+  supervised multi-tab workflow. For quick shell commands you can run yourself,
+  run them directly.

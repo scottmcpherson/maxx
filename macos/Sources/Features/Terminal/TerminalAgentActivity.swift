@@ -8,7 +8,7 @@ import Foundation
 //
 //   * Agent-declared: the agent CLI fires explicit hooks (e.g. Claude Code's
 //     `UserPromptSubmit` / `Stop` / `Notification`), the bundled
-//     `maxx-agent-hook` helper maps the explicit hook *event name* to a state
+//     `maxx-agent` helper maps the explicit hook *event name* to a state
 //     and writes a structured JSON line, and the reducer below consumes that
 //     line. The reducer recognizes only a closed vocabulary of declared event
 //     names / state values; an unrecognized event yields no state (`nil`)

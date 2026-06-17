@@ -564,7 +564,8 @@ fn isOwnedHookValue(value: JsonValue) bool {
 fn isOwnedHookCommand(command: []const u8) bool {
     // Also match old helper binary names so hooks installed by earlier
     // releases are replaced instead of duplicated.
-    const ours = std.mem.indexOf(u8, command, "maxx-agent-hook") != null or
+    const ours = std.mem.indexOf(u8, command, "command -v maxx-agent ") != null or
+        std.mem.indexOf(u8, command, "command -v maxx-agent-hook") != null or
         std.mem.indexOf(u8, command, "madmaxx-agent-hook") != null or
         std.mem.indexOf(u8, command, "ghostty-agent-hook") != null;
     return ours and std.mem.indexOf(u8, command, " codex ") != null;
@@ -592,7 +593,7 @@ fn appendCodexHookGroup(alloc: Allocator, hooks: *JsonObject, event: HookEvent) 
 fn codexHookCommand(alloc: Allocator, event_name: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(
         alloc,
-        "maxx_hook=\"${{GHOSTTY_AGENT_HOOK_HELPER:-$(command -v maxx-agent-hook 2>/dev/null || true)}}\"; " ++
+        "maxx_hook=\"${{GHOSTTY_AGENT_HOOK_HELPER:-$(command -v maxx-agent 2>/dev/null || true)}}\"; " ++
             "if [ -n \"${{GHOSTTY_AGENT_SURFACE_ID:-}}\" ] && [ -n \"$maxx_hook\" ]; then " ++
             "GHOSTTY_AGENT_PID=\"${{PPID:-}}\" \"$maxx_hook\" codex {s}; else printf \"%s\\n\" \"{{}}\"; fi",
         .{event_name},
@@ -1090,7 +1091,32 @@ test "codex hook install preserves non Maxx hooks" {
     const rendered = try renderJson(alloc, root, .{ .whitespace = .minified });
     defer alloc.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "echo user") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "maxx-agent-hook") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "maxx-agent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "maxx-agent-hook") == null);
+}
+
+test "codex hook install replaces legacy maxx-agent-hook hooks" {
+    const alloc = std.testing.allocator;
+    const existing =
+        \\{"hooks":{"UserPromptSubmit":[{"hooks":[
+        \\{"type":"command","command":"echo user","timeout":10},
+        \\{"type":"command","command":"x=\"$(command -v maxx-agent-hook)\"; \"$x\" codex prompt-submit","timeout":5000}
+        \\]}]}}
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+    var root = try parseHooksRoot(arena_alloc, existing);
+    const hooks = try ensureObjectField(arena_alloc, &root.object, "hooks");
+    try removeOwnedHooksFromEvent(arena_alloc, hooks, "UserPromptSubmit");
+    try appendCodexHookGroup(arena_alloc, hooks, codex_events[1]);
+
+    const rendered = try renderJson(alloc, root, .{ .whitespace = .minified });
+    defer alloc.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "echo user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "command -v maxx-agent ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "command -v maxx-agent-hook") == null);
 }
 
 test "codex config install and uninstall markers" {
@@ -1160,7 +1186,10 @@ test "codex config install migrates legacy ghostty marker blocks" {
     try std.testing.expect(std.mem.indexOf(u8, uninstalled, "ghostty-agent-codex") == null);
 }
 
-test "legacy ghostty-agent-hook commands count as owned" {
+test "current and legacy hook commands count as owned" {
+    try std.testing.expect(isOwnedHookCommand(
+        "x=\"$(command -v maxx-agent 2>/dev/null || true)\"; \"$x\" codex session-start",
+    ));
     try std.testing.expect(isOwnedHookCommand(
         "x=\"$(command -v ghostty-agent-hook)\"; \"$x\" codex session-start",
     ));

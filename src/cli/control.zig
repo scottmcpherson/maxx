@@ -239,7 +239,7 @@ const ParseError = error{
 ///     the recorded (or supplied) command in a fresh surface.
 ///   * `sessions events <session_id> [--since <seq>]`: print the audit log.
 ///
-/// Agent declaration verbs (the `maxx-agent-hook` half — agents declaring their
+/// Agent declaration verbs (the `maxx-agent` half — agents declaring their
 /// own workflow-relevant lifecycle facts):
 ///
 ///   * `sessions declare-state <session_id> --state <name> [--message <text>]

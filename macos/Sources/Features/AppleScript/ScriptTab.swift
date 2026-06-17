@@ -30,7 +30,7 @@ final class ScriptTab: NSObject {
 
     /// Control session created while building this AppleScript reply.
     ///
-    /// `maxx-agent-hook new-tab --exec` can launch a command that exits and closes
+    /// `maxx-agent new-tab --exec` can launch a command that exits and closes
     /// its surface before AppleScript asks this wrapper for `control session id`.
     /// The registration already happened in-process, so keep the durable id here
     /// for the reply path instead of depending on the surface still being live.
@@ -129,7 +129,7 @@ final class ScriptTab: NSObject {
     /// Exposed as the AppleScript `control session id` property.
     ///
     /// This is empty for ordinary tabs and for restored records from a previous
-    /// app run. `maxx-agent-hook new-tab` marks its spawn request so the app
+    /// app run. `maxx-agent new-tab` marks its spawn request so the app
     /// registers the new live surface immediately; after that this property
     /// returns the durable Control API `session_id` for follow-up work.
     @objc(controlSessionID)

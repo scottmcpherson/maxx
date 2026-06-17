@@ -62,8 +62,8 @@ Maxx keeps Ghostty's fast native terminal core and adds a workflow
 layer for people running multiple coding agents in parallel.
 
 - Agent tab control: Claude Code and Codex can open, name, prompt, monitor,
-  and manage Maxx tabs through the optional `maxx-tabs` skill, and coordinate
-  groups of child tabs through the `maxx-supervisor-workflows` skill.
+  and manage Maxx tabs through the optional `maxx-agent` skill, and coordinate
+  groups of child tabs through the same Control API guidance.
 - Sidebar-first tab and session organization.
 - Sidebar agent status indicators for supported CLIs.
 - A macOS-first distribution path for the fork.
@@ -72,9 +72,9 @@ layer for people running multiple coding agents in parallel.
 ## Agent Tab Control
 
 Maxx is not just a terminal for running agents; it is a terminal that agents
-can understand. The bundled `maxx-agent-hook` helper and optional `maxx-tabs`
-skill let supported agents work with the running Maxx window instead of
-spawning hidden background processes.
+can understand. The bundled `maxx-agent` helper and matching optional skill let
+supported agents work with the running Maxx window instead of spawning hidden
+background processes.
 
 With the skill installed from Maxx Settings, Claude Code and Codex can:
 

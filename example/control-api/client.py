@@ -24,7 +24,7 @@ Usage:
     ./client.py restart <session_id> --command "zig build test"
     ./client.py events <session_id> --since 0
 
-    # Agent declarations (the maxx-agent-hook half):
+    # Agent declarations (the maxx-agent half):
     ./client.py declare-state <session_id> --state tests:passed --message ok
     ./client.py emit-event <session_id> --event pr.opened --payload-json '{"pr":123}'
     ./client.py set-metadata <session_id> --key reviewer --value alice

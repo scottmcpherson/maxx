@@ -18,7 +18,7 @@ watch explicit events without hiding work in detached background processes.
 2. Ask the parent to create child tabs for distinct tasks.
 3. Keep each child tab visible in the sidebar with a clear title and declared
    metadata.
-4. Keep the `session_id` returned by `maxx-agent-hook new-tab` or
+4. Keep the `session_id` returned by `maxx-agent new-tab` or
    `maxx +control sessions create`, and use it to prompt, interrupt, restart,
    inspect, or close child tabs when needed.
 5. Treat completion or blockage as explicit agent-declared state, not inferred

@@ -1140,7 +1140,7 @@ extension Ghostty {
             let helperURL = resourcesURL
                 .appendingPathComponent("ghostty", isDirectory: true)
                 .appendingPathComponent("bin", isDirectory: true)
-                .appendingPathComponent("maxx-agent-hook", isDirectory: false)
+                .appendingPathComponent("maxx-agent", isDirectory: false)
 
             return FileManager.default.isExecutableFile(atPath: helperURL.path) ? helperURL : nil
         }

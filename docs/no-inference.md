@@ -84,7 +84,7 @@ construction rather than merely prohibited.
 | Agent-reported metadata chip                   | Agent-declared              | `sessions.create` (at spawn) / `set-metadata` / `update` / `remove-metadata` / `clear-metadata`                                    | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
 | Audit log (`wait` / `watch` / `events`)        | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                                                                            | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
 | Persistent session registry (restored records) | Agent-declared + mechanical | `registry.json` — only stored identity, relationships, declared facts, and timestamps; replayed verbatim on load, never re-derived | `ControlSessionPersistence.swift`, `ControlSessionRegistry.swift` (`rehydrate`)                           |
-| Sidebar agent-activity indicator               | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent-hook`) + terminal bell/progress                                                       | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
+| Sidebar agent-activity indicator               | Agent-declared + mechanical | Hook events the agent CLI fires (`maxx-agent`) + terminal bell/progress                                                            | `macos/Sources/Features/Terminal/TerminalAgentActivity.swift`, `src/agent_hook/main.zig`                  |
 
 ### The control API (declared workflow state)
 
@@ -102,7 +102,7 @@ as agent-provided rather than Maxx-derived (the badge popover literally says
 The "automatic" Claude Code / Codex status is **not** Maxx watching the
 terminal. The agent CLI fires explicit hooks (e.g. Claude Code's
 `UserPromptSubmit`, `Stop`, `Notification`; Codex's configured hooks). The
-bundled `maxx-agent-hook` helper translates the **explicit hook event name** to
+bundled `maxx-agent` helper translates the **explicit hook event name** to
 a normalized state and writes a structured JSON line to a per-surface event
 file; Maxx reads that file and renders the declared state. The helper and the
 reducer recognize only a closed vocabulary of declared event names — an

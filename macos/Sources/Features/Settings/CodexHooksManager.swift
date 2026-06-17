@@ -5,7 +5,7 @@ import Foundation
 /// agent hooks. Both the Settings window and the one-time install prompt go through
 /// here so detection and installation never drift apart.
 ///
-/// The hooks are written by the bundled `maxx-agent-hook` helper, which adds a
+/// The hooks are written by the bundled `maxx-agent` helper, which adds a
 /// marked block to `~/.codex/config.toml` and `~/.codex/hooks.json` (or `$CODEX_HOME`).
 enum CodexHooksManager {
     /// The Codex home directory, respecting `$CODEX_HOME`, else `~/.codex`.
@@ -44,7 +44,7 @@ enum CodexHooksManager {
             return false
         }
 
-        return hooks.contains("maxx-agent-hook") &&
+        return hooks.contains("command -v maxx-agent ") &&
             hooks.contains(" codex ") &&
             config.contains("maxx-agent-codex-hooks-feature begin") &&
             config.contains("hooks = true")
@@ -143,7 +143,7 @@ enum CodexHooksManager {
     /// The installed-status checks below require *every* entry, so an upgrade
     /// that adds a skill re-offers the (idempotent) install instead of silently
     /// skipping the new skill for users who already have an older bundle.
-    static let bundledSkillDirNames = ["maxx-tabs", "maxx-supervisor-workflows"]
+    static let bundledSkillDirNames = ["maxx-agent"]
 
     /// The Claude Code skills root (`$CLAUDE_CONFIG_DIR/skills`, else
     /// `~/.claude/skills`). Mirrors `claudeSkillsRoot` in `skills.zig`.
@@ -188,16 +188,16 @@ enum CodexHooksManager {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
             return false
         }
-        return content.contains("managed by maxx-agent-hook")
+        return content.contains("managed by maxx-agent;")
     }
 
-    /// The bundled `maxx-agent-hook` helper, if present and executable.
+    /// The bundled `maxx-agent` helper, if present and executable.
     static var helperURL: URL? {
         guard let resourcesURL = Bundle.main.resourceURL else { return nil }
         let helperURL = resourcesURL
             .appendingPathComponent("ghostty", isDirectory: true)
             .appendingPathComponent("bin", isDirectory: true)
-            .appendingPathComponent("maxx-agent-hook", isDirectory: false)
+            .appendingPathComponent("maxx-agent", isDirectory: false)
 
         return FileManager.default.isExecutableFile(atPath: helperURL.path) ? helperURL : nil
     }

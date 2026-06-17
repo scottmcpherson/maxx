@@ -29,7 +29,7 @@ bearing design constraint:
   uses to **declare** workflow-relevant facts Maxx then stores and replays
   verbatim: `declare-state`, `emit-event`, and the agent-reported metadata verbs
   (`set-metadata`, `remove-metadata`, `clear-metadata`). These are
-  `maxx-agent-hook`-style operations.
+  `maxx-agent`-style operations.
 
 Maxx never originates or interprets the semantic facts; it only records the ones
 an agent declares and reports the runtime facts it can directly observe. Both
@@ -234,7 +234,7 @@ maxx +control sessions restart <session_id> --command "zig build test"
 maxx +control sessions events <session_id> --since 0
 ```
 
-### Agent declarations (`maxx-agent-hook` half)
+### Agent declarations (`maxx-agent` half)
 
 ```bash
 maxx +control sessions declare-state <session_id> --state tests:passed --message "all green" --source ci-agent

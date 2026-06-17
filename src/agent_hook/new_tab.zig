@@ -1,4 +1,4 @@
-//! `maxx-agent-hook new-tab`: ask the running app to open a new tab (or
+//! `maxx-agent new-tab`: ask the running app to open a new tab (or
 //! window) and run a command in it. This drives the app's AppleScript
 //! `new tab` command, so it only works on macOS and only inside terminals
 //! created by the app (which inject GHOSTTY_AGENT_SURFACE_ID).
@@ -11,7 +11,7 @@ const osa = @import("osa.zig");
 const Allocator = std.mem.Allocator;
 
 const usage =
-    \\Usage: maxx-agent-hook new-tab [options] [--] [command [args...]]
+    \\Usage: maxx-agent new-tab [options] [--] [command [args...]]
     \\
     \\Open a new tab in the Maxx window that contains this terminal and run
     \\the given command in it. With no command, just opens a shell tab.
@@ -48,8 +48,8 @@ const script_template =
     \\  set titleText to item 7 of argv
     \\  set envList to {}
     \\  if (count of argv) > 7 then set envList to items 8 thru -1 of argv
-    \\  if titleText is not "" then set envList to envList & {"MAXX_AGENT_HOOK_TITLE=" & titleText}
-    \\  set envList to envList & {"MAXX_AGENT_HOOK_CONTROL_SESSION=1"}
+    \\  if titleText is not "" then set envList to envList & {"MAXX_AGENT_TITLE=" & titleText}
+    \\  set envList to envList & {"MAXX_AGENT_CONTROL_SESSION=1"}
     \\  tell application id "%APP_ID%"
     \\    set cfg to {command:commandText, initial input:inputText, initial working directory:cwdPath, wait after command:(waitFlag is "1"), environment variables:envList}
     \\    if createWindow is "1" then
