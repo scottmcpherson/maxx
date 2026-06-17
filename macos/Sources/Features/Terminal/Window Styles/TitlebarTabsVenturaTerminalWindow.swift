@@ -462,7 +462,12 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
 
         view.translatesAutoresizingMaskIntoConstraints = false
         view.leftAnchor.constraint(equalTo: toolbarView.leftAnchor).isActive = true
-        view.rightAnchor.constraint(equalTo: toolbarView.leftAnchor, constant: hasWindowButtons ? 78 : 0).isActive = true
+        view.rightAnchor.constraint(
+            equalTo: toolbarView.leftAnchor,
+            constant: titlebarLeadingReservation(
+                in: toolbarView,
+                minimum: hasWindowButtons ? 78 : 0)
+        ).isActive = true
         view.topAnchor.constraint(equalTo: toolbarView.topAnchor).isActive = true
         view.heightAnchor.constraint(equalTo: toolbarView.heightAnchor).isActive = true
 

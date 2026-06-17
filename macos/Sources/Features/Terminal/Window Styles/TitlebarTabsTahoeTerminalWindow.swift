@@ -167,10 +167,13 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
 
         // The padding for the tab bar. If we're showing window buttons then
         // we need to offset the window buttons.
-        let leftPadding: CGFloat = switch self.derivedConfig.macosWindowButtons {
+        let windowButtonPadding: CGFloat = switch self.derivedConfig.macosWindowButtons {
         case .hidden: 0
         case .visible: 70
         }
+        let leftPadding = titlebarLeadingReservation(
+            in: container,
+            minimum: windowButtonPadding)
 
         // Constrain the accessory clip view (the parent of the accessory view
         // usually that clips the children) to the container view.

@@ -10,4 +10,16 @@ import SwiftUI
 /// (buttons, links, etc.) where you don't want accidental window dragging.
 class NonDraggableHostingView<Content: View>: NSHostingView<Content> {
     override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0, bounds.contains(point) else {
+            return nil
+        }
+
+        return super.hitTest(point) ?? self
+    }
 }

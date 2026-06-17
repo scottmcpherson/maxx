@@ -200,12 +200,14 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         // An explicit agent declaration only — the surface stores and displays it
         // verbatim and never derives anything from terminal output.
         view.applyDeclaredAgentState(declared)
+        syncAgentFactsIfFocused()
     }
 
     func applyMetadata(_ metadata: [String: ControlJSONValue]) {
         // An explicit agent declaration only — the surface stores and displays the
         // map verbatim and never derives anything from terminal output.
         view.applyAgentMetadata(metadata)
+        syncAgentFactsIfFocused()
     }
 
     func applyRelationship(_ relationship: ControlRelationship) {
@@ -213,5 +215,14 @@ final class TerminalSurfaceHandle: ControlSurfaceHandle {
         // stores and displays it verbatim and never derives a relationship from
         // terminal output, process names, paths, or idle time.
         view.applyAgentRelationship(relationship)
+        syncAgentFactsIfFocused()
+    }
+
+    private func syncAgentFactsIfFocused() {
+        guard let terminalWindow = view.window as? TerminalWindow,
+              terminalWindow.terminalController?.focusedSurface === view
+        else { return }
+
+        terminalWindow.syncAgentFactsSurface(view)
     }
 }
