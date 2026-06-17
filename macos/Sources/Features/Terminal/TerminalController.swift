@@ -494,21 +494,26 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // take effect. Our best theory is there is some next-event-loop-tick logic
         // that Cocoa is doing that we need to be after.
         controller.scheduleInitialPresentation {
+            let cascadeIfStandaloneWindow = {
+                // Only cascade if we aren't fullscreen and are alone in the tab group.
+                if !window.styleMask.contains(.fullScreen) &&
+                    window.tabGroup?.windows.count ?? 1 == 1 {
+                    let hasFixedPos = controller.derivedConfig.windowPositionX != nil && controller.derivedConfig.windowPositionY != nil
+                    Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
+                }
+            }
+
             if !focus {
                 if let tabGroup = parent.tabGroup, tabGroup.windows.contains(window) {
                     tabGroup.selectedWindow = selectedWindowBeforeAdd
                 } else {
+                    cascadeIfStandaloneWindow()
                     window.orderFront(nil)
                 }
                 return
             }
 
-            // Only cascade if we aren't fullscreen and are alone in the tab group.
-            if !window.styleMask.contains(.fullScreen) &&
-                window.tabGroup?.windows.count ?? 1 == 1 {
-                let hasFixedPos = controller.derivedConfig.windowPositionX != nil && controller.derivedConfig.windowPositionY != nil
-                Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
-            }
+            cascadeIfStandaloneWindow()
 
             controller.showWindow(self)
             window.makeKeyAndOrderFront(self)
