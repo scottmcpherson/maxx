@@ -143,7 +143,7 @@ final class AgentSkillsPromptController {
     private static func title(for candidates: Candidates) -> String {
         switch (candidates.claude, candidates.codex) {
         case (true, true):
-            return "Install Maxx skills for Claude Code and Codex?"
+            return "Install the Maxx skill for Claude Code and Codex?"
         case (true, false):
             return "Install the Maxx skill for Claude Code?"
         default:
@@ -289,7 +289,7 @@ private struct AgentSkillsPromptBanner: View {
                     + "for example, ask one to start another session in a new tab, or "
                     + "supervise a group of child tabs. Installs the maxx-agent "
                     + "skill in your home folder; you can "
-                    + "remove them anytime in Settings.")
+                    + "remove it anytime in Settings.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(nsColor: theme.mutedForeground))
                     .fixedSize(horizontal: false, vertical: true)
