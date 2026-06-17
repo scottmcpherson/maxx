@@ -87,6 +87,7 @@ const Command = struct {
     command: ?[]const u8 = null,
     status: ?[]const u8 = null,
     location: ?[]const u8 = null,
+    focus: bool = false,
     action: ?[]const u8 = null,
     input: ?[]const u8 = null,
     // MAX-2 fields.
@@ -203,7 +204,7 @@ const ParseError = error{
 ///
 ///   * `sessions create`: create a new visible tab/session. Flags:
 ///     `--title`, `--cwd`, `--command`, `--status`, `--location=tab|window`,
-///     repeatable `--metadata key=value` and `--env KEY=VALUE`.
+///     `--focus`, repeatable `--metadata key=value` and `--env KEY=VALUE`.
 ///
 ///   * `sessions register-current`: from inside a normal Maxx tab, explicitly
 ///     register the current tab as a control session. The CLI reads
@@ -650,6 +651,8 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.status = v;
         } else if (try flagValue(alloc, arg, iter, "--location")) |v| {
             cmd.location = v;
+        } else if (std.mem.eql(u8, arg, "--focus")) {
+            cmd.focus = true;
         } else if (try flagValue(alloc, arg, iter, "--action")) |v| {
             cmd.action = v;
         } else if (try flagValue(alloc, arg, iter, "--input")) |v| {
@@ -866,6 +869,10 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     if (cmd.location) |v| {
         try json.objectField("location");
         try json.write(v);
+    }
+    if (cmd.focus) {
+        try json.objectField("focus");
+        try json.write(true);
     }
     if (cmd.input) |v| {
         try json.objectField("input");
@@ -1107,7 +1114,7 @@ test "parseCommand create with flags" {
 
     var iter = try std.process.ArgIteratorGeneral(.{}).init(
         alloc,
-        "sessions create --title Release --cwd=/tmp --command \"zig build\" --metadata workflow=release --metadata request_id=abc --env FOO=bar",
+        "sessions create --title Release --cwd=/tmp --command \"zig build\" --focus --metadata workflow=release --metadata request_id=abc --env FOO=bar",
     );
     defer iter.deinit();
 
@@ -1116,12 +1123,36 @@ test "parseCommand create with flags" {
     try testing.expectEqualStrings("Release", cmd.title.?);
     try testing.expectEqualStrings("/tmp", cmd.cwd.?);
     try testing.expectEqualStrings("zig build", cmd.command.?);
+    try testing.expect(cmd.focus);
     try testing.expectEqual(@as(usize, 2), cmd.metadata.items.len);
     try testing.expectEqualStrings("workflow", cmd.metadata.items[0][0]);
     try testing.expectEqualStrings("release", cmd.metadata.items[0][1]);
     try testing.expectEqualStrings("request_id", cmd.metadata.items[1][0]);
     try testing.expectEqual(@as(usize, 1), cmd.env.items.len);
     try testing.expectEqualStrings("FOO=bar", cmd.env.items[0]);
+}
+
+test "parseCommand create defaults to background focus" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions create --title Background --command \"echo hi\"",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .create);
+    try testing.expect(!cmd.focus);
+
+    const json = try buildRequest(alloc, cmd, "tok");
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try testing.expect(params.get("focus") == null);
 }
 
 test "parseCommand tolerates leading action token" {
@@ -1198,7 +1229,7 @@ test "buildRequest create includes method, token, metadata" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var cmd: Command = .{ .verb = .create, .title = "Run checks", .command = "ls" };
+    var cmd: Command = .{ .verb = .create, .title = "Run checks", .command = "ls", .focus = true };
     try cmd.metadata.append(alloc, .{ "workflow", "release" });
 
     const json = try buildRequest(alloc, cmd, "secret-token");
@@ -1212,6 +1243,7 @@ test "buildRequest create includes method, token, metadata" {
     const params = root.get("params").?.object;
     try testing.expectEqualStrings("Run checks", params.get("title").?.string);
     try testing.expectEqualStrings("ls", params.get("command").?.string);
+    try testing.expect(params.get("focus").?.bool);
     try testing.expectEqualStrings("release", params.get("metadata").?.object.get("workflow").?.string);
 }
 

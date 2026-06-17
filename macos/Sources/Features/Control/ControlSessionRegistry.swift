@@ -8,6 +8,7 @@ struct ControlCreateRequest {
     var cwd: String?
     var env: [String: String]
     var location: ControlLocation
+    var focus: Bool
 }
 
 /// Explicit facts captured from an in-process spawn path that already created
@@ -506,17 +507,24 @@ final class ControlSessionRegistry {
         let parentRequested = !(params?.parent ?? "").isEmpty
         // Spawning is gated by `tabs:spawn` in `handle`; assigning a group or a
         // parent on create additionally requires `groups:create` (both are
-        // association edges between sessions), and declaring an agent type at
-        // create requires `state:set` (the same gate as the standalone
-        // `set-agent-type` verb — otherwise create would be a way to declare it
-        // without the capability). Enforce these BEFORE resolving the parent id and
-        // before the surface is spawned: a caller without `groups:create` must not
-        // be able to tell an unknown parent id (`not_found`) from an existing one
-        // (`unauthorized`) — that differential would be a session-existence oracle —
-        // and a denied request must never leave a stray tab behind.
+        // association edges between sessions), create-time focus additionally
+        // requires `tabs:focus`, and declaring an agent type at create requires
+        // `state:set` (the same gate as the standalone `set-agent-type` verb —
+        // otherwise create would be a way to declare it without the capability).
+        // Enforce these BEFORE resolving the parent id and before the surface is
+        // spawned: a caller without `groups:create` must not be able to tell an
+        // unknown parent id (`not_found`) from an existing one (`unauthorized`) —
+        // that differential would be a session-existence oracle — and a denied
+        // request must never leave a stray tab behind.
         if group != nil || parentRequested {
             try enforceCapability(
                 .groupsCreate, caller: params?.caller, confirm: params?.confirm,
+                target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
+        }
+        let focus = params?.focus == true
+        if focus {
+            try enforceCapability(
+                .tabsFocus, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
         }
         if agentType != nil {
@@ -543,7 +551,8 @@ final class ControlSessionRegistry {
             command: command,
             cwd: cwd,
             env: env,
-            location: location))
+            location: location,
+            focus: focus))
 
         let createdAt = now()
         var session = ControlSession(
@@ -639,6 +648,7 @@ final class ControlSessionRegistry {
             || params?.metadata != nil
             || params?.status != nil
             || params?.location != nil
+            || params?.focus != nil
             || params?.parent != nil
             || params?.group != nil
             || params?.agentType != nil {
@@ -856,6 +866,7 @@ final class ControlSessionRegistry {
             || params?.cwd != nil
             || params?.title != nil
             || params?.location != nil
+            || params?.focus != nil
             || params?.env != nil {
             throw ControlError(
                 .invalidRequest,
@@ -1440,7 +1451,8 @@ final class ControlSessionRegistry {
             command: command,
             cwd: session.cwd,
             env: session.env,
-            location: session.location))
+            location: session.location,
+            focus: true))
 
         session.surfaceID = newSurface
         session.canceled = false

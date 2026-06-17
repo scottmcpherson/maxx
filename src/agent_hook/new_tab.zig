@@ -22,6 +22,8 @@ const usage =
     \\                   current working directory.
     \\  --env KEY=VALUE  Extra environment variable for the new tab (repeatable).
     \\  --new-window     Open a new window instead of a tab.
+    \\  --focus          Focus the child tab/window. By default the parent tab
+    \\                   stays active.
     \\  --exec           Run the command directly instead of typing it into an
     \\                   interactive shell. The tab closes when the command
     \\                   exits unless --wait is given.
@@ -46,10 +48,12 @@ const script_template =
     \\  set inputText to item 5 of argv
     \\  set waitFlag to item 6 of argv
     \\  set titleText to item 7 of argv
+    \\  set focusFlag to item 8 of argv
     \\  set envList to {}
-    \\  if (count of argv) > 7 then set envList to items 8 thru -1 of argv
+    \\  if (count of argv) > 8 then set envList to items 9 thru -1 of argv
     \\  if titleText is not "" then set envList to envList & {"MAXX_AGENT_TITLE=" & titleText}
     \\  set envList to envList & {"MAXX_AGENT_CONTROL_SESSION=1"}
+    \\  set envList to envList & {"MAXX_AGENT_FOCUS=" & focusFlag}
     \\  tell application id "%APP_ID%"
     \\    set cfg to {command:commandText, initial input:inputText, initial working directory:cwdPath, wait after command:(waitFlag is "1"), environment variables:envList}
     \\    if createWindow is "1" then
@@ -108,6 +112,7 @@ pub const Options = struct {
     title: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     new_window: bool = false,
+    focus: bool = false,
     exec: bool = false,
     wait: bool = false,
     help: bool = false,
@@ -177,6 +182,7 @@ pub fn run(alloc: Allocator, args: []const [:0]u8) !void {
         input_text,
         if (opts.wait) "1" else "0",
         opts.title orelse "",
+        if (opts.focus) "1" else "0",
     });
     try script_args.appendSlice(arena, opts.env);
 
@@ -244,6 +250,8 @@ pub fn parseOptions(alloc: Allocator, args: []const []const u8) Allocator.Error!
             opts.help = true;
         } else if (std.mem.eql(u8, arg, "--new-window")) {
             opts.new_window = true;
+        } else if (std.mem.eql(u8, arg, "--focus")) {
+            opts.focus = true;
         } else if (std.mem.eql(u8, arg, "--exec")) {
             opts.exec = true;
         } else if (std.mem.eql(u8, arg, "--wait")) {
@@ -462,6 +470,7 @@ test "new-tab option parsing" {
         try testing.expectEqualStrings("claude", opts.command[0]);
         try testing.expectEqualStrings("do xyz", opts.command[1]);
         try testing.expect(!opts.new_window);
+        try testing.expect(!opts.focus);
         try testing.expect(opts.title == null);
     }
 
@@ -482,10 +491,11 @@ test "new-tab option parsing" {
     }
 
     {
-        const result = try parseOptions(arena, &.{ "--cwd=/srv", "--new-window", "--env", "FOO=bar", "--env", "BAZ=1" });
+        const result = try parseOptions(arena, &.{ "--cwd=/srv", "--new-window", "--focus", "--env", "FOO=bar", "--env", "BAZ=1" });
         const opts = result.ok;
         try testing.expectEqualStrings("/srv", opts.cwd.?);
         try testing.expect(opts.new_window);
+        try testing.expect(opts.focus);
         try testing.expectEqual(@as(usize, 2), opts.env.len);
         try testing.expectEqualStrings("FOO=bar", opts.env[0]);
         try testing.expectEqual(@as(usize, 0), opts.command.len);

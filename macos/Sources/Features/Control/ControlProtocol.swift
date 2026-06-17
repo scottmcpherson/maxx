@@ -184,6 +184,9 @@ struct ControlRequest: Codable {
         var status: String?
         /// `tab` (default) or `window`.
         var location: String?
+        /// When true, focus the created surface. Omitted/false creates in the
+        /// background for agent/control spawns.
+        var focus: Bool?
         /// Action name for `sessions.action`.
         var action: String?
         /// Input text for the `input` action.
@@ -271,7 +274,7 @@ struct ControlRequest: Codable {
             case id
             case surfaceID = "surface_id"
             case registrationToken = "registration_token"
-            case title, cwd, command, env, metadata, status, location
+            case title, cwd, command, env, metadata, status, location, focus
             case action, input, state, event, lifecycle, message, source
             case payloadJson = "payload_json"
             case key, value

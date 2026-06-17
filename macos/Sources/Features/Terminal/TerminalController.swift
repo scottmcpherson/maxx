@@ -250,7 +250,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newWindow(
         _ ghostty: Ghostty.App,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
-        withParent explicitParent: NSWindow? = nil
+        withParent explicitParent: NSWindow? = nil,
+        focus: Bool = true
     ) -> TerminalController {
         let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
 
@@ -288,7 +289,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // take effect. Our best theory is there is some next-event-loop-tick logic
         // that Cocoa is doing that we need to be after.
         c.scheduleInitialPresentation {
-            c.showWindow(self)
+            if focus {
+                c.showWindow(self)
+            } else {
+                c.window?.orderFront(nil)
+            }
 
             // Only cascade if we aren't fullscreen.
             if let window = c.window {
@@ -298,9 +303,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             }
 
-            // All new_window actions force our app to be active, so that the new
-            // window is focused and visible.
-            NSApp.activate(ignoringOtherApps: true)
+            if focus {
+                // All focused new_window actions force our app to be active, so
+                // that the new window is focused and visible.
+                NSApp.activate(ignoringOtherApps: true)
+            }
         }
 
         // Setup our undo
@@ -323,7 +330,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newWindow(
                         ghostty,
                         withBaseConfig: baseConfig,
-                        withParent: explicitParent)
+                        withParent: explicitParent,
+                        focus: focus)
                 }
             }
         }
@@ -408,13 +416,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newTab(
         _ ghostty: Ghostty.App,
         from parent: NSWindow? = nil,
-        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        focus: Bool = true
     ) -> TerminalController? {
         // Making sure that we're dealing with a TerminalController. If not,
         // then we just create a new window.
         guard let parent,
               let parentController = parent.windowController as? TerminalController else {
-            return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent)
+            return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent, focus: focus)
         }
 
         // If our parent is in non-native fullscreen, then new tabs do not work.
@@ -456,6 +465,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             tg.removeWindow(window)
         }
 
+        let selectedWindowBeforeAdd = parent.tabGroup?.selectedWindow ?? parent
+
         // If we don't allow tabs then we create a new window instead.
         if window.tabbingMode != .disallowed {
             // Add the window to the tab group and show it.
@@ -475,16 +486,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
+        if !focus {
+            parent.tabGroup?.selectedWindow = selectedWindowBeforeAdd
+        }
+
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
         // take effect. Our best theory is there is some next-event-loop-tick logic
         // that Cocoa is doing that we need to be after.
         controller.scheduleInitialPresentation {
-            // Only cascade if we aren't fullscreen and are alone in the tab group.
-            if !window.styleMask.contains(.fullScreen) &&
-                window.tabGroup?.windows.count ?? 1 == 1 {
-                let hasFixedPos = controller.derivedConfig.windowPositionX != nil && controller.derivedConfig.windowPositionY != nil
-                Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
+            let cascadeIfStandaloneWindow = {
+                // Only cascade if we aren't fullscreen and are alone in the tab group.
+                if !window.styleMask.contains(.fullScreen) &&
+                    window.tabGroup?.windows.count ?? 1 == 1 {
+                    let hasFixedPos = controller.derivedConfig.windowPositionX != nil && controller.derivedConfig.windowPositionY != nil
+                    Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
+                }
             }
+
+            if !focus {
+                if let tabGroup = parent.tabGroup, tabGroup.windows.contains(window) {
+                    tabGroup.selectedWindow = selectedWindowBeforeAdd
+                } else {
+                    cascadeIfStandaloneWindow()
+                    window.orderFront(nil)
+                }
+                return
+            }
+
+            cascadeIfStandaloneWindow()
 
             controller.showWindow(self)
             window.makeKeyAndOrderFront(self)
