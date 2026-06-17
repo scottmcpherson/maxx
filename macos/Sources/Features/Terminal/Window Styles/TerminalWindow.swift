@@ -785,6 +785,7 @@ class TerminalWindow: NSWindow {
         if agentFactsModelCancellable == nil {
             agentFactsModelCancellable = agentFactsTitlebarModel.$hasFacts
                 .removeDuplicates()
+                .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in
                     self?.syncAgentFactsTitlebarVisibility()
                 }
@@ -1263,6 +1264,7 @@ private extension NSEvent {
     }
 }
 
+@MainActor
 final class AgentFactsTitlebarModel: ObservableObject {
     @Published private(set) var declared: ControlDeclaredState?
     @Published private(set) var relationship: ControlRelationship?
@@ -1328,7 +1330,7 @@ final class AgentFactsTitlebarModel: ObservableObject {
             metadata: metadata)
     }
 
-    static func hasFacts(
+    nonisolated static func hasFacts(
         declared: ControlDeclaredState?,
         relationship: ControlRelationship?,
         metadata: [String: ControlJSONValue]
@@ -1339,7 +1341,7 @@ final class AgentFactsTitlebarModel: ObservableObject {
             metadata: metadata) > 0
     }
 
-    static func visiblePillCount(
+    nonisolated static func visiblePillCount(
         declared: ControlDeclaredState?,
         relationship: ControlRelationship?,
         metadata: [String: ControlJSONValue]
