@@ -45,12 +45,14 @@ final class TerminalControlHost: ControlSessionHost {
             controller = TerminalController.newWindow(
                 ghostty,
                 withBaseConfig: config,
-                withParent: parent?.window)
+                withParent: parent?.window,
+                focus: request.focus)
         case .tab:
             controller = TerminalController.newTab(
                 ghostty,
                 from: parent?.window,
-                withBaseConfig: config)
+                withBaseConfig: config,
+                focus: request.focus)
         }
 
         // Surface the caller's explicit title in the UI (tab/window title), so
@@ -64,8 +66,10 @@ final class TerminalControlHost: ControlSessionHost {
             throw ControlError(.internalError, "failed to create terminal surface")
         }
 
-        // Bring the app forward so the new tab is actually visible to the user.
-        if !NSApp.isActive {
+        // Only explicit focus requests bring the app forward. Background
+        // control spawns are still visible in the parent tab group without
+        // stealing the caller's current focus.
+        if request.focus && !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
         }
 

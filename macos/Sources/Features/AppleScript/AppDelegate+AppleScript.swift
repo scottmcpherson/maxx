@@ -188,7 +188,8 @@ extension NSApplication {
 
         let controller = TerminalController.newWindow(
             appDelegate.ghostty,
-            withBaseConfig: baseConfig
+            withBaseConfig: baseConfig,
+            focus: parsedConfiguration.focus
         )
         var registeredControlSessionID: String?
         if parsedConfiguration.registerControlSession {
@@ -290,7 +291,8 @@ extension NSApplication {
         guard let createdController = TerminalController.newTab(
             appDelegate.ghostty,
             from: parentWindow,
-            withBaseConfig: baseConfig
+            withBaseConfig: baseConfig,
+            focus: parsedConfiguration.focus
         ) else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Failed to create tab."
@@ -376,6 +378,7 @@ extension NSApplication {
 extension NSApplication {
     private static let agentHookControlSessionMarker = "MAXX_AGENT_CONTROL_SESSION"
     private static let agentHookTitleMarker = "MAXX_AGENT_TITLE"
+    private static let agentHookFocusMarker = "MAXX_AGENT_FOCUS"
 
     /// Whether Ghostty should currently accept AppleScript interactions.
     var isAppleScriptEnabled: Bool {
@@ -404,10 +407,11 @@ extension NSApplication {
     ) -> (
         configuration: Ghostty.SurfaceConfiguration?,
         registerControlSession: Bool,
-        controlSessionTitle: String?
+        controlSessionTitle: String?,
+        focus: Bool
     )? {
         guard let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary else {
-            return (nil, false, nil)
+            return (nil, false, nil, true)
         }
 
         do {
@@ -418,7 +422,9 @@ extension NSApplication {
             let title = registerControlSession
                 ? configuration.environmentVariables.removeValue(forKey: Self.agentHookTitleMarker)
                 : nil
-            return (configuration, registerControlSession, title)
+            let rawFocus = configuration.environmentVariables.removeValue(forKey: Self.agentHookFocusMarker)
+            let focus = registerControlSession ? rawFocus == "1" : true
+            return (configuration, registerControlSession, title, focus)
         } catch {
             command.scriptErrorNumber = errAECoercionFail
             command.scriptErrorString = error.localizedDescription

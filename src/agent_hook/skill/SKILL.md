@@ -38,9 +38,10 @@ For non-agent work, run the command the user asked for:
 maxx-agent new-tab --title "API server" -- npm run dev
 ```
 
-`new-tab` opens a tab in the same window, starts the user's shell, and runs the
-command as if typed. With `--exec`, it runs the command directly. On success it
-prints JSON:
+`new-tab` opens a visible tab in the same window, keeps the parent tab active by
+default, starts the user's shell, and runs the command as if typed. Use
+`--focus` only when the user explicitly asks to switch to the child tab. With
+`--exec`, it runs the command directly. On success it prints JSON:
 
 ```json
 {
@@ -68,6 +69,8 @@ Options must come before `--`:
 - `--cwd <dir>`: working directory for the new tab; defaults to the current
   directory.
 - `--new-window`: open a new window instead of a tab.
+- `--focus`: switch to the child tab/window after creating it; default is to
+  leave the parent active.
 - `--env KEY=VALUE`: extra environment variable for the new tab; repeatable.
 - `--exec`: run the command directly instead of typing it into a shell.
 - `--wait`: with `--exec`, keep the tab open after the command exits.
@@ -150,6 +153,9 @@ matters:
 - deliver untrusted or variable prompt text out of band with `--action submit`
 - supervise several children and wait on explicit events or declarations
 - restart, archive, or audit sessions through the Control API
+
+Like `new-tab`, `sessions create` leaves the parent active by default. Pass
+`--focus` only when the user explicitly asks to switch to the created session.
 
 `sessions create --command` runs in the child's login shell. Do not interpolate
 user-provided prompt text into `--command`; shell syntax inside the prompt would

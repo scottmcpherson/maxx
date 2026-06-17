@@ -136,6 +136,7 @@ struct ControlSessionRegistryTests {
         metadata: [String: String]? = nil,
         status: String? = nil,
         location: String? = nil,
+        focus: Bool? = nil,
         action: String? = nil,
         input: String? = nil
     ) -> ControlRequest.Params {
@@ -145,7 +146,7 @@ struct ControlSessionRegistryTests {
         .init(
             id: id, title: title, cwd: cwd, command: command, env: env,
             metadata: metadata?.mapValues { .string($0) }, status: status,
-            location: location, action: action, input: input)
+            location: location, focus: focus, action: action, input: input)
     }
 
     private func request(
@@ -179,6 +180,20 @@ struct ControlSessionRegistryTests {
         #expect(host.createdRequests.first?.title == "Run checks")
         #expect(host.createdRequests.first?.command == "ls")
         #expect(host.createdRequests.first?.location == .tab)
+        #expect(host.createdRequests.first?.focus == false)
+    }
+
+    @Test func createWithFocusPassesFocusToHost() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+
+        let response = registry.handle(
+            request(.sessionsCreate, params(command: "ls", focus: true)),
+            host: host)
+
+        #expect(response.ok)
+        #expect(host.createdRequests.count == 1)
+        #expect(host.createdRequests.first?.focus == true)
     }
 
     @Test func registerSpawnedSurfaceReturnsSessionForAgentCommand() throws {
@@ -2305,6 +2320,19 @@ struct ControlSessionRegistryTests {
             host: host)
         #expect(response.ok)
         #expect(host.createdRequests.count == 1)
+        #expect(host.createdRequests.first?.focus == false)
+    }
+
+    @Test func createWithFocusRequiresTabsFocusCapability() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+
+        let response = registry.handle(
+            request(.sessionsCreate, .init(command: "ls", focus: true, caller: "trusted-automation")),
+            host: host)
+
+        #expect(response.error?.code == "unauthorized")
+        #expect(host.createdRequests.isEmpty)
     }
 
     @Test func createWithAgentTypeRequiresStateSet() {
