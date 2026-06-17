@@ -285,6 +285,7 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
     // MARK: - Titlebar Tabs
 
     private var windowButtonsBackdrop: WindowButtonsBackdropView?
+    private var windowButtonsBackdropRightConstraint: NSLayoutConstraint?
 
     private var windowDragHandle: WindowDragView?
 
@@ -349,6 +350,10 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
         }) else { return }
 
         toolbarView.subviews.first(where: { $0.className == "NSToolbarClippedItemsIndicatorViewer" })?.isHidden = true
+    }
+
+    override func syncTitlebarLeadingReservation() {
+        syncWindowButtonsBackdropReservation()
     }
 
     // This is called by macOS for native tabbing in order to add the tab bar. We hook into
@@ -451,9 +456,11 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
             /// may cause incorrect hierarchy
             ///
             /// because multiple windows are adding this around the 'same time'
+            syncWindowButtonsBackdropReservation(toolbarView: toolbarView)
             return
         }
         windowButtonsBackdrop?.removeFromSuperview()
+        windowButtonsBackdropRightConstraint = nil
         windowButtonsBackdrop = nil
 
         let view = WindowButtonsBackdropView(window: self)
@@ -462,16 +469,32 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
 
         view.translatesAutoresizingMaskIntoConstraints = false
         view.leftAnchor.constraint(equalTo: toolbarView.leftAnchor).isActive = true
-        view.rightAnchor.constraint(
+        let rightConstraint = view.rightAnchor.constraint(
             equalTo: toolbarView.leftAnchor,
             constant: titlebarLeadingReservation(
                 in: toolbarView,
                 minimum: hasWindowButtons ? 78 : 0)
-        ).isActive = true
+        )
+        rightConstraint.isActive = true
+        windowButtonsBackdropRightConstraint = rightConstraint
         view.topAnchor.constraint(equalTo: toolbarView.topAnchor).isActive = true
         view.heightAnchor.constraint(equalTo: toolbarView.heightAnchor).isActive = true
 
         windowButtonsBackdrop = view
+    }
+
+    private func syncWindowButtonsBackdropReservation(toolbarView explicitToolbarView: NSView? = nil) {
+        guard let windowButtonsBackdrop else { return }
+        let toolbarView = explicitToolbarView ?? windowButtonsBackdrop.superview?.subviews.first(where: {
+            $0.className == "NSToolbarView"
+        })
+        guard let toolbarView else { return }
+
+        windowButtonsBackdropRightConstraint?.constant = titlebarLeadingReservation(
+            in: toolbarView,
+            minimum: hasWindowButtons ? 78 : 0)
+        windowButtonsBackdrop.needsLayout = true
+        toolbarView.needsLayout = true
     }
 
     private func addWindowDragHandle(titlebarView: NSView, toolbarView: NSView) {

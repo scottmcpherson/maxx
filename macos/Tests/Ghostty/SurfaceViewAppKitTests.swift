@@ -1,6 +1,8 @@
 @testable import Ghostty
+import AppKit
 import CoreGraphics
 import Foundation
+import SwiftUI
 import Testing
 
 struct SurfaceViewAppKitTests {
@@ -96,5 +98,15 @@ struct SurfaceViewAppKitTests {
             visibleButtonMaxX: 70,
             sidebarControlsMaxX: 104,
             sidebarTrailingX: 0) == 116)
+    }
+
+    @Test func nonDraggableHostingViewHitTestUsesSuperviewCoordinates() {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 40))
+        let hostingView = NonDraggableHostingView(rootView: Color.clear)
+        hostingView.frame = NSRect(x: 80, y: 8, width: 120, height: 24)
+        container.addSubview(hostingView)
+
+        #expect(hostingView.hitTest(NSPoint(x: 40, y: 20)) == nil)
+        #expect(hostingView.hitTest(NSPoint(x: 120, y: 20)) != nil)
     }
 }

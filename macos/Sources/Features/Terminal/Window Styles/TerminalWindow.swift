@@ -804,6 +804,8 @@ class TerminalWindow: NSWindow {
         }
 
         syncAgentFactsTitlebarPosition()
+        agentFactsTitlebarView.superview?.layoutSubtreeIfNeeded()
+        syncTitlebarLeadingReservation()
     }
 
     private func syncAgentFactsTitlebarPosition(
@@ -931,6 +933,8 @@ class TerminalWindow: NSWindow {
         guard factsMaxX.isFinite, factsMaxX > 0 else { return minimum }
         return max(minimum, factsMaxX + 8)
     }
+
+    func syncTitlebarLeadingReservation() {}
 
     // MARK: Tab Key Equivalents
 

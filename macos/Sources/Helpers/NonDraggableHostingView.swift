@@ -16,7 +16,7 @@ class NonDraggableHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard !isHidden, alphaValue > 0, bounds.contains(point) else {
+        guard !isHidden, alphaValue > 0, frame.contains(point) else {
             return nil
         }
 
