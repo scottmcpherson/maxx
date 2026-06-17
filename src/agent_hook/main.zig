@@ -1095,6 +1095,30 @@ test "codex hook install preserves non Maxx hooks" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "maxx-agent-hook") == null);
 }
 
+test "codex hook install replaces legacy maxx-agent-hook hooks" {
+    const alloc = std.testing.allocator;
+    const existing =
+        \\{"hooks":{"UserPromptSubmit":[{"hooks":[
+        \\{"type":"command","command":"echo user","timeout":10},
+        \\{"type":"command","command":"x=\"$(command -v maxx-agent-hook)\"; \"$x\" codex prompt-submit","timeout":5000}
+        \\]}]}}
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+    var root = try parseHooksRoot(arena_alloc, existing);
+    const hooks = try ensureObjectField(arena_alloc, &root.object, "hooks");
+    try removeOwnedHooksFromEvent(arena_alloc, hooks, "UserPromptSubmit");
+    try appendCodexHookGroup(arena_alloc, hooks, codex_events[1]);
+
+    const rendered = try renderJson(alloc, root, .{ .whitespace = .minified });
+    defer alloc.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "echo user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "command -v maxx-agent ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "command -v maxx-agent-hook") == null);
+}
+
 test "codex config install and uninstall markers" {
     const alloc = std.testing.allocator;
     const entries = [_]TrustEntry{.{
