@@ -24,14 +24,30 @@ final class ScriptWindow: NSObject {
     /// is derived lazily from current AppKit state whenever needed.
     private weak var primaryController: BaseTerminalController?
 
+    /// Control sessions registered while building an AppleScript reply, keyed by
+    /// stable tab id. This lets the returned window vend a selected tab with its
+    /// durable session id even when a quick-exit command closed the surface before
+    /// AppleScript asks for `control session id`.
+    private var registeredControlSessionIDs: [String: String]
+
     /// `scriptWindows` in `AppDelegate+AppleScript` constructs these objects.
     ///
     /// `stableID` must match the same identity scheme used by
     /// `valueInScriptWindowsWithUniqueID:` so Cocoa can re-resolve object
     /// specifiers produced earlier in a script.
-    init(primaryController: BaseTerminalController) {
+    init(
+        primaryController: BaseTerminalController,
+        registeredControlSession: (tabID: String, sessionID: String)? = nil
+    ) {
         self.stableID = Self.stableID(primaryController: primaryController)
         self.primaryController = primaryController
+        if let registeredControlSession {
+            self.registeredControlSessionIDs = [
+                registeredControlSession.tabID: registeredControlSession.sessionID,
+            ]
+        } else {
+            self.registeredControlSessionIDs = [:]
+        }
     }
 
     /// Exposed as the AppleScript `id` property.
@@ -60,7 +76,12 @@ final class ScriptWindow: NSObject {
     @objc(tabs)
     var tabs: [ScriptTab] {
         guard NSApp.isAppleScriptEnabled else { return [] }
-        return controllers.map { ScriptTab(window: self, controller: $0) }
+        return controllers.map {
+            ScriptTab(
+                window: self,
+                controller: $0,
+                registeredControlSessionID: registeredControlSessionID(for: $0))
+        }
     }
 
     /// Exposed as the AppleScript `selected tab` property.
@@ -69,8 +90,11 @@ final class ScriptWindow: NSObject {
     @objc(selectedTab)
     var selectedTab: ScriptTab? {
         guard NSApp.isAppleScriptEnabled else { return nil }
-        guard let selectedController else { return nil }
-        return ScriptTab(window: self, controller: selectedController)
+        guard let selectedController else { return detachedRegisteredControlSessionTab }
+        return ScriptTab(
+            window: self,
+            controller: selectedController,
+            registeredControlSessionID: registeredControlSessionID(for: selectedController))
     }
 
     /// Enables unique-ID lookup for `tabs` references.
@@ -82,8 +106,31 @@ final class ScriptWindow: NSObject {
     @objc(valueInTabsWithUniqueID:)
     func valueInTabs(uniqueID: String) -> ScriptTab? {
         guard NSApp.isAppleScriptEnabled else { return nil }
-        guard let controller = controller(tabID: uniqueID) else { return nil }
-        return ScriptTab(window: self, controller: controller)
+        return tab(uniqueID: uniqueID)
+    }
+
+    func tab(
+        uniqueID: String,
+        registeredControlSessionID: String? = nil
+    ) -> ScriptTab? {
+        let rememberedSessionID = registeredControlSessionIDs[uniqueID]
+        let cachedSessionID = registeredControlSessionID
+            ?? rememberedSessionID
+        guard let controller = controller(tabID: uniqueID) else {
+            guard let rememberedSessionID else { return nil }
+            return ScriptTab(
+                window: self,
+                stableID: uniqueID,
+                registeredControlSessionID: rememberedSessionID)
+        }
+        return ScriptTab(
+            window: self,
+            controller: controller,
+            registeredControlSessionID: cachedSessionID)
+    }
+
+    func rememberRegisteredControlSession(tabID: String, sessionID: String) {
+        registeredControlSessionIDs[tabID] = sessionID
     }
 
     /// Exposed as the AppleScript `terminals` element on a window.
@@ -138,6 +185,23 @@ final class ScriptWindow: NSObject {
     /// Resolves a previously generated tab ID back to a live controller.
     private func controller(tabID: String) -> BaseTerminalController? {
         controllers.first(where: { ScriptTab.stableID(controller: $0) == tabID })
+    }
+
+    private func registeredControlSessionID(
+        for controller: BaseTerminalController
+    ) -> String? {
+        registeredControlSessionIDs[ScriptTab.stableID(controller: controller)]
+    }
+
+    private var detachedRegisteredControlSessionTab: ScriptTab? {
+        guard registeredControlSessionIDs.count == 1,
+              let registeredControlSession = registeredControlSessionIDs.first
+        else { return nil }
+
+        return ScriptTab(
+            window: self,
+            stableID: registeredControlSession.key,
+            registeredControlSessionID: registeredControlSession.value)
     }
 
     /// Live controller list for this scripting window.

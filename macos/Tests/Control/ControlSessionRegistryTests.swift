@@ -181,6 +181,102 @@ struct ControlSessionRegistryTests {
         #expect(host.createdRequests.first?.location == .tab)
     }
 
+    @Test func registerSpawnedSurfaceReturnsSessionForAgentCommand() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(title: "Codex child", workingDirectory: "/tmp")
+
+        let session = try registry.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "Codex child",
+            command: "codex --full-auto",
+            cwd: "/tmp",
+            env: [:],
+            location: .tab),
+            host: host)
+
+        #expect(session.surfaceID == surfaceID.uuidString)
+        #expect(UUID(uuidString: session.sessionID) != nil)
+        #expect(session.sessionID != surfaceID.uuidString)
+        #expect(session.command == "codex --full-auto")
+        #expect(session.cwd == "/tmp")
+        #expect(session.status == "created")
+        #expect(session.lifecycle == "running")
+        #expect(session.agentType == nil)
+
+        let fetched = registry.handle(
+            request(.sessionsGet, params(id: session.sessionID)),
+            host: host)
+        #expect(fetched.ok)
+        #expect(fetched.result?.session?.sessionID == session.sessionID)
+    }
+
+    @Test func registerSpawnedSurfaceReturnsSessionForNonAgentCommand() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(title: "Server", workingDirectory: "/srv/app")
+
+        let session = try registry.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "Server",
+            command: "npm run dev",
+            cwd: "/srv/app",
+            env: ["NODE_ENV": "development"],
+            location: .tab),
+            host: host)
+
+        #expect(session.surfaceID == surfaceID.uuidString)
+        #expect(session.command == "npm run dev")
+        #expect(session.title == "Server")
+        #expect(session.cwd == "/srv/app")
+        #expect(session.agentType == nil)
+        #expect(registry.count == 1)
+        #expect(registry.sessionID(forRegisteredSurface: surfaceID) == session.sessionID)
+    }
+
+    @Test func registeredSpawnedSurfaceSessionIDSurvivesQuickExit() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(title: "Quick", workingDirectory: "/tmp")
+
+        let session = try registry.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "Quick",
+            command: "echo done",
+            cwd: "/tmp",
+            env: [:],
+            location: .tab),
+            host: host)
+
+        host.surfaces[surfaceID]?.exists = false
+
+        #expect(registry.sessionID(forRegisteredSurface: surfaceID) == session.sessionID)
+
+        let fetched = registry.handle(
+            request(.sessionsGet, params(id: session.sessionID)),
+            host: host)
+        #expect(fetched.ok)
+        #expect(fetched.result?.session?.sessionID == session.sessionID)
+        #expect(fetched.result?.session?.lifecycle == "closed")
+    }
+
+    @Test func registerSpawnedSurfaceFailsWithoutLiveSurface() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+
+        #expect(throws: ControlError.self) {
+            _ = try registry.registerSpawnedSurface(.init(
+                surfaceID: UUID(),
+                title: "Missing",
+                command: "codex",
+                cwd: "/tmp",
+                env: [:],
+                location: .tab),
+                host: host)
+        }
+        #expect(registry.count == 0)
+    }
+
     @Test func createEchoesMetadataAndStatus() {
         let registry = makeRegistry()
         let host = FakeControlSessionHost()

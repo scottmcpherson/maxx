@@ -42,17 +42,18 @@ declare it (see _summarize_), or report the gap — do not infer it.
 
 | Surface                                                  | Reach                                                                                             | Use it for                                                                                                                                   |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maxx-agent-hook` (in-tab CLI, on PATH inside Maxx tabs) | The current window's tabs, via AppleScript                                                        | Quick visible ops: `new-tab`, `list-tabs`, `send`, `rename-tab`, `close-tab`. See the **`maxx-tabs`** skill.                                 |
+| `maxx-agent-hook` (in-tab CLI, on PATH inside Maxx tabs) | The current window's tabs, via AppleScript plus a returned control `session_id` for new tabs      | Quick visible ops: `new-tab`, `list-tabs`, `send`, `rename-tab`, `close-tab`. See the **`maxx-tabs`** skill.                                 |
 | `maxx +control sessions …` (the control API)             | API-created sessions and the current tab after explicit self-registration, by stable `session_id` | Everything a supervisor needs: spawn with a recorded command, declare state/metadata, set parent/group, `watch`/`wait`, stream group events. |
 
-Prefer the **control API** for supervised work: a `sessions create` returns a
-stable `session_id` that survives renames, restarts, and reconnects, and it
-unlocks state/metadata/group/watch. A normal, hand-opened parent tab can join
-that registry only by running `sessions register-current` from inside itself;
-the command uses the tab's per-surface proof, so it cannot adopt another tab by
-guessing a `surface_id`. (`maxx-agent-hook new-tab` opens a visible tab too, but
-it is _not_ a control session unless the tab self-registers — you can otherwise
-only observe it through `list-tabs`' hook state.)
+Prefer the **control API** for supervised work that needs create-time
+parent/group/metadata: a `sessions create` returns a stable `session_id` that
+survives renames, restarts, and reconnects, and it unlocks
+state/metadata/group/watch. `maxx-agent-hook new-tab` also returns a
+`session_id` for the visible tab it creates; keep it and use it for follow-up
+instead of rediscovering the tab or scraping transcripts. A normal, hand-opened
+parent tab can join that registry only by running `sessions register-current`
+from inside itself; the command uses the tab's per-surface proof, so it cannot
+adopt another tab by guessing a `surface_id`.
 
 Notes on invocation:
 

@@ -14,7 +14,8 @@ the hook helper translates explicit agent lifecycle events into sidebar status.
 
 ## What Gets Installed
 
-- `maxx-tabs`: open, list, rename, prompt, and close visible Maxx tabs.
+- `maxx-tabs`: open, list, rename, prompt, and close visible Maxx tabs. New
+  tabs return a durable Control API `session_id` for follow-up work.
 - `maxx-supervisor-workflows`: coordinate groups of child tabs from a parent
   session.
 - Hook configuration for supported CLIs so Maxx can display agent-declared
@@ -36,6 +37,11 @@ explicit CLI flags still take precedence.
 Supported agent status indicators come from explicit hook events, control API
 declarations, or terminal-native mechanical facts such as bell/progress escape
 sequences. They do not come from scraping terminal output.
+
+`maxx-agent-hook new-tab` returns a `session_id` handle for the tab it creates,
+but that handle is only a control/session identity. Child answers and workflow
+results still need explicit declarations such as `set-summary`, metadata, or an
+event payload.
 
 See [the no-inference rule]({{ '/no-inference.html' | relative_url }}) for the
 full product constraint.

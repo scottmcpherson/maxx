@@ -1,6 +1,6 @@
 ---
 name: feature-drive
-description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work in a dedicated git worktree, implement, build and exercise the running app with Peekaboo screenshots, attach evidence, shepherd the Greptile GitHub review to a clean pass, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
+description: Pick up a Maxx Linear issue (team Maxx, MAX-NNN) and drive it to done — fetch the issue, work in a dedicated git worktree, implement, build and exercise the running app, record verification evidence, shepherd the Greptile GitHub review to a clean pass, and move the Linear issue through its statuses. Use when the user points at a Linear issue ID or URL ("/feature-drive MAX-123", "drive MAX-12", "pick up the next issue"), asks what to work on next from Linear, or hands off an issue for implementation.
 ---
 
 # Drive a Linear issue to done
@@ -37,17 +37,17 @@ Maxx is a native macOS terminal app (a Ghostty fork, built with Zig). Read `AGEN
    ```
    open -n --env MAXX_CONTROL_DIR=/tmp/maxx-control-max-<n> zig-out/Maxx.app
    ```
-   Pass that same `MAXX_CONTROL_DIR` to every `ghostty +control …` call (the control API is the headless way to drive and observe a change end to end). Take **screenshots with Peekaboo** — the `peekaboo` CLI runs from Bash with no per-call approval and captures a window by pid/bundle id even when it isn't frontmost (so no Spaces juggling, and no computer-use MCP). Target the dev build by pid or `--app com.scottmcpherson.maxx.debug` (plain `Maxx` collides with an installed build):
+   Pass that same `MAXX_CONTROL_DIR` to every `ghostty +control …` call (the control API is the headless way to drive and observe a change end to end). For UI behavior that needs visual proof, take **screenshots with Peekaboo** — the `peekaboo` CLI runs from Bash with no per-call approval and captures a window by pid/bundle id even when it isn't frontmost (so no Spaces juggling, and no computer-use MCP). Target the dev build by pid or `--app com.scottmcpherson.maxx.debug` (plain `Maxx` collides with an installed build):
    ```
    peekaboo image --pid <dev pid> --mode window --path shot.png
    ```
-   Use `peekaboo click` / `peekaboo type` for any UI a human would drive. Then `Read` the PNG. Every acceptance criterion must be observably met in the screenshots; a criterion with no supporting screenshot gets called out in the report, never assumed.
+   Use `peekaboo click` / `peekaboo type` for any UI a human would drive. Inspect any screenshots you capture before relying on them. Evidence can also be control responses, command output, test output, logs, or PR/CI state; use the form that best proves each acceptance criterion without adding unnecessary upload work.
 3. Skip the old `/code-review` preflight. The PR review authority for this flow is Greptile in GitHub after the PR is opened.
 
 ## 4. Close the loop
 
 1. Tick the acceptance-criteria checkboxes in the issue description (`save_issue`); any box left unticked gets a written reason.
-2. Attach each screenshot (or clip) to the issue: `prepare_attachment_upload` (contentType `image/png` or `video/mp4`, exact byte `size`) → PUT the raw bytes to the returned signed URL with its headers verbatim → `create_attachment_from_upload`. One file at a time — signed URLs expire fast, so prepare/PUT/finalize each before starting the next. Screenshots can also embed inline in the completion comment.
+2. Do **not** require screenshot or video uploads to Linear. Attach media only when the user asks for it, when a visual regression is hard to explain in text, or when the artifact materially improves review. Otherwise, record the relevant verification evidence in the completion comment: commands run, runtime behavior observed, control responses, CI links, and any caveats. Local screenshot paths are fine to mention when useful, but they are not required deliverables.
 3. Completion comment: what changed (areas/files), how it was verified (what you ran, what you watched in the app), and anything deferred and why.
 4. Commit on the branch following the repo's commit convention (the `writing-commit-messages` skill — `<subsystem>: <summary>`, e.g. `terminal: fix tab title crash`), then push and open a PR (`gh pr create`) with `Fixes MAX-<n>` in the body so Linear links and closes it on merge. Move the issue to **In Review** (`save_issue`).
 5. **Shepherd the Greptile review.** Greptile reviews the PR in GitHub as `greptile-apps[bot]`. It may post a top-level **Greptile Summary**, inline comments with `P1`/`P2` badges (`P1` = must-fix, `P2` = should-fix), and a footer naming the last reviewed commit plus a **Re-trigger Greptile** link. Wait for it, re-checking every minute or so (`gh pr view <n> --comments` plus the PR's review threads). Before treating any result as current, verify the Greptile footer or review metadata references the PR's current head SHA. If nothing has landed ~10 minutes after the PR opened or after a push, use Greptile's **Re-trigger Greptile** link from the bot footer when present; do **not** request `@codex review`. Then loop, **at most 3 rounds**:
