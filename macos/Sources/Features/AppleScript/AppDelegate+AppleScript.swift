@@ -181,23 +181,41 @@ extension NSApplication {
             return nil
         }
 
-        let baseConfig: Ghostty.SurfaceConfiguration?
-        if let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary {
-            do {
-                baseConfig = try Ghostty.SurfaceConfiguration(scriptRecord: scriptRecord)
-            } catch {
-                command.scriptErrorNumber = errAECoercionFail
-                command.scriptErrorString = error.localizedDescription
-                return nil
-            }
-        } else {
-            baseConfig = nil
+        guard let parsedConfiguration = scriptSurfaceConfiguration(for: command) else {
+            return nil
         }
+        let baseConfig = parsedConfiguration.configuration
 
         let controller = TerminalController.newWindow(
             appDelegate.ghostty,
             withBaseConfig: baseConfig
         )
+        if parsedConfiguration.registerControlSession {
+            guard let surface = controller.surfaceTree.root?.leftmostLeaf() else {
+                controller.closeWindowImmediately()
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = "Created window has no terminal surface."
+                return nil
+            }
+
+            do {
+                _ = try appDelegate.registerAgentHookSpawnedSurface(
+                    surfaceID: surface.id,
+                    title: controller.titleOverride,
+                    configuration: baseConfig ?? Ghostty.SurfaceConfiguration(),
+                    location: .window)
+            } catch let error as ControlError {
+                controller.closeWindowImmediately()
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = error.message
+                return nil
+            } catch {
+                controller.closeWindowImmediately()
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = error.localizedDescription
+                return nil
+            }
+        }
         let createdWindowID = ScriptWindow.stableID(primaryController: controller)
 
         if let scriptWindow = scriptWindows.first(where: { $0.stableID == createdWindowID }) {
@@ -239,18 +257,10 @@ extension NSApplication {
             return nil
         }
 
-        let baseConfig: Ghostty.SurfaceConfiguration?
-        if let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary {
-            do {
-                baseConfig = try Ghostty.SurfaceConfiguration(scriptRecord: scriptRecord)
-            } catch {
-                command.scriptErrorNumber = errAECoercionFail
-                command.scriptErrorString = error.localizedDescription
-                return nil
-            }
-        } else {
-            baseConfig = nil
+        guard let parsedConfiguration = scriptSurfaceConfiguration(for: command) else {
+            return nil
         }
+        let baseConfig = parsedConfiguration.configuration
 
         let targetWindow = command.evaluatedArguments?["window"] as? ScriptWindow
         let parentWindow: NSWindow?
@@ -274,6 +284,33 @@ extension NSApplication {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Failed to create tab."
             return nil
+        }
+
+        if parsedConfiguration.registerControlSession {
+            guard let surface = createdController.surfaceTree.root?.leftmostLeaf() else {
+                createdController.closeTabImmediately(registerRedo: false)
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = "Created tab has no terminal surface."
+                return nil
+            }
+
+            do {
+                _ = try appDelegate.registerAgentHookSpawnedSurface(
+                    surfaceID: surface.id,
+                    title: createdController.titleOverride,
+                    configuration: baseConfig ?? Ghostty.SurfaceConfiguration(),
+                    location: .tab)
+            } catch let error as ControlError {
+                createdController.closeTabImmediately(registerRedo: false)
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = error.message
+                return nil
+            } catch {
+                createdController.closeTabImmediately(registerRedo: false)
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = error.localizedDescription
+                return nil
+            }
         }
 
         let createdTabID = ScriptTab.stableID(controller: createdController)
@@ -300,6 +337,8 @@ extension NSApplication {
 
 @MainActor
 extension NSApplication {
+    private static let agentHookControlSessionMarker = "MAXX_AGENT_HOOK_CONTROL_SESSION"
+
     /// Whether Ghostty should currently accept AppleScript interactions.
     var isAppleScriptEnabled: Bool {
         guard let appDelegate = delegate as? AppDelegate else { return true }
@@ -316,6 +355,29 @@ extension NSApplication {
         }
 
         return true
+    }
+
+    /// Parse the optional AppleScript surface configuration and strip the
+    /// private hook marker before the terminal process is launched. The marker is
+    /// an in-process request from `maxx-agent-hook new-tab` to create a durable
+    /// Control API session for this spawn; it is never passed to the child.
+    fileprivate func scriptSurfaceConfiguration(
+        for command: NSScriptCommand
+    ) -> (configuration: Ghostty.SurfaceConfiguration?, registerControlSession: Bool)? {
+        guard let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary else {
+            return (nil, false)
+        }
+
+        do {
+            var configuration = try Ghostty.SurfaceConfiguration(scriptRecord: scriptRecord)
+            let marker = configuration.environmentVariables.removeValue(
+                forKey: Self.agentHookControlSessionMarker)
+            return (configuration, marker == "1")
+        } catch {
+            command.scriptErrorNumber = errAECoercionFail
+            command.scriptErrorString = error.localizedDescription
+            return nil
+        }
     }
 
     /// Discovers all currently alive terminal surfaces across normal and quick

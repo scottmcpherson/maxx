@@ -99,6 +99,32 @@ final class ScriptTab: NSObject {
         return ScriptTerminal(surfaceView: surface)
     }
 
+    /// Exposed as the AppleScript `control session id` property.
+    ///
+    /// This is empty for ordinary tabs and for restored records from a previous
+    /// app run. `maxx-agent-hook new-tab` marks its spawn request so the app
+    /// registers the new live surface immediately; after that this property
+    /// returns the durable Control API `session_id` for follow-up work.
+    @objc(controlSessionID)
+    var controlSessionID: String {
+        guard NSApp.isAppleScriptEnabled else { return "" }
+        guard let controller else { return "" }
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return "" }
+
+        if let focused = controller.focusedSurface,
+           controller.surfaceTree.contains(focused),
+           let sessionID = appDelegate.controlSessionID(forLiveSurface: focused.id) {
+            return sessionID
+        }
+
+        for surface in controller.surfaceTree.root?.leaves() ?? [] {
+            if let sessionID = appDelegate.controlSessionID(forLiveSurface: surface.id) {
+                return sessionID
+            }
+        }
+        return ""
+    }
+
     /// Best-effort native window containing this tab.
     var parentWindow: NSWindow? {
         guard NSApp.isAppleScriptEnabled else { return nil }

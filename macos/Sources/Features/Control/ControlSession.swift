@@ -449,6 +449,28 @@ enum ControlValidation {
         return result
     }
 
+    /// Validate an already parsed environment map. Used by in-process spawn
+    /// paths that receive `Ghostty.SurfaceConfiguration` after AppleScript has
+    /// converted `KEY=VALUE` entries to a dictionary.
+    static func validateEnv(_ env: [String: String]) throws -> [String: String] {
+        guard env.count <= ControlSession.Limits.maxEnvEntries else {
+            throw ControlError(
+                .invalidRequest,
+                "more than \(ControlSession.Limits.maxEnvEntries) environment entries")
+        }
+        for key in env.keys {
+            guard !key.isEmpty else {
+                throw ControlError(.invalidRequest, "environment entry has an empty key")
+            }
+            guard isValidEnvKey(key) else {
+                throw ControlError(
+                    .invalidRequest,
+                    "environment key '\(key)' contains invalid characters")
+            }
+        }
+        return env
+    }
+
     static func isValidEnvKey(_ key: String) -> Bool {
         key.allSatisfy { character in
             guard let ascii = character.asciiValue else { return false }

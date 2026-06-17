@@ -10,6 +10,17 @@ struct ControlCreateRequest {
     var location: ControlLocation
 }
 
+/// Explicit facts captured from an in-process spawn path that already created
+/// a visible terminal surface and now needs a durable control session record.
+struct ControlSpawnedSurfaceRegistration {
+    var surfaceID: UUID
+    var title: String?
+    var command: String?
+    var cwd: String?
+    var env: [String: String]
+    var location: ControlLocation
+}
+
 enum ControlLocation: String, Codable {
     case tab
     case window
@@ -651,16 +662,7 @@ final class ControlSessionRegistry {
             throw ControlError(.unauthorized, "current tab registration proof failed")
         }
 
-        if let existing = sessions.values
-            .filter({
-                $0.surfaceID == surfaceID
-                    && !$0.restoredFromPreviousRun
-                    && !$0.canceled
-                    && !$0.archived
-                    && liveSurface(of: $0, host: host) != nil
-            })
-            .sorted(by: { $0.createdAt < $1.createdAt })
-            .first {
+        if let existing = liveSession(for: surfaceID, host: host) {
             return view(of: existing, host: host)
         }
 
@@ -690,6 +692,82 @@ final class ControlSessionRegistry {
         recordMechanical(
             session, name: "registered", group: nil, createdAt: createdAt, pid: handle.pid)
         return view(of: session, host: host)
+    }
+
+    /// Register a surface that Maxx just created through an in-process spawn
+    /// path outside `sessions.create`, such as the AppleScript-backed
+    /// `maxx-agent-hook new-tab` command.
+    ///
+    /// This is deliberately not a public Control API adoption endpoint: callers
+    /// cannot name arbitrary surface ids over the socket. The app passes the
+    /// UUID it just received from its own spawn path, then this method creates
+    /// the durable control session record that external callers can use later.
+    /// Restored records are ignored for idempotence so a previous-run record is
+    /// never rebound to a live surface by a matching persisted surface id.
+    func registerSpawnedSurface(
+        _ registration: ControlSpawnedSurfaceRegistration,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        let title = try ControlValidation.validateTitle(registration.title)
+        let command = try ControlValidation.validateCommand(registration.command)
+        let cwd = try ControlValidation.validateCwd(registration.cwd)
+        let env = try ControlValidation.validateEnv(registration.env)
+
+        guard let handle = host.surface(for: registration.surfaceID) else {
+            throw ControlError(.internalError, "spawned surface no longer exists")
+        }
+
+        if let existing = liveSession(for: registration.surfaceID, host: host) {
+            return view(of: existing, host: host)
+        }
+
+        let createdAt = now()
+        var session = ControlSession(
+            id: makeID(),
+            surfaceID: registration.surfaceID,
+            title: title,
+            command: command,
+            cwd: cwd ?? handle.workingDirectory,
+            env: env,
+            location: registration.location,
+            status: "created",
+            metadata: [:],
+            group: nil,
+            parentID: nil,
+            agentType: nil,
+            createdAt: createdAt,
+            updatedAt: createdAt,
+            lastSeenAt: createdAt,
+            canceled: false)
+        session.lastObservedLifecycle = handle.isProcessAlive
+            ? ControlLifecycle.running.rawValue
+            : ControlLifecycle.exited.rawValue
+        store(&session, touch: false)
+        recordMechanical(
+            session, name: "created", group: nil, createdAt: createdAt, pid: handle.pid)
+        return view(of: session, host: host)
+    }
+
+    /// Return the durable session id for a live, current-run surface if this
+    /// registry owns one. Used only by in-process UI/AppleScript wrappers.
+    func sessionID(forLiveSurface surfaceID: UUID, host: ControlSessionHost) -> String? {
+        liveSession(for: surfaceID, host: host)?.id.uuidString
+    }
+
+    private func liveSession(
+        for surfaceID: UUID,
+        host: ControlSessionHost
+    ) -> ControlSession? {
+        sessions.values
+            .filter({
+                $0.surfaceID == surfaceID
+                    && !$0.restoredFromPreviousRun
+                    && !$0.canceled
+                    && !$0.archived
+                    && liveSurface(of: $0, host: host) != nil
+            })
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .first
     }
 
     private func get(

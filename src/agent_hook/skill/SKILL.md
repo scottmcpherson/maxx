@@ -81,7 +81,21 @@ maxx-agent-hook new-tab --title "API server" -- npm run dev
 
 The new tab opens in the same window, starts the user's shell, and runs the
 command as if it had been typed. The tab stays open after the command exits.
-On success it prints JSON with the new tab, terminal, and window ids.
+On success it prints JSON with the new tab, terminal, window, and control
+session ids:
+
+```json
+{
+  "tab_id": "...",
+  "terminal_id": "...",
+  "window_id": "...",
+  "session_id": "..."
+}
+```
+
+Keep the returned `session_id` for follow-up through `maxx +control sessions
+get <session_id>`, lifecycle/read APIs, and supported actions. Keep
+`terminal_id` too when you need low-level paste/key input with this helper.
 
 Always pass `--title` with a short, meaningful name (2–4 words). Name the
 task when there is one ("Fix auth bug", not "Claude session"); fall back to
@@ -171,17 +185,19 @@ Closing is immediate and does not ask for confirmation — it kills whatever
 is running in the tab. Only close tabs you created, or tabs the user
 explicitly asked to close.
 
-`new-tab` prints the ids of the tab and terminal it created; keep them when
-you plan to manage the tab later, and use `list-tabs` to rediscover them.
+`new-tab` prints the ids of the control session, tab, and terminal it created.
+Use the `session_id` for durable follow-up through the Control API. Use
+`terminal_id` for low-level `send` input, and use `list-tabs` to rediscover
+visible tabs when needed.
 
 ## Supervising several child tabs
 
 For more than ad-hoc multi-tab work — fanning a task out across child tabs,
 tracking explicit per-child state/metadata, grouping them, and waiting on or
-summarizing the group — use the **`maxx-supervisor-workflows`** skill. It drives
-the control API (`maxx +control`), which gives each child a stable session id
-plus explicit state, metadata, parent/group, and watch/wait primitives. This
-skill stays focused on opening and managing individual tabs.
+summarizing the group — use the **`maxx-supervisor-workflows`** skill. This
+skill opens visible tabs and returns their durable `session_id`; the supervisor
+skill shows how to use that handle with explicit state, metadata, parent/group,
+and watch/wait primitives.
 
 ## Notes
 

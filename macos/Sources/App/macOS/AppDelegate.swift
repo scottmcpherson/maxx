@@ -478,6 +478,51 @@ class AppDelegate: NSObject,
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 
+    /// Register a tab/window surface that `maxx-agent-hook new-tab` just created
+    /// through the AppleScript bridge. This keeps the durable Control API handle
+    /// tied to the explicit spawn path without exposing arbitrary surface-id
+    /// adoption over the external control socket.
+    @MainActor
+    func registerAgentHookSpawnedSurface(
+        surfaceID: UUID,
+        title: String?,
+        configuration: Ghostty.SurfaceConfiguration,
+        location: ControlLocation
+    ) throws -> String {
+        guard let controlServer else {
+            throw ControlError(.internalError, "control server is unavailable")
+        }
+
+        let session = try controlServer.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: title,
+            command: Self.controlRecordedCommand(from: configuration),
+            cwd: configuration.workingDirectory,
+            env: configuration.environmentVariables,
+            location: location))
+        return session.sessionID
+    }
+
+    /// Return the control session id for a live surface if this app run owns
+    /// one. Used by AppleScript tab objects after `maxx-agent-hook new-tab`
+    /// registers the newly spawned surface.
+    @MainActor
+    func controlSessionID(forLiveSurface surfaceID: UUID) -> String? {
+        controlServer?.sessionID(forLiveSurface: surfaceID)
+    }
+
+    private static func controlRecordedCommand(
+        from configuration: Ghostty.SurfaceConfiguration
+    ) -> String? {
+        if let command = configuration.command, !command.isEmpty {
+            return command
+        }
+
+        let input = configuration.initialInput?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return input?.isEmpty == false ? input : nil
+    }
+
     /// This is called when the application is already open and someone double-clicks the icon
     /// or clicks the dock icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

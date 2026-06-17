@@ -517,6 +517,40 @@ struct ControlSessionPersistenceTests {
         #expect(registry2.count == 2)
     }
 
+    @Test func registerSpawnedSurfaceAfterRestartDoesNotRebindRestoredRecord() throws {
+        let url = tempStoreURL()
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry1, host1) = makeRegistry(url: url, clock: clock)
+        let created = registry1.handle(
+            request(.sessionsCreate, .init(command: "old")), host: host1)
+        let oldSessionID = try #require(created.result?.session?.sessionID)
+        let surfaceID = try #require(UUID(uuidString: created.result?.session?.surfaceID ?? ""))
+        registry1.flush()
+
+        let (registry2, host2) = makeRegistry(url: url, clock: clock)
+        host2.surfaces[surfaceID] = FakeControlSessionHost.Surface()
+
+        let restored = registry2.handle(
+            request(.sessionsGet, .init(id: oldSessionID)), host: host2)
+            .result?.session
+        #expect(restored?.lifecycle == "closed")
+        #expect(restored?.restored == true)
+
+        let spawned = try registry2.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "New child",
+            command: "codex",
+            cwd: "/tmp",
+            env: [:],
+            location: .tab),
+            host: host2)
+        #expect(spawned.sessionID != oldSessionID)
+        #expect(spawned.surfaceID == surfaceID.uuidString)
+        #expect(spawned.lifecycle == "running")
+        #expect(spawned.restored == nil)
+        #expect(registry2.count == 2)
+    }
+
     @Test func restoredSessionCanBeRestarted() {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

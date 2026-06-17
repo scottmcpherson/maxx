@@ -28,7 +28,8 @@ const usage =
     \\  --wait           With --exec, keep the tab open after the command exits.
     \\  --help           Show this help.
     \\
-    \\Prints JSON with the new tab, terminal, and window ids on success.
+    \\Prints JSON with the new tab, terminal, window, and control session ids
+    \\on success.
     \\
 ;
 
@@ -47,6 +48,7 @@ const script_template =
     \\  set titleText to item 7 of argv
     \\  set envList to {}
     \\  if (count of argv) > 7 then set envList to items 8 thru -1 of argv
+    \\  set envList to envList & {"MAXX_AGENT_HOOK_CONTROL_SESSION=1"}
     \\  tell application id "%APP_ID%"
     \\    set cfg to {command:commandText, initial input:inputText, initial working directory:cwdPath, wait after command:(waitFlag is "1"), environment variables:envList}
     \\    if createWindow is "1" then
@@ -86,10 +88,20 @@ const script_template =
     \\        exit repeat
     \\      end if
     \\    end repeat
-    \\    return tabId & linefeed & termId & linefeed & winId
+    \\    set sessionId to control session id of newTab
+    \\    return tabId & linefeed & termId & linefeed & winId & linefeed & sessionId
     \\  end tell
     \\end run
 ;
+
+pub const ScriptOutput = struct {
+    tab_id: []const u8,
+    terminal_id: []const u8,
+    window_id: []const u8,
+    session_id: []const u8,
+};
+
+const ScriptOutputError = error{MissingSessionID};
 
 pub const Options = struct {
     title: ?[]const u8 = null,
@@ -169,10 +181,12 @@ pub fn run(alloc: Allocator, args: []const [:0]u8) !void {
 
     const stdout_raw = try osa.runScript(arena, script, script_args.items);
 
-    var lines = std.mem.splitScalar(u8, stdout_raw, '\n');
-    const tab_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
-    const terminal_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
-    const window_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
+    const output = parseScriptOutput(stdout_raw) catch |err| switch (err) {
+        error.MissingSessionID => osa.fail(
+            "new-tab created a tab but did not return a control session id",
+            .{},
+        ),
+    };
 
     var buffer: [1024]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buffer);
@@ -180,14 +194,31 @@ pub fn run(alloc: Allocator, args: []const [:0]u8) !void {
     var json: std.json.Stringify = .{ .writer = writer, .options = .{} };
     try json.beginObject();
     try json.objectField("tab_id");
-    try json.write(tab_id);
+    try json.write(output.tab_id);
     try json.objectField("terminal_id");
-    try json.write(terminal_id);
+    try json.write(output.terminal_id);
     try json.objectField("window_id");
-    try json.write(window_id);
+    try json.write(output.window_id);
+    try json.objectField("session_id");
+    try json.write(output.session_id);
     try json.endObject();
     try writer.writeByte('\n');
     try writer.flush();
+}
+
+pub fn parseScriptOutput(stdout_raw: []const u8) ScriptOutputError!ScriptOutput {
+    var lines = std.mem.splitScalar(u8, stdout_raw, '\n');
+    const tab_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
+    const terminal_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
+    const window_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
+    const session_id = std.mem.trim(u8, lines.next() orelse "", &std.ascii.whitespace);
+    if (session_id.len == 0) return error.MissingSessionID;
+    return .{
+        .tab_id = tab_id,
+        .terminal_id = terminal_id,
+        .window_id = window_id,
+        .session_id = session_id,
+    };
 }
 
 pub fn parseOptions(alloc: Allocator, args: []const []const u8) Allocator.Error!ParseResult {
@@ -479,6 +510,21 @@ test "new-tab option parsing errors" {
     try testing.expect((try parseOptions(arena, &.{"--title"})) == .err);
     try testing.expect((try parseOptions(arena, &.{ "--env", "NOEQUALS" })) == .err);
     try testing.expect((try parseOptions(arena, &.{ "--wait", "ls" })) == .err);
+}
+
+test "new-tab script output includes control session id" {
+    const output = try parseScriptOutput("tab-1\nTERM-1\nwindow-1\nSESSION-1\n");
+    try std.testing.expectEqualStrings("tab-1", output.tab_id);
+    try std.testing.expectEqualStrings("TERM-1", output.terminal_id);
+    try std.testing.expectEqualStrings("window-1", output.window_id);
+    try std.testing.expectEqualStrings("SESSION-1", output.session_id);
+}
+
+test "new-tab script output requires control session id" {
+    try std.testing.expectError(
+        error.MissingSessionID,
+        parseScriptOutput("tab-1\nTERM-1\nwindow-1\n"),
+    );
 }
 
 test "inject permission mode into agent commands" {

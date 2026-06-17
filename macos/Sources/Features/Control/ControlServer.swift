@@ -76,6 +76,31 @@ final class ControlServer {
         MainActor.assumeIsolated { registry.flush() }
     }
 
+    /// Register a surface created by an in-process app path such as the
+    /// AppleScript-backed `maxx-agent-hook new-tab` command. This is not exposed
+    /// over the socket and therefore cannot be used by external clients to adopt
+    /// arbitrary visible tabs by id.
+    @MainActor
+    func registerSpawnedSurface(
+        _ registration: ControlSpawnedSurfaceRegistration
+    ) throws -> ControlSessionView {
+        guard listenFD >= 0 else {
+            throw ControlError(.internalError, "control server is not running")
+        }
+        return try registry.registerSpawnedSurface(
+            registration,
+            host: host)
+    }
+
+    /// Return the control session id for a live, current-run surface if the
+    /// registry owns one. Used by AppleScript object properties after a tab has
+    /// been created and registered.
+    @MainActor
+    func sessionID(forLiveSurface surfaceID: UUID) -> String? {
+        guard listenFD >= 0 else { return nil }
+        return registry.sessionID(forLiveSurface: surfaceID, host: host)
+    }
+
     private func startThrowing() throws {
         try prepareDirectory()
         // The control directory is now validated as ours and private (0700, a real
