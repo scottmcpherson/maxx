@@ -1230,18 +1230,6 @@ extension Ghostty {
         }
     }
 
-    // MARK: Agent-Reported Metadata Badge
-
-    /// A compact chip listing agent-reported metadata (Control API
-    /// `set-metadata` / `update` / `remove-metadata` / `clear-metadata`, MAX-4).
-    ///
-    /// Rendered in titlebar chrome by `AgentFactsTitlebarView`, deliberately
-    /// outside terminal content. It collapses to a single chip (with a key count)
-    /// and reveals the full key/value list in a popover, so a session with many
-    /// keys never clutters the surface. It renders only what an agent explicitly
-    /// reported; Maxx never infers any of it from terminal output and never
-    /// treats a key as authoritative workflow state — the chip and popover are
-    /// display affordances only.
     /// A compact badge showing a tab's explicit parent/group relationship
     /// (MAX-6): a group-label chip and/or a "child" indicator. Shown only when a
     /// caller has explicitly placed the tab in a group or under a parent through
@@ -1345,6 +1333,18 @@ extension Ghostty {
         }
     }
 
+    // MARK: Agent-Reported Metadata Badge
+
+    /// A compact chip listing agent-reported metadata (Control API
+    /// `set-metadata` / `update` / `remove-metadata` / `clear-metadata`, MAX-4).
+    ///
+    /// Rendered in titlebar chrome by `AgentFactsTitlebarView`, deliberately
+    /// outside terminal content. It collapses to a single chip (with a key count)
+    /// and reveals the full key/value list in a popover, so a session with many
+    /// keys never clutters the surface. It renders only what an agent explicitly
+    /// reported; Maxx never infers any of it from terminal output and never
+    /// treats a key as authoritative workflow state; the chip and popover are
+    /// display affordances only.
     struct AgentMetadataBadge: View {
         let metadata: [String: ControlJSONValue]
 
