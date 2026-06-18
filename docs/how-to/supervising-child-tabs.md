@@ -20,9 +20,14 @@ watch explicit events without hiding work in detached background processes.
    metadata.
 4. Keep the `session_id` returned by `maxx-agent new-tab` or
    `maxx +control sessions create`, and use it to prompt, interrupt, restart,
-   inspect, or close child tabs when needed.
+   inspect, retrieve declared results, or close child tabs when needed.
 5. Treat completion or blockage as explicit agent-declared state, not inferred
    terminal output.
+
+To read a child's explicit answer, call `maxx +control sessions get
+<session_id>` and inspect `result`, `result_source`, and `result_at`. If
+`result` is null, the child has not declared an answer yet; wait for a `kind:
+result` event or ask it to call `sessions set-result`.
 
 ## Useful References
 

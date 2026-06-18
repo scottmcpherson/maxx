@@ -1,10 +1,11 @@
 @testable import Ghostty
+import Foundation
 import Testing
 
 struct TerminalAgentActivityTests {
     @Test func parsesJSONEvent() throws {
         let event = try #require(TerminalAgentActivityEvent.parse(jsonLine: """
-        {"version":1,"surface_id":"surface-1","agent":"claude","event":"prompt-submit","state":"running","session_id":"s1","prompt_title":"Fix codex titles"}
+        {"version":1,"surface_id":"surface-1","agent":"claude","event":"prompt-submit","state":"running","session_id":"s1","prompt_title":"Fix codex titles","transcript_path":"/tmp/claude.jsonl"}
         """))
 
         #expect(event.surfaceID == "surface-1")
@@ -13,6 +14,7 @@ struct TerminalAgentActivityTests {
         #expect(event.state == "running")
         #expect(event.sessionID == "s1")
         #expect(event.promptTitle == "Fix codex titles")
+        #expect(event.transcriptPath == "/tmp/claude.jsonl")
     }
 
     @Test func eventProvidesDisplayTitle() throws {
@@ -51,6 +53,97 @@ struct TerminalAgentActivityTests {
         #expect(CodexSessionIndexEntry.threadName(for: "s1", in: contents) == "a-new-title")
         #expect(CodexSessionIndexEntry.threadName(for: "missing", in: contents) == nil)
         #expect(CodexSessionIndexEntry.threadName(for: " ", in: contents) == nil)
+    }
+
+    @Test func codexTranscriptResultUsesTaskCompleteMessage() {
+        let contents = """
+        {"type":"event_msg","payload":{"type":"agent_message","message":"draft","phase":"analysis"}}
+        {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback final"}],"phase":"final_answer"}}
+        {"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"task complete final"}}
+        """
+
+        #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "codex") == "task complete final")
+    }
+
+    @Test func claudeTranscriptResultUsesAssistantEndTurnText() {
+        let contents = """
+        {"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"tool request"}]}}
+        {"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Claude final"},{"type":"tool_use","name":"Edit"}]}}
+        """
+
+        #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "claude") == "Claude final")
+    }
+
+    @Test func claudeTranscriptResultRequiresEndTurnStopReason() {
+        let contents = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"missing stop reason"}]}}
+        {"type":"assistant","message":{"role":"assistant","stop_reason":null,"content":[{"type":"text","text":"null stop reason"}]}}
+        """
+
+        #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "claude") == nil)
+    }
+
+    @Test func transcriptResultIgnoresUnsupportedAgents() {
+        let contents = """
+        {"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"final"}]}}
+        """
+
+        #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "unknown") == nil)
+    }
+
+    @Test func transcriptResultTruncatesToByteLimit() throws {
+        let contents = """
+        {"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"\(String(repeating: "x", count: 200))"}}
+        """
+
+        let result = try #require(AgentTranscriptResultExtractor.result(
+            fromJSONL: contents,
+            agent: "codex",
+            maxBytes: 80))
+        #expect(result.utf8.count <= 80)
+        #expect(result.contains("[Result truncated by Maxx]"))
+    }
+
+    @Test func transcriptResultReadsTranscriptPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maxx-transcript-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let transcript = directory.appendingPathComponent("codex.jsonl", isDirectory: false)
+        let contents = """
+        {"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"file final"}}
+        """
+        try contents.write(to: transcript, atomically: true, encoding: .utf8)
+
+        #expect(AgentTranscriptResultExtractor.result(
+            fromTranscriptAt: transcript.path,
+            agent: "codex",
+            allowedRoots: [directory]) == "file final")
+    }
+
+    @Test func transcriptResultRejectsDisallowedPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maxx-transcript-test-\(UUID().uuidString)", isDirectory: true)
+        let allowed = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maxx-transcript-allowed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: allowed)
+        }
+
+        let transcript = directory.appendingPathComponent("codex.jsonl", isDirectory: false)
+        let contents = """
+        {"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"file final"}}
+        """
+        try contents.write(to: transcript, atomically: true, encoding: .utf8)
+
+        #expect(AgentTranscriptResultExtractor.result(
+            fromTranscriptAt: transcript.path,
+            agent: "codex",
+            allowedRoots: [allowed]) == nil)
     }
 
     @Test func reducerMapsLifecycleStates() throws {

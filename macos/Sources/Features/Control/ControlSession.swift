@@ -110,6 +110,22 @@ struct ControlSession {
     /// Who declared `summary` (defaults to `agent`).
     var summarySource: String?
 
+    // MARK: Agent-declared result (MAX-25)
+    //
+    // A bounded final-answer/result channel for parent-child coordination. This
+    // is distinct from summary: summary is a short status line for UI display,
+    // while result is the child agent's explicit answer text for another caller
+    // to retrieve by session id. It is set only by a `set-result` declaration or
+    // by a structured agent hook transcript capture. Maxx never derives it from
+    // terminal scrollback or agent prose.
+
+    /// Latest declared child result text, or nil until declared.
+    var result: String?
+    /// When `result` was last declared.
+    var resultAt: Date?
+    /// Who declared `result` (defaults to `agent`).
+    var resultSource: String?
+
     /// True when this record was rehydrated from disk on app launch rather than
     /// created live this run (MAX-5). A mechanical fact about *this* run — Maxx
     /// knows it loaded the record from its own store — not anything inferred
@@ -180,6 +196,9 @@ struct ControlSession {
         static let maxReasonLength = 1024
         static let maxPayloadBytes = 8192
         static let maxSummaryLength = 1024
+        /// Max UTF-8 bytes for an agent-declared session result. This keeps the
+        /// durable registry bounded while still allowing a full short answer.
+        static let maxResultBytes = 16 * 1024
         static let maxGroupLength = 128
         static let maxAgentTypeLength = 128
     }
@@ -335,6 +354,21 @@ enum ControlValidation {
                 "summary exceeds \(ControlSession.Limits.maxSummaryLength) characters")
         }
         return summary
+    }
+
+    /// Validate an agent-declared result. The limit is byte-based because the
+    /// result is persisted in the registry and returned over JSON.
+    static func validateResult(_ result: String?) throws -> String {
+        guard let result, !result.isEmpty else {
+            throw ControlError(.invalidRequest, "result must not be empty")
+        }
+        let byteCount = result.utf8.count
+        guard byteCount <= ControlSession.Limits.maxResultBytes else {
+            throw ControlError(
+                .invalidRequest,
+                "result exceeds \(ControlSession.Limits.maxResultBytes) bytes")
+        }
+        return result
     }
 
     static func validateCommand(_ command: String?) throws -> String? {
@@ -653,6 +687,9 @@ extension ControlSession: Codable {
         case summary
         case summaryAt = "summary_at"
         case summarySource = "summary_source"
+        case result
+        case resultAt = "result_at"
+        case resultSource = "result_source"
     }
 
     init(from decoder: Decoder) throws {
@@ -706,7 +743,10 @@ extension ControlSession: Codable {
                 String.self, forKey: .workflowStateSource),
             summary: try container.decodeIfPresent(String.self, forKey: .summary),
             summaryAt: try container.decodeIfPresent(Date.self, forKey: .summaryAt),
-            summarySource: try container.decodeIfPresent(String.self, forKey: .summarySource))
+            summarySource: try container.decodeIfPresent(String.self, forKey: .summarySource),
+            result: try container.decodeIfPresent(String.self, forKey: .result),
+            resultAt: try container.decodeIfPresent(Date.self, forKey: .resultAt),
+            resultSource: try container.decodeIfPresent(String.self, forKey: .resultSource))
     }
 
     func encode(to encoder: Encoder) throws {
@@ -741,5 +781,8 @@ extension ControlSession: Codable {
         try container.encodeIfPresent(summary, forKey: .summary)
         try container.encodeIfPresent(summaryAt, forKey: .summaryAt)
         try container.encodeIfPresent(summarySource, forKey: .summarySource)
+        try container.encodeIfPresent(result, forKey: .result)
+        try container.encodeIfPresent(resultAt, forKey: .resultAt)
+        try container.encodeIfPresent(resultSource, forKey: .resultSource)
     }
 }

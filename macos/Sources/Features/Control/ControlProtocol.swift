@@ -83,6 +83,14 @@ enum ControlMethod: String, Codable {
     /// Set the short human-readable summary shown alongside the workflow state.
     case sessionsSetSummary = "sessions.set-summary"
 
+    // MARK: Agent-declared result (MAX-25)
+
+    /// Set a bounded child-answer/result text for retrieval by session id.
+    case sessionsSetResult = "sessions.set-result"
+
+    /// Clear the currently declared result for a fresh run or explicit reset.
+    case sessionsClearResult = "sessions.clear-result"
+
     // MARK: Persistent session registry (MAX-5)
 
     /// Declare the session's agent type (e.g. `claude-code`, `codex`), persisted
@@ -232,6 +240,12 @@ struct ControlRequest: Codable {
         /// the `state` field above, validated against the workflow vocabulary.)
         var summary: String?
 
+        // MARK: Agent-declared result (MAX-25)
+
+        /// Bounded child-answer/result text for `set-result`. This is separate
+        /// from `summary`, which remains a short display line.
+        var result: String?
+
         // MARK: Persistent session registry (MAX-5)
 
         /// Agent type to declare (`set-agent-type`) or attach at `create` time,
@@ -284,7 +298,7 @@ struct ControlRequest: Codable {
             case reason, signal
             case timeoutMs = "timeout_ms"
             case since
-            case summary
+            case summary, result
             case agentType = "agent_type"
             case parent
             case group, tab, all
@@ -366,6 +380,13 @@ struct ControlSessionView: Codable, Equatable {
     var summaryAt: String?
     /// Who declared `summary`, if ever.
     var summarySource: String?
+    /// Agent-declared result text for child-answer retrieval. Omitted until
+    /// declared via `set-result`; never inferred from terminal scrollback.
+    var result: String?
+    /// When `result` was last declared (ISO-8601), if ever.
+    var resultAt: String?
+    /// Who declared `result`, if ever.
+    var resultSource: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -388,6 +409,9 @@ struct ControlSessionView: Codable, Equatable {
         case summary
         case summaryAt = "summary_at"
         case summarySource = "summary_source"
+        case result
+        case resultAt = "result_at"
+        case resultSource = "result_source"
     }
 }
 

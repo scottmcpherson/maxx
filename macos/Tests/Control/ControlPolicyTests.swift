@@ -303,7 +303,14 @@ struct ControlPolicyMappingTests {
     }
 
     @Test func stateDeclarationsMapToStateSet() {
-        for method in [ControlMethod.sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary] {
+        for method in [
+            ControlMethod.sessionsDeclareState,
+            .sessionsEmitEvent,
+            .sessionsSetState,
+            .sessionsSetSummary,
+            .sessionsSetResult,
+            .sessionsClearResult,
+        ] {
             #expect(ControlPolicyMapping.capability(for: method, params: params()) == .stateSet)
         }
     }
@@ -480,6 +487,42 @@ struct ControlPolicyEnforcementTests {
                   params: .init(id: id, metadata: ["k": .string("v")])),
             host: host)
         #expect(localMeta.ok)
+    }
+
+    @Test func resultWriteDenialHappensBeforeLookupOrMutation() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let id = seedSession(registry, host)
+
+        let deniedExisting = registry.handle(
+            .init(token: "t", method: .sessionsSetResult,
+                  params: .init(id: id, result: "answer", caller: "readonly-external")),
+            host: host)
+        #expect(deniedExisting.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        let after = registry.handle(
+            .init(token: "t", method: .sessionsGet, params: .init(id: id)),
+            host: host)
+        #expect(after.result?.session?.result == nil)
+        #expect(after.result?.session?.lastEventSeq == nil)
+
+        let deniedMissing = registry.handle(
+            .init(token: "t", method: .sessionsSetResult,
+                  params: .init(id: UUID().uuidString, result: "answer", caller: "readonly-external")),
+            host: host)
+        #expect(deniedMissing.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        let deniedClearExisting = registry.handle(
+            .init(token: "t", method: .sessionsClearResult,
+                  params: .init(id: id, caller: "readonly-external")),
+            host: host)
+        #expect(deniedClearExisting.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        let deniedClearMissing = registry.handle(
+            .init(token: "t", method: .sessionsClearResult,
+                  params: .init(id: UUID().uuidString, caller: "readonly-external")),
+            host: host)
+        #expect(deniedClearMissing.error?.code == ControlErrorCode.unauthorized.rawValue)
     }
 
     @Test func existingLocalFlowsAreUnchanged() {

@@ -1,6 +1,6 @@
 ---
 name: maxx-agent
-description: Open, manage, and supervise visible tabs in the Maxx terminal. Use when the user asks to open or create a new tab, terminal, session, thread, or window; start another Claude Code or Codex session; inspect, rename, message, or close tabs; or coordinate several child tabs through explicit Control API state, metadata, events, and summaries.
+description: Open, manage, and supervise visible tabs in the Maxx terminal. Use when the user asks to open or create a new tab, terminal, session, thread, or window; start another Claude Code or Codex session; inspect, rename, message, or close tabs; or coordinate several child tabs through explicit Control API state, metadata, events, summaries, and results.
 ---
 
 <!-- managed by maxx-agent; do not edit (reinstalled from Maxx settings) -->
@@ -14,7 +14,7 @@ follow-up.
 
 This is the no-inference rule: Maxx is the visible terminal-native
 runtime/control plane, not the workflow brain. Use only explicit facts: ids,
-lifecycle, timestamps, and state/summary/metadata/events declared through the
+lifecycle, timestamps, and state/summary/result/metadata/events declared through the
 Control API or hook path. Never derive a child's result by scraping terminal
 output, reading process names, tab titles, cwd, branch names, PR URLs, or idle
 time. If a status has no explicit declaration, ask the child to declare it or
@@ -59,6 +59,10 @@ maxx +control sessions get <session-id>
 maxx +control sessions action <session-id> --action submit --input "status?"
 maxx +control sessions wait <session-id> --lifecycle exited --timeout 10m
 ```
+
+Use `sessions get` for child answers. Read `.result.session.result`,
+`.result.session.result_source`, and `.result.session.result_at`; do not ask the
+child again unless `result` is null.
 
 Keep `terminal_id` only for low-level paste/key interactions through
 `maxx-agent send`, such as permission menus that need a key press.
@@ -186,7 +190,7 @@ child=$(maxx +control sessions create \
   | jq -r .result.session.session_id)
 
 maxx +control sessions action "$child" --action submit \
-  --input 'Fix the parser overflow in src/parse.zig; run the parser tests. When done, declare a summary and state through maxx +control.'
+  --input 'Fix the parser overflow in src/parse.zig; run the parser tests. When done, declare a summary, state, and result through maxx +control.'
 ```
 
 Ask children to declare their own status from inside their tab:
@@ -194,6 +198,7 @@ Ask children to declare their own status from inside their tab:
 ```sh
 self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
 maxx +control sessions set-summary "$self" --summary "Parser overflow fixed; parser tests pass"
+maxx +control sessions set-result "$self" --result "Parser overflow fixed in src/parse.zig; parser tests pass."
 maxx +control sessions set-state "$self" --state complete
 maxx +control sessions set-metadata "$self" --key linear.issue --value MAX-123
 maxx +control sessions emit-event "$self" --event tests.passed --payload-json '{"filter":"parser"}'
@@ -212,6 +217,19 @@ A mechanical `exited` event does not mean success. Pair it with a declared
 `complete` or `failed` state and an agent-authored summary before reporting a
 result.
 
+Retrieve the child's explicit answer by session id:
+
+```sh
+maxx +control sessions get "$child" \
+  | jq '.result.session | {result, result_source, result_at}'
+maxx +control sessions events "$child" \
+  | jq '.result.events[] | select(.kind=="result")'
+```
+
+If `result` is null, the child has not declared an answer yet. Wait for a
+`kind: result` event or ask the child to run `sessions set-result`; do not
+recover the answer from scrollback.
+
 Intervene only on explicit need:
 
 ```sh
@@ -224,13 +242,13 @@ Synthesize from declared facts:
 
 ```sh
 maxx +control sessions list --group parser-work \
-  | jq '.result.sessions[] | {id:.session_id, state:.workflow_state, summary, metadata, lifecycle}'
+  | jq '.result.sessions[] | {id:.session_id, state:.workflow_state, summary, result, metadata, lifecycle}'
 maxx +control sessions events "$child"
 ```
 
-Build your final report from declared `workflow_state`, `summary`, metadata,
-events, and mechanical lifecycle. Do not use scrollback, titles, paths, process
-names, or idle time as proof.
+Build your final report from declared `workflow_state`, `summary`, `result`,
+metadata, events, and mechanical lifecycle. Do not use scrollback, titles, paths,
+process names, or idle time as proof.
 
 ## Notes
 

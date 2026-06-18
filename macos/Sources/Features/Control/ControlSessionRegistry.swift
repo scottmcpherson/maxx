@@ -315,6 +315,10 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setState(request.params, host: host)))
             case .sessionsSetSummary:
                 return .success(.init(session: try setSummary(request.params, host: host)))
+            case .sessionsSetResult:
+                return .success(.init(session: try setResult(request.params, host: host)))
+            case .sessionsClearResult:
+                return .success(.init(session: try clearResult(request.params, host: host)))
             case .sessionsSetAgentType:
                 return .success(.init(session: try setAgentType(request.params, host: host)))
             case .sessionsSetParent:
@@ -764,6 +768,25 @@ final class ControlSessionRegistry {
     /// child process to still be alive by the time AppleScript reads the property.
     func sessionID(forRegisteredSurface surfaceID: UUID) -> String? {
         currentRunSession(for: surfaceID)?.id.uuidString
+    }
+
+    /// Declare a result from the trusted in-process hook path for a surface that
+    /// was registered in this app run. External callers must use
+    /// `sessions.set-result`, which goes through capability policy.
+    func declareResultForRegisteredSurface(
+        surfaceID: UUID,
+        result rawResult: String,
+        source rawSource: String?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView? {
+        guard var session = currentRunSession(for: surfaceID) else { return nil }
+        let result = try ControlValidation.validateResult(rawResult)
+        let source = try ControlValidation.validateSource(rawSource)
+        return try setResult(
+            &session,
+            result: result,
+            source: source,
+            host: host)
     }
 
     private func liveSession(
@@ -1219,6 +1242,79 @@ final class ControlSessionRegistry {
         return view(of: session, host: host)
     }
 
+    /// Set the bounded child-answer result (`set-result`). This is intentionally
+    /// separate from summary and workflow state: it is the explicit answer text a
+    /// parent can retrieve by session id, not a status badge.
+    private func setResult(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let result = try ControlValidation.validateResult(params?.result)
+        let source = try ControlValidation.validateSource(params?.source)
+        return try setResult(
+            &session,
+            result: result,
+            source: source,
+            host: host)
+    }
+
+    private func setResult(
+        _ session: inout ControlSession,
+        result: String,
+        source: String,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        let at = now()
+        let handle = liveSurface(of: session, host: host)
+        let sessionID = session.id.uuidString
+
+        session.result = result
+        session.resultAt = at
+        session.resultSource = source
+        record(
+            &session,
+            kind: .result,
+            name: "result",
+            source: source,
+            message: "declared",
+            payload: .object(["bytes": .integer(Int64(result.utf8.count))]),
+            createdAt: at,
+            pid: handle?.pid)
+        store(&session)
+        Self.logger.info(
+            "declared result for session \(sessionID, privacy: .public) from \(source, privacy: .public)")
+        return view(of: session, host: host)
+    }
+
+    /// Clear the current result without touching summary or workflow state.
+    private func clearResult(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let source = try ControlValidation.validateSource(params?.source)
+        let handle = liveSurface(of: session, host: host)
+
+        guard session.result != nil || session.resultAt != nil || session.resultSource != nil else {
+            return view(of: session, host: host)
+        }
+
+        session.result = nil
+        session.resultAt = nil
+        session.resultSource = nil
+        record(
+            &session,
+            kind: .result,
+            name: "result.cleared",
+            source: source,
+            message: "cleared",
+            createdAt: now(),
+            pid: handle?.pid)
+        store(&session)
+        return view(of: session, host: host)
+    }
+
     /// Declare the session's agent type (`set-agent-type`, MAX-5), e.g.
     /// `claude-code`. An explicit agent self-declaration recorded with its source
     /// and timestamp and persisted, so a restored session keeps its declared
@@ -1477,6 +1573,9 @@ final class ControlSessionRegistry {
         session.summary = nil
         session.summaryAt = nil
         session.summarySource = nil
+        session.result = nil
+        session.resultAt = nil
+        session.resultSource = nil
         // The fresh surface starts running; baseline observation accordingly so
         // reconciliation emits exactly one exit event for the new run.
         session.lastObservedLifecycle = ControlLifecycle.running.rawValue
@@ -2241,7 +2340,10 @@ final class ControlSessionRegistry {
             workflowStateSource: session.workflowStateSource,
             summary: session.summary,
             summaryAt: session.summaryAt.map(Self.iso8601.string(from:)),
-            summarySource: session.summarySource)
+            summarySource: session.summarySource,
+            result: session.result,
+            resultAt: session.resultAt.map(Self.iso8601.string(from:)),
+            resultSource: session.resultSource)
     }
 
     /// Build the wire view of an audit-log entry.

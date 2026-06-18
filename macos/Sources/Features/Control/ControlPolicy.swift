@@ -549,9 +549,10 @@ enum ControlPolicyMapping {
             default: return nil
             }
         case .sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary,
-             .sessionsSetAgentType:
+             .sessionsSetResult, .sessionsClearResult, .sessionsSetAgentType:
             // Declaring the agent type (MAX-5) is an agent self-declaration, gated
-            // like the other declared-fact verbs by `state:set`.
+            // like the other declared-fact verbs by `state:set`. Results (MAX-25)
+            // are likewise explicit agent-declared facts, not output readback.
             return .stateSet
         case .sessionsUpdate:
             // `update` writes caller-owned `status` and/or `metadata`. A `status`

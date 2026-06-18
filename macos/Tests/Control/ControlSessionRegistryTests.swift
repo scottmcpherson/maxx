@@ -245,6 +245,7 @@ struct ControlSessionRegistryTests {
         #expect(session.title == "Server")
         #expect(session.cwd == "/srv/app")
         #expect(session.agentType == nil)
+        #expect(session.result == nil)
         #expect(registry.count == 1)
         #expect(registry.sessionID(forRegisteredSurface: surfaceID) == session.sessionID)
     }
@@ -1274,6 +1275,143 @@ struct ControlSessionRegistryTests {
         #expect(response.error?.code == "invalid_request")
     }
 
+    @Test func setResultStoresAnswerAndRecordsAuditEntry() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, surface) = makeSession(registry, host)
+
+        let response = registry.handle(
+            request(.sessionsSetResult, .init(
+                id: id, result: "Use the smaller parser buffer.", source: "codex")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.result == "Use the smaller parser buffer.")
+        #expect(response.result?.session?.resultAt != nil)
+        #expect(response.result?.session?.resultSource == "codex")
+        #expect(response.result?.session?.summary == nil)
+        #expect(response.result?.session?.workflowState == nil)
+
+        let fetched = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(fetched.result?.session?.result == "Use the smaller parser buffer.")
+
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        let entry = log.result?.events?.last
+        #expect(entry?.kind == "result")
+        #expect(entry?.name == "result")
+        #expect(entry?.source == "codex")
+        #expect(entry?.message == "declared")
+        #expect(entry?.payload == .object(["bytes": .integer(30)]))
+        #expect(entry?.surfaceID == surface.uuidString)
+        #expect(entry?.pid == 4242)
+    }
+
+    @Test func setResultIsIndependentOfWorkflowStateAndSummary() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        _ = registry.handle(
+            request(.sessionsSetState, .init(id: id, state: "blocked")), host: host)
+        _ = registry.handle(
+            request(.sessionsSetSummary, .init(id: id, summary: "Waiting on review")), host: host)
+
+        let response = registry.handle(
+            request(.sessionsSetResult, .init(id: id, result: "Reviewed and fixed.")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.result == "Reviewed and fixed.")
+        #expect(response.result?.session?.workflowState == "blocked")
+        #expect(response.result?.session?.summary == "Waiting on review")
+    }
+
+    @Test func setResultRejectsOversizedResult() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        let oversized = String(
+            repeating: "x",
+            count: ControlSession.Limits.maxResultBytes + 1)
+
+        let response = registry.handle(
+            request(.sessionsSetResult, .init(id: id, result: oversized)),
+            host: host)
+        #expect(response.error?.code == "invalid_request")
+
+        let fetched = registry.handle(request(.sessionsGet, .init(id: id)), host: host)
+        #expect(fetched.result?.session?.result == nil)
+        #expect(fetched.result?.session?.lastEventSeq == nil)
+    }
+
+    @Test func clearResultRemovesAnswerAndRecordsAuditEntry() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+        _ = registry.handle(
+            request(.sessionsSetResult, .init(id: id, result: "done")), host: host)
+
+        let response = registry.handle(
+            request(.sessionsClearResult, .init(id: id, source: "parent")),
+            host: host)
+        #expect(response.ok)
+        #expect(response.result?.session?.result == nil)
+        #expect(response.result?.session?.resultAt == nil)
+        #expect(response.result?.session?.resultSource == nil)
+
+        let log = registry.handle(request(.sessionsEvents, .init(id: id)), host: host)
+        #expect(log.result?.events?.last?.kind == "result")
+        #expect(log.result?.events?.last?.name == "result.cleared")
+        #expect(log.result?.events?.last?.message == "cleared")
+    }
+
+    @Test func watchSnapshotAndEventsExposeResult() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let (id, _) = makeSession(registry, host)
+
+        var (plan, snapshot) = try registry.beginWatch(.init(id: id), host: host)
+        #expect(snapshot.session?.result == nil)
+
+        _ = registry.handle(
+            request(.sessionsSetResult, .init(id: id, result: "answer")), host: host)
+        let update = registry.pollWatch(plan, host: host)
+        #expect(update.messages.contains {
+            $0.type == "event" && $0.event?.kind == "result" && $0.event?.name == "result"
+        })
+
+        (plan, snapshot) = try registry.beginWatch(.init(id: id), host: host)
+        _ = plan
+        #expect(snapshot.session?.result == "answer")
+    }
+
+    @Test func trustedHookResultCaptureUsesRegisteredSurfaceOnly() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let surfaceID = host.addManualSurface(title: "Codex child", workingDirectory: "/tmp")
+        let session = try registry.registerSpawnedSurface(.init(
+            surfaceID: surfaceID,
+            title: "Codex child",
+            command: "codex --full-auto",
+            cwd: "/tmp",
+            env: [:],
+            location: .tab),
+            host: host)
+
+        let captured = try registry.declareResultForRegisteredSurface(
+            surfaceID: surfaceID,
+            result: "child answer",
+            source: "codex-transcript",
+            host: host)
+        #expect(captured?.sessionID == session.sessionID)
+        #expect(captured?.result == "child answer")
+        #expect(captured?.resultSource == "codex-transcript")
+
+        let missing = try registry.declareResultForRegisteredSurface(
+            surfaceID: UUID(),
+            result: "orphan answer",
+            source: "codex-transcript",
+            host: host)
+        #expect(missing == nil)
+    }
+
     @Test func declaredWorkflowStateIsSeparateFromStatus() {
         // Regression: the free-form `status` / `declare-state` machinery must not
         // feed the displayed workflow state. A fresh session has neither a
@@ -1322,11 +1460,14 @@ struct ControlSessionRegistryTests {
             request(.sessionsSetState, .init(id: id, state: "complete")), host: host)
         _ = registry.handle(
             request(.sessionsSetSummary, .init(id: id, summary: "done")), host: host)
+        _ = registry.handle(
+            request(.sessionsSetResult, .init(id: id, result: "previous run answer")), host: host)
 
         let restarted = registry.handle(request(.sessionsRestart, .init(id: id)), host: host)
         #expect(restarted.ok)
         #expect(restarted.result?.session?.workflowState == nil)
         #expect(restarted.result?.session?.summary == nil)
+        #expect(restarted.result?.session?.result == nil)
 
         // The fresh surface shows no badge until the agent re-declares.
         let newSurface = restarted.result!.session!.surfaceID

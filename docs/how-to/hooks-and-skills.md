@@ -39,9 +39,10 @@ declarations, or terminal-native mechanical facts such as bell/progress escape
 sequences. They do not come from scraping terminal output.
 
 `maxx-agent new-tab` returns a `session_id` handle for the tab it creates,
-but that handle is only a control/session identity. Child answers and workflow
-results still need explicit declarations such as `set-summary`, metadata, or an
-event payload.
+and the child can expose an explicit answer through `sessions set-result`.
+Parents should retrieve that answer with `sessions get <session_id>` and read
+`result`, `result_source`, and `result_at`. Workflow state still needs explicit
+declarations such as `set-state`, `set-summary`, metadata, or event payloads.
 
 See [the no-inference rule]({{ '/no-inference.html' | relative_url }}) for the
 full product constraint.
