@@ -511,6 +511,22 @@ class AppDelegate: NSObject,
         controlServer?.sessionID(forRegisteredSurface: surfaceID)
     }
 
+    /// Declare a child-agent result captured from a structured hook transcript.
+    /// Returns nil for unregistered surfaces so ordinary tabs do not acquire
+    /// synthetic result state.
+    @MainActor
+    func declareAgentResultForRegisteredSurface(
+        surfaceID: UUID,
+        result: String,
+        source: String
+    ) throws -> ControlSessionView? {
+        guard let controlServer else { return nil }
+        return try controlServer.declareResultForRegisteredSurface(
+            surfaceID: surfaceID,
+            result: result,
+            source: source)
+    }
+
     private static func controlRecordedCommand(
         from configuration: Ghostty.SurfaceConfiguration
     ) -> String? {

@@ -101,6 +101,23 @@ final class ControlServer {
         return registry.sessionID(forRegisteredSurface: surfaceID)
     }
 
+    /// Declare a bounded result for a current-run registered surface from the
+    /// trusted in-process agent hook path. Public callers must use the socket API
+    /// so capability policy can run before any session lookup.
+    @MainActor
+    func declareResultForRegisteredSurface(
+        surfaceID: UUID,
+        result: String,
+        source: String?
+    ) throws -> ControlSessionView? {
+        guard listenFD >= 0 else { return nil }
+        return try registry.declareResultForRegisteredSurface(
+            surfaceID: surfaceID,
+            result: result,
+            source: source,
+            host: host)
+    }
+
     private func startThrowing() throws {
         try prepareDirectory()
         // The control directory is now validated as ours and private (0700, a real

@@ -74,6 +74,9 @@ struct ControlSessionPersistenceTests {
         session.summary = "All green"
         session.summaryAt = date
         session.summarySource = "release-agent"
+        session.result = "Child final answer"
+        session.resultAt = date
+        session.resultSource = "codex-transcript"
         session.lastSeenAt = date
         session.restartCount = 2
         session.appendEvent(
@@ -95,6 +98,9 @@ struct ControlSessionPersistenceTests {
         #expect(restored?.metadata["run.id"] == .integer(42))
         #expect(restored?.workflowState == .complete)
         #expect(restored?.summary == "All green")
+        #expect(restored?.result == "Child final answer")
+        #expect(restored?.resultAt == date)
+        #expect(restored?.resultSource == "codex-transcript")
         #expect(restored?.restartCount == 2)
         #expect(restored?.events.count == 1)
         #expect(restored?.events.first?.name == "complete")

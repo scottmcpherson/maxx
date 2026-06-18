@@ -287,6 +287,32 @@ the current declared state is left unchanged. `set-summary` is independent of
 `set-state`, so an agent can update the displayed text without changing status.
 Both record an audit entry and are surfaced in `get` / `list` / `watch`.
 
+### Agent-declared result (child answer retrieval)
+
+`set-result` stores a bounded answer/result text on the session so a supervisor
+can retrieve a child agent's final response by `session_id` without reading
+scrollback or asking the child again.
+
+```bash
+maxx +control sessions set-result <session_id> --result "Use parser branch B."
+maxx +control sessions get <session_id> | jq .result.session.result
+maxx +control sessions clear-result <session_id>
+```
+
+The session view includes `result`, `result_at`, and `result_source` once
+declared. `summary` remains the short display line; `result` is the child answer
+payload. `set-result` records a `kind: result` audit entry, and `clear-result`
+records `result.cleared`. Results are persisted with the session record and kept
+when archived for inspection. A session restart clears the previous run's
+`result` together with the previous run's workflow badge and summary. Public
+result writes are gated by `state:set`; result reads are part of `sessions.get`
+/ `sessions.list` and are gated by `tabs:list`.
+
+Maxx can also declare results from structured Codex/Claude hook transcripts when
+the hook provides a transcript path and final-answer record. This reads CLI
+transcript JSON records from an explicit hook payload, not terminal scrollback,
+and only captures answer text; it never derives workflow truth from prose.
+
 ### Agent type and parent (persisted)
 
 An agent declares its type explicitly; Maxx stores it verbatim and persists it
@@ -460,6 +486,8 @@ The `method` field mirrors the proposed REST shape:
 | `sessions.clear-metadata`   | `DELETE /control/v1/sessions/{id}/meta`        | Agent clears all metadata for the session.                                          |
 | `sessions.set-state`        | `PUT /control/v1/sessions/{id}/workflow-state` | Agent declares a validated workflow state for display.                              |
 | `sessions.set-summary`      | `PUT /control/v1/sessions/{id}/summary`        | Agent sets the human-readable summary shown with the state.                         |
+| `sessions.set-result`       | `PUT /control/v1/sessions/{id}/result`         | Agent sets the bounded child-answer result returned in the session view.            |
+| `sessions.clear-result`     | `DELETE /control/v1/sessions/{id}/result`      | Agent clears the current result.                                                    |
 | `sessions.set-agent-type`   | `PUT /control/v1/sessions/{id}/agent-type`     | Agent declares its type (e.g. `claude-code`); persisted, never inferred.            |
 | `sessions.set-parent`       | `PUT /control/v1/sessions/{id}/parent`         | Set/clear the parent edge after creation; rejects self/missing/cycle (MAX-6).       |
 | `sessions.set-group`        | `PUT /control/v1/sessions/{id}/group`          | Set/clear group membership (Maxx-owned membership event).                           |
@@ -471,10 +499,10 @@ The `method` field mirrors the proposed REST shape:
 
 `declare-state`, `emit-event`, the metadata mutations (`set-metadata` /
 `remove-metadata` / `clear-metadata`, and the metadata merge in `update`),
-`set-state`, and `set-summary` append to a
+`set-state`, `set-summary`, `set-result`, and `clear-result` append to a
 per-session, append-only audit log. Each entry is fully auditable and
 carries a monotonic `seq`, a `kind` (`state` / `event` / `metadata` /
-`workflow-state` / `summary`, plus `lifecycle` for the `archive` / `restart`
+`workflow-state` / `summary` / `result`, plus `lifecycle` for the `archive` / `restart`
 actions Maxx records itself), the declared `name` (the affected metadata key, or
 `*` for a clear; a metadata removal/clear also carries `message`
 `removed`/`cleared`), the
@@ -585,6 +613,9 @@ Errors are predictable and documented:
 - `env`: ≤ 256 `KEY=VALUE` entries; keys match `[A-Za-z0-9_]`.
 - `summary` (`set-summary`) ≤ 1024 chars; `set-state` accepts only the fixed
   workflow vocabulary above.
+- `result` (`set-result`) ≤ 16384 UTF-8 bytes. Oversized public declarations are
+  rejected with `invalid_request`; automatic hook capture truncates deliberately
+  to stay inside the same durable bound.
 
 `sessions.update` uses **merge** semantics for metadata (provided keys overwrite
 or add) and only accepts `status`/`metadata` — any attempt to set server-owned
@@ -872,7 +903,8 @@ when the stream (or a `get`/`list`/`events` read) next observes the kernel state
 
 ### Events agents own (`source_kind: agent`)
 
-`declare-state`, `emit-event`, `set-metadata`, `set-state`, and `set-summary`
+`declare-state`, `emit-event`, `set-metadata`, `set-state`, `set-summary`, and
+`set-result` / `clear-result`
 (see above) flow onto the stream verbatim. Maxx validates the envelope (name
 characters, payload is well-formed JSON within the size limit, source length) and
 routes it, but assigns no meaning to the agent's `type`/`payload`.

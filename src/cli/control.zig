@@ -49,6 +49,9 @@ const Verb = enum {
     // MAX-3 agent-declared workflow state verbs.
     @"set-state",
     @"set-summary",
+    // MAX-25 agent-declared child result verbs.
+    @"set-result",
+    @"clear-result",
     // MAX-5 persistent session registry verbs.
     @"set-agent-type",
     // MAX-6 parent-child tab group verbs.
@@ -104,6 +107,7 @@ const Command = struct {
     reason: ?[]const u8 = null,
     signal: ?[]const u8 = null,
     summary: ?[]const u8 = null,
+    result: ?[]const u8 = null,
     // MAX-5 persistent session registry fields.
     agent_type: ?[]const u8 = null,
     parent: ?[]const u8 = null,
@@ -144,6 +148,8 @@ const Command = struct {
                 .@"set-metadata" => "sessions.set-metadata",
                 .@"set-state" => "sessions.set-state",
                 .@"set-summary" => "sessions.set-summary",
+                .@"set-result" => "sessions.set-result",
+                .@"clear-result" => "sessions.clear-result",
                 .@"set-agent-type" => "sessions.set-agent-type",
                 .@"set-parent" => "sessions.set-parent",
                 .@"set-group" => "sessions.set-group",
@@ -273,6 +279,9 @@ const ParseError = error{
 ///     `<value>` is one of `running`, `needsInput`, `blocked`, `complete`,
 ///     `failed`. An unknown value is rejected.
 ///   * `sessions set-summary <session_id> --summary <text> [--source <name>]`
+///   * `sessions set-result <session_id> --result <text> [--source <name>]`:
+///     set the bounded child-answer result returned by `sessions get`.
+///   * `sessions clear-result <session_id> [--source <name>]`: clear it.
 ///
 /// Persistent session registry (MAX-5 — declared fields the registry persists
 /// across app restarts):
@@ -366,8 +375,8 @@ pub fn run(alloc: Allocator) !u8 {
                 "error: unknown subcommand.\n" ++
                     "  sessions: create, get, list, update, cancel, action, wait, watch, " ++
                     "archive, restart, events, declare-state, emit-event, set-metadata, " ++
-                    "remove-metadata, clear-metadata, set-state, set-summary, set-agent-type, " ++
-                    "set-parent, set-group, register-current\n" ++
+                    "remove-metadata, clear-metadata, set-state, set-summary, set-result, " ++
+                    "clear-result, set-agent-type, set-parent, set-group, register-current\n" ++
                     "  stream:   watch, wait\n" ++
                     "  event:    emit\n" ++
                     "  policy:   check, sources, validate\n",
@@ -687,6 +696,8 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.signal = v;
         } else if (try flagValue(alloc, arg, iter, "--summary")) |v| {
             cmd.summary = v;
+        } else if (try flagValue(alloc, arg, iter, "--result")) |v| {
+            cmd.result = v;
         } else if (try flagValue(alloc, arg, iter, "--agent-type")) |v| {
             cmd.agent_type = v;
         } else if (try flagValue(alloc, arg, iter, "--parent")) |v| {
@@ -771,14 +782,14 @@ fn parseVerb(group: Group, s: []const u8) ?Verb {
 
 fn sessionsVerb(s: []const u8) ?Verb {
     const candidates = [_]Verb{
-        .create,             .@"register-current", .get,
-        .list,               .update,              .cancel,
-        .action,             .wait,                .watch,
-        .archive,            .restart,             .events,
-        .@"declare-state",   .@"emit-event",       .@"set-metadata",
-        .@"set-state",       .@"set-summary",      .@"set-group",
-        .@"remove-metadata", .@"clear-metadata",   .@"set-agent-type",
-        .@"set-parent",
+        .create,            .@"register-current", .get,
+        .list,              .update,              .cancel,
+        .action,            .wait,                .watch,
+        .archive,           .restart,             .events,
+        .@"declare-state",  .@"emit-event",       .@"set-metadata",
+        .@"set-state",      .@"set-summary",      .@"set-result",
+        .@"clear-result",   .@"set-group",        .@"remove-metadata",
+        .@"clear-metadata", .@"set-agent-type",   .@"set-parent",
     };
     inline for (candidates) |v| {
         if (std.mem.eql(u8, s, @tagName(v))) return v;
@@ -954,6 +965,10 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     }
     if (cmd.summary) |v| {
         try json.objectField("summary");
+        try json.write(v);
+    }
+    if (cmd.result) |v| {
+        try json.objectField("result");
         try json.write(v);
     }
     if (cmd.agent_type) |v| {
@@ -1357,6 +1372,70 @@ test "buildRequest set-summary includes summary" {
         "Waiting on user confirmation for release notes wording.",
         params.get("summary").?.string,
     );
+}
+
+test "parseCommand set-result with flags" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions set-result ID-25 --result \"child answer\" --source codex",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .@"set-result");
+    try testing.expectEqualStrings("ID-25", cmd.id.?);
+    try testing.expectEqualStrings("child answer", cmd.result.?);
+    try testing.expectEqualStrings("codex", cmd.source.?);
+    try testing.expectEqualStrings("sessions.set-result", cmd.method());
+}
+
+test "buildRequest set-result includes result" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"set-result",
+        .id = "id-25",
+        .result = "The child answered once.",
+        .source = "codex",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.set-result", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("id-25", params.get("id").?.string);
+    try testing.expectEqualStrings("The child answered once.", params.get("result").?.string);
+    try testing.expectEqualStrings("codex", params.get("source").?.string);
+}
+
+test "buildRequest clear-result includes method and id" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cmd: Command = .{
+        .verb = .@"clear-result",
+        .id = "id-25",
+    };
+    const json = try buildRequest(alloc, cmd, "tok");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings("sessions.clear-result", root.get("method").?.string);
+    const params = root.get("params").?.object;
+    try testing.expectEqualStrings("id-25", params.get("id").?.string);
 }
 
 test "parseCommand set-agent-type with flags" {

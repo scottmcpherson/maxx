@@ -131,6 +131,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
     let sessionID: String?
     let turnID: String?
     let promptTitle: String?
+    let transcriptPath: String?
     let pid: Int?
     let timestamp: TimeInterval?
 
@@ -165,6 +166,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         case sessionID = "session_id"
         case turnID = "turn_id"
         case promptTitle = "prompt_title"
+        case transcriptPath = "transcript_path"
         case pid
         case timestamp
     }
@@ -176,6 +178,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         case sessionId
         case turnId
         case promptTitle
+        case transcriptPath
     }
 
     init(
@@ -189,6 +192,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         sessionID: String? = nil,
         turnID: String? = nil,
         promptTitle: String? = nil,
+        transcriptPath: String? = nil,
         pid: Int? = nil,
         timestamp: TimeInterval? = nil
     ) {
@@ -202,6 +206,7 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         self.sessionID = sessionID
         self.turnID = turnID
         self.promptTitle = promptTitle
+        self.transcriptPath = transcriptPath
         self.pid = pid
         self.timestamp = timestamp
     }
@@ -226,6 +231,8 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
             ?? alternate.decodeIfPresent(String.self, forKey: .turnId)
         self.promptTitle = try container.decodeIfPresent(String.self, forKey: .promptTitle)
             ?? alternate.decodeIfPresent(String.self, forKey: .promptTitle)
+        self.transcriptPath = try container.decodeIfPresent(String.self, forKey: .transcriptPath)
+            ?? alternate.decodeIfPresent(String.self, forKey: .transcriptPath)
         self.pid = try container.decodeIfPresent(Int.self, forKey: .pid)
         self.timestamp = try container.decodeIfPresent(TimeInterval.self, forKey: .timestamp)
     }
@@ -234,6 +241,142 @@ struct TerminalAgentActivityEvent: Decodable, Equatable {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(TerminalAgentActivityEvent.self, from: data)
+    }
+}
+
+enum AgentTranscriptResultExtractor {
+    static let maxTranscriptTailBytes = 2 * 1024 * 1024
+    private static let truncationMarker = "\n\n[Result truncated by Maxx]"
+
+    static func result(
+        fromTranscriptAt path: String,
+        agent: String,
+        maxBytes: Int = ControlSession.Limits.maxResultBytes
+    ) -> String? {
+        guard let contents = tailContents(from: path) else { return nil }
+        return result(fromJSONL: contents, agent: agent, maxBytes: maxBytes)
+    }
+
+    static func result(
+        fromJSONL contents: String,
+        agent: String,
+        maxBytes: Int = ControlSession.Limits.maxResultBytes
+    ) -> String? {
+        let normalizedAgent = agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedAgent == "codex" || normalizedAgent == "claude" else { return nil }
+
+        var candidate: String?
+        for rawLine in contents.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, let data = line.data(using: .utf8) else { continue }
+            guard let rawObject = try? JSONSerialization.jsonObject(with: data),
+                  let object = rawObject as? [String: Any]
+            else {
+                continue
+            }
+
+            switch normalizedAgent {
+            case "codex":
+                candidate = codexResult(from: object) ?? candidate
+            case "claude":
+                candidate = claudeResult(from: object) ?? candidate
+            default:
+                break
+            }
+        }
+
+        guard let candidate else { return nil }
+        return bounded(candidate, maxBytes: maxBytes)
+    }
+
+    private static func tailContents(from path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let attributes = try? FileManager.default.attributesOfItem(atPath: trimmed)
+        let fileSize = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: trimmed)) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let tailBytes = UInt64(maxTranscriptTailBytes)
+        if fileSize > tailBytes {
+            handle.seek(toFileOffset: fileSize - tailBytes)
+        }
+        let data = handle.readDataToEndOfFile()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func codexResult(from object: [String: Any]) -> String? {
+        let type = object["type"] as? String
+        let payload = object["payload"] as? [String: Any]
+
+        if type == "event_msg", let payload {
+            switch payload["type"] as? String {
+            case "task_complete":
+                return payload["last_agent_message"] as? String
+            case "agent_message":
+                guard payload["phase"] as? String == "final_answer" else { return nil }
+                return payload["message"] as? String
+            default:
+                return nil
+            }
+        }
+
+        if type == "response_item", let payload,
+           payload["type"] as? String == "message",
+           payload["role"] as? String == "assistant",
+           payload["phase"] as? String == "final_answer" {
+            return textContent(from: payload["content"], acceptedTypes: ["output_text", "text"])
+        }
+
+        return nil
+    }
+
+    private static func claudeResult(from object: [String: Any]) -> String? {
+        guard object["type"] as? String == "assistant",
+              let message = object["message"] as? [String: Any],
+              message["role"] as? String == "assistant"
+        else { return nil }
+
+        if let stopReason = message["stop_reason"] as? String, stopReason != "end_turn" {
+            return nil
+        }
+
+        return textContent(from: message["content"], acceptedTypes: ["text"])
+    }
+
+    private static func textContent(
+        from rawContent: Any?,
+        acceptedTypes: Set<String>
+    ) -> String? {
+        guard let items = rawContent as? [[String: Any]] else { return nil }
+        let parts = items.compactMap { item -> String? in
+            guard let type = item["type"] as? String,
+                  acceptedTypes.contains(type),
+                  let text = item["text"] as? String
+            else { return nil }
+            return text
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n")
+    }
+
+    private static func bounded(_ raw: String, maxBytes: Int) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        guard text.utf8.count > maxBytes else { return text }
+
+        let markerBytes = truncationMarker.utf8.count
+        guard maxBytes > markerBytes else { return nil }
+
+        var bytes = Array(text.utf8.prefix(maxBytes - markerBytes))
+        while !bytes.isEmpty && String(bytes: bytes, encoding: .utf8) == nil {
+            bytes.removeLast()
+        }
+        guard let prefix = String(bytes: bytes, encoding: .utf8) else { return nil }
+        return prefix + truncationMarker
     }
 }
 

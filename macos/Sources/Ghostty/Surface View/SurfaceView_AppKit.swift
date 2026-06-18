@@ -1008,12 +1008,53 @@ extension Ghostty {
 
         private func processAgentActivityLine(_ line: String) {
             guard let event = TerminalAgentActivityEvent.parse(jsonLine: line) else { return }
+            guard event.surfaceID == nil || event.surfaceID == agentSurfaceID else { return }
+
+            captureAgentResultIfAvailable(from: event)
+
             guard let nextState = agentActivityReducer.apply(event, expectedSurfaceID: agentSurfaceID) else {
                 return
             }
 
             updateAgentActivityTitle(from: event, state: nextState)
             setAgentActivityState(nextState)
+        }
+
+        private func captureAgentResultIfAvailable(from event: TerminalAgentActivityEvent) {
+            guard Self.shouldCaptureAgentResult(from: event),
+                  let transcriptPath = event.transcriptPath,
+                  let result = AgentTranscriptResultExtractor.result(
+                    fromTranscriptAt: transcriptPath,
+                    agent: event.normalizedAgent),
+                  let surfaceID = UUID(uuidString: agentSurfaceID)
+            else { return }
+
+            do {
+                _ = try (NSApp.delegate as? AppDelegate)?
+                    .declareAgentResultForRegisteredSurface(
+                        surfaceID: surfaceID,
+                        result: result,
+                        source: "\(event.normalizedAgent)-transcript")
+            } catch {
+                Ghostty.logger.warning(
+                    "failed to declare agent result for surface \(self.agentSurfaceID, privacy: .public): \(error.localizedDescription)")
+            }
+        }
+
+        private static func shouldCaptureAgentResult(from event: TerminalAgentActivityEvent) -> Bool {
+            switch event.normalizedAgent {
+            case "claude", "codex":
+                break
+            default:
+                return false
+            }
+
+            switch event.event?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "stop", "session-end":
+                return true
+            default:
+                return false
+            }
         }
 
         private func updateAgentActivityTitle(

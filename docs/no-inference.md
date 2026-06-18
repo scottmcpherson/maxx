@@ -81,6 +81,7 @@ construction rather than merely prohibited.
 | ---------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `lifecycle` (running/exited/closed/archived)   | Mechanical                  | Surface existence + kernel-reported process exit                                                                                   | `macos/Sources/Features/Control/ControlSession.swift`, `ControlSessionRegistry.swift`                     |
 | Declared workflow-state badge + summary        | Agent-declared              | `sessions.set-state` / `sessions.set-summary` only                                                                                 | `ControlSession.swift` (`WorkflowState`, `ControlDeclaredState`), `SurfaceView.swift` (`AgentStateBadge`) |
+| Declared session result                        | Agent-declared              | `sessions.set-result` or structured Codex/Claude hook transcript final-answer records                                              | `ControlSession.swift` (`result`), `TerminalAgentActivity.swift` (`AgentTranscriptResultExtractor`)       |
 | Agent-reported metadata chip                   | Agent-declared              | `sessions.create` (at spawn) / `set-metadata` / `update` / `remove-metadata` / `clear-metadata`                                    | `ControlSession.swift` (`metadata`), `SurfaceView.swift` (`AgentMetadataBadge`)                           |
 | Audit log (`wait` / `watch` / `events`)        | Agent-declared + mechanical | Explicit declarations + Maxx-recorded lifecycle actions                                                                            | `ControlEvents.swift`, `ControlSessionRegistry.swift`                                                     |
 | Persistent session registry (restored records) | Agent-declared + mechanical | `registry.json` — only stored identity, relationships, declared facts, and timestamps; replayed verbatim on load, never re-derived | `ControlSessionPersistence.swift`, `ControlSessionRegistry.swift` (`rehydrate`)                           |
@@ -96,6 +97,14 @@ Maxx-owned `lifecycle` and from the free-form `status`, so the UI presents them
 as agent-provided rather than Maxx-derived (the badge popover literally says
 "Reported by the agent — not derived by Maxx"). See
 [Control API](control-api.html).
+
+`sessions.set-result` is the separate child-answer retrieval channel. It stores
+bounded result text with `result_at` and `result_source`, records a `kind:
+result` event, and is cleared on restart so a previous run's answer does not
+look current. Maxx may populate it from structured Codex/Claude transcript JSON
+when an explicit hook supplies the transcript path; this reads final-answer
+records from the CLI transcript, not PTY scrollback, and does not infer workflow
+truth from the answer prose.
 
 ### The hook event pipeline (sidebar agent-activity)
 

@@ -33,6 +33,8 @@ enum ControlEventKind: String, Codable {
     case workflowState = "workflow-state"
     /// An agent set the human-readable summary line (`set-summary`).
     case summary
+    /// An agent set or cleared the bounded child-answer result (`set-result`).
+    case result
     /// Maxx recorded a runtime lifecycle action it performed (archive/restart).
     case lifecycle
 
@@ -44,7 +46,7 @@ enum ControlEventKind: String, Codable {
     var sourceKind: ControlEventOwner {
         switch self {
         case .lifecycle: return .maxx
-        case .state, .event, .metadata, .workflowState, .summary: return .agent
+        case .state, .event, .metadata, .workflowState, .summary, .result: return .agent
         }
     }
 }
