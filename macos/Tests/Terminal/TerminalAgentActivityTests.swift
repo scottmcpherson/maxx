@@ -109,7 +109,32 @@ struct TerminalAgentActivityTests {
 
         #expect(AgentTranscriptResultExtractor.result(
             fromTranscriptAt: transcript.path,
-            agent: "codex") == "file final")
+            agent: "codex",
+            allowedRoots: [directory]) == "file final")
+    }
+
+    @Test func transcriptResultRejectsDisallowedPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maxx-transcript-test-\(UUID().uuidString)", isDirectory: true)
+        let allowed = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maxx-transcript-allowed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: allowed)
+        }
+
+        let transcript = directory.appendingPathComponent("codex.jsonl", isDirectory: false)
+        let contents = """
+        {"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"file final"}}
+        """
+        try contents.write(to: transcript, atomically: true, encoding: .utf8)
+
+        #expect(AgentTranscriptResultExtractor.result(
+            fromTranscriptAt: transcript.path,
+            agent: "codex",
+            allowedRoots: [allowed]) == nil)
     }
 
     @Test func reducerMapsLifecycleStates() throws {

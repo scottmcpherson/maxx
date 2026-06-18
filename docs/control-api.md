@@ -309,9 +309,12 @@ result writes are gated by `state:set`; result reads are part of `sessions.get`
 / `sessions.list` and are gated by `tabs:list`.
 
 Maxx can also declare results from structured Codex/Claude hook transcripts when
-the hook provides a transcript path and final-answer record. This reads CLI
-transcript JSON records from an explicit hook payload, not terminal scrollback,
-and only captures answer text; it never derives workflow truth from prose.
+the hook provides a transcript path and final-answer record. Automatic capture
+only accepts `.jsonl` files under the known Codex/Claude transcript roots
+(`~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.claude/projects`). This
+reads CLI transcript JSON records from an explicit hook payload, not terminal
+scrollback, and only captures answer text; it never derives workflow truth from
+prose.
 
 ### Agent type and parent (persisted)
 

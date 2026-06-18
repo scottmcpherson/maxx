@@ -511,6 +511,18 @@ struct ControlPolicyEnforcementTests {
                   params: .init(id: UUID().uuidString, result: "answer", caller: "readonly-external")),
             host: host)
         #expect(deniedMissing.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        let deniedClearExisting = registry.handle(
+            .init(token: "t", method: .sessionsClearResult,
+                  params: .init(id: id, caller: "readonly-external")),
+            host: host)
+        #expect(deniedClearExisting.error?.code == ControlErrorCode.unauthorized.rawValue)
+
+        let deniedClearMissing = registry.handle(
+            .init(token: "t", method: .sessionsClearResult,
+                  params: .init(id: UUID().uuidString, caller: "readonly-external")),
+            host: host)
+        #expect(deniedClearMissing.error?.code == ControlErrorCode.unauthorized.rawValue)
     }
 
     @Test func existingLocalFlowsAreUnchanged() {

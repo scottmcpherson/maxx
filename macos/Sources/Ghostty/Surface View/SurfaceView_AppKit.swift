@@ -1023,21 +1023,29 @@ extension Ghostty {
         private func captureAgentResultIfAvailable(from event: TerminalAgentActivityEvent) {
             guard Self.shouldCaptureAgentResult(from: event),
                   let transcriptPath = event.transcriptPath,
-                  let result = AgentTranscriptResultExtractor.result(
-                    fromTranscriptAt: transcriptPath,
-                    agent: event.normalizedAgent),
                   let surfaceID = UUID(uuidString: agentSurfaceID)
             else { return }
 
-            do {
-                _ = try (NSApp.delegate as? AppDelegate)?
-                    .declareAgentResultForRegisteredSurface(
-                        surfaceID: surfaceID,
-                        result: result,
-                        source: "\(event.normalizedAgent)-transcript")
-            } catch {
-                Ghostty.logger.warning(
-                    "failed to declare agent result for surface \(self.agentSurfaceID, privacy: .public): \(error.localizedDescription)")
+            let agent = event.normalizedAgent
+            let surfaceIDString = agentSurfaceID
+            Task.detached(priority: .utility) {
+                guard let result = AgentTranscriptResultExtractor.result(
+                    fromTranscriptAt: transcriptPath,
+                    agent: agent)
+                else { return }
+
+                await MainActor.run {
+                    do {
+                        _ = try (NSApp.delegate as? AppDelegate)?
+                            .declareAgentResultForRegisteredSurface(
+                                surfaceID: surfaceID,
+                                result: result,
+                                source: "\(agent)-transcript")
+                    } catch {
+                        Ghostty.logger.warning(
+                            "failed to declare agent result for surface \(surfaceIDString, privacy: .public): \(error.localizedDescription)")
+                    }
+                }
             }
         }
 

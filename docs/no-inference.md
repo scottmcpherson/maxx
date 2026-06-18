@@ -102,9 +102,9 @@ as agent-provided rather than Maxx-derived (the badge popover literally says
 bounded result text with `result_at` and `result_source`, records a `kind:
 result` event, and is cleared on restart so a previous run's answer does not
 look current. Maxx may populate it from structured Codex/Claude transcript JSON
-when an explicit hook supplies the transcript path; this reads final-answer
-records from the CLI transcript, not PTY scrollback, and does not infer workflow
-truth from the answer prose.
+when an explicit hook supplies a `.jsonl` transcript path under the known agent
+transcript roots; this reads final-answer records from the CLI transcript, not
+PTY scrollback, and does not infer workflow truth from the answer prose.
 
 ### The hook event pipeline (sidebar agent-activity)
 

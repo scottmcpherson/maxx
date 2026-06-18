@@ -251,9 +251,15 @@ enum AgentTranscriptResultExtractor {
     static func result(
         fromTranscriptAt path: String,
         agent: String,
-        maxBytes: Int = ControlSession.Limits.maxResultBytes
+        maxBytes: Int = ControlSession.Limits.maxResultBytes,
+        allowedRoots: [URL]? = nil
     ) -> String? {
-        guard let contents = tailContents(from: path) else { return nil }
+        guard let transcript = validatedTranscriptURL(
+            path: path,
+            agent: agent,
+            allowedRoots: allowedRoots)
+        else { return nil }
+        guard let contents = tailContents(from: transcript) else { return nil }
         return result(fromJSONL: contents, agent: agent, maxBytes: maxBytes)
     }
 
@@ -289,13 +295,49 @@ enum AgentTranscriptResultExtractor {
         return bounded(candidate, maxBytes: maxBytes)
     }
 
-    private static func tailContents(from path: String) -> String? {
+    private static func validatedTranscriptURL(
+        path: String,
+        agent: String,
+        allowedRoots: [URL]?
+    ) -> URL? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: trimmed)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        guard url.pathExtension.lowercased() == "jsonl" else { return nil }
 
-        let attributes = try? FileManager.default.attributesOfItem(atPath: trimmed)
+        let roots = allowedRoots ?? transcriptRoots(for: agent)
+        guard roots.contains(where: { root in
+            let resolvedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+            return url.path == resolvedRoot.path
+                || url.path.hasPrefix(resolvedRoot.path + "/")
+        }) else { return nil }
+
+        return url
+    }
+
+    private static func transcriptRoots(for agent: String) -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        switch agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "codex":
+            return [
+                home.appendingPathComponent(".codex/sessions", isDirectory: true),
+                home.appendingPathComponent(".codex/archived_sessions", isDirectory: true),
+            ]
+        case "claude":
+            return [
+                home.appendingPathComponent(".claude/projects", isDirectory: true),
+            ]
+        default:
+            return []
+        }
+    }
+
+    private static func tailContents(from url: URL) -> String? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
-        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: trimmed)) else {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
             return nil
         }
         defer { try? handle.close() }
@@ -305,7 +347,7 @@ enum AgentTranscriptResultExtractor {
             handle.seek(toFileOffset: fileSize - tailBytes)
         }
         let data = handle.readDataToEndOfFile()
-        return String(decoding: data, as: UTF8.self)
+        return String(bytes: data, encoding: .utf8)
     }
 
     private static func codexResult(from object: [String: Any]) -> String? {
