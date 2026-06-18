@@ -74,6 +74,15 @@ struct TerminalAgentActivityTests {
         #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "claude") == "Claude final")
     }
 
+    @Test func claudeTranscriptResultRequiresEndTurnStopReason() {
+        let contents = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"missing stop reason"}]}}
+        {"type":"assistant","message":{"role":"assistant","stop_reason":null,"content":[{"type":"text","text":"null stop reason"}]}}
+        """
+
+        #expect(AgentTranscriptResultExtractor.result(fromJSONL: contents, agent: "claude") == nil)
+    }
+
     @Test func transcriptResultIgnoresUnsupportedAgents() {
         let contents = """
         {"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"final"}]}}

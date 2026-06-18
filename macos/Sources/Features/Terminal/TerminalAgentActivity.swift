@@ -379,12 +379,9 @@ enum AgentTranscriptResultExtractor {
     private static func claudeResult(from object: [String: Any]) -> String? {
         guard object["type"] as? String == "assistant",
               let message = object["message"] as? [String: Any],
-              message["role"] as? String == "assistant"
+              message["role"] as? String == "assistant",
+              message["stop_reason"] as? String == "end_turn"
         else { return nil }
-
-        if let stopReason = message["stop_reason"] as? String, stopReason != "end_turn" {
-            return nil
-        }
 
         return textContent(from: message["content"], acceptedTypes: ["text"])
     }
