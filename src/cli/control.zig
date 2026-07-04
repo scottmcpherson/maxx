@@ -90,6 +90,8 @@ const Command = struct {
     command: ?[]const u8 = null,
     status: ?[]const u8 = null,
     location: ?[]const u8 = null,
+    split_direction: ?[]const u8 = null,
+    split_target: ?[]const u8 = null,
     focus: bool = false,
     action: ?[]const u8 = null,
     input: ?[]const u8 = null,
@@ -209,8 +211,12 @@ const ParseError = error{
 /// Subcommands:
 ///
 ///   * `sessions create`: create a new visible tab/session. Flags:
-///     `--title`, `--cwd`, `--command`, `--status`, `--location=tab|window`,
-///     `--focus`, repeatable `--metadata key=value` and `--env KEY=VALUE`.
+///     `--title`, `--cwd`, `--command`, `--status`,
+///     `--location=tab|window|split`, `--focus`, repeatable
+///     `--metadata key=value` and `--env KEY=VALUE`. With `--location split`,
+///     `--split-target <session_id>` (required) names the session whose tab
+///     hosts the new pane and `--split-direction right|down|left|up` (default
+///     `right`) picks the edge.
 ///
 ///   * `sessions register-current`: from inside a normal Maxx tab, explicitly
 ///     register the current tab as a control session. The CLI reads
@@ -660,6 +666,10 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.status = v;
         } else if (try flagValue(alloc, arg, iter, "--location")) |v| {
             cmd.location = v;
+        } else if (try flagValue(alloc, arg, iter, "--split-direction")) |v| {
+            cmd.split_direction = v;
+        } else if (try flagValue(alloc, arg, iter, "--split-target")) |v| {
+            cmd.split_target = v;
         } else if (std.mem.eql(u8, arg, "--focus")) {
             cmd.focus = true;
         } else if (try flagValue(alloc, arg, iter, "--action")) |v| {
@@ -879,6 +889,14 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
     }
     if (cmd.location) |v| {
         try json.objectField("location");
+        try json.write(v);
+    }
+    if (cmd.split_direction) |v| {
+        try json.objectField("split_direction");
+        try json.write(v);
+    }
+    if (cmd.split_target) |v| {
+        try json.objectField("split_target");
         try json.write(v);
     }
     if (cmd.focus) {
@@ -1168,6 +1186,33 @@ test "parseCommand create defaults to background focus" {
     defer parsed.deinit();
     const params = parsed.value.object.get("params").?.object;
     try testing.expect(params.get("focus") == null);
+}
+
+test "parseCommand create with split location" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "sessions create --title Pane --location split --split-target ID-1 --split-direction down --command \"echo hi\"",
+    );
+    defer iter.deinit();
+
+    const cmd = try parseCommand(alloc, &iter);
+    try testing.expect(cmd.verb == .create);
+    try testing.expectEqualStrings("split", cmd.location.?);
+    try testing.expectEqualStrings("ID-1", cmd.split_target.?);
+    try testing.expectEqualStrings("down", cmd.split_direction.?);
+
+    const json = try buildRequest(alloc, cmd, "tok");
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?.object;
+    try testing.expectEqualStrings("split", params.get("location").?.string);
+    try testing.expectEqualStrings("ID-1", params.get("split_target").?.string);
+    try testing.expectEqualStrings("down", params.get("split_direction").?.string);
 }
 
 test "parseCommand tolerates leading action token" {

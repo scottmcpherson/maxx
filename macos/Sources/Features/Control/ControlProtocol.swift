@@ -190,8 +190,14 @@ struct ControlRequest: Codable {
         var metadata: [String: ControlJSONValue]?
         /// Caller-owned status string (e.g. `waiting_for_review`).
         var status: String?
-        /// `tab` (default) or `window`.
+        /// `tab` (default), `window`, or `split`.
         var location: String?
+        /// Direction for `location == "split"`: `right` (default), `down`,
+        /// `left`, or `up` — which edge of the split target the new pane takes.
+        var splitDirection: String?
+        /// Session id (UUID string) whose live surface a `location == "split"`
+        /// create splits. Required for splits; rejected elsewhere.
+        var splitTarget: String?
         /// When true, focus the created surface. Omitted/false creates in the
         /// background for agent/control spawns.
         var focus: Bool?
@@ -289,6 +295,8 @@ struct ControlRequest: Codable {
             case surfaceID = "surface_id"
             case registrationToken = "registration_token"
             case title, cwd, command, env, metadata, status, location, focus
+            case splitDirection = "split_direction"
+            case splitTarget = "split_target"
             case action, input, state, event, lifecycle, message, source
             case payloadJson = "payload_json"
             case key, value

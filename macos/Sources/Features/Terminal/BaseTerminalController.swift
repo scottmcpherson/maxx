@@ -236,7 +236,8 @@ class BaseTerminalController: NSWindowController,
     func newSplit(
         at oldView: Ghostty.SurfaceView,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
-        baseConfig config: Ghostty.SurfaceConfiguration? = nil
+        baseConfig config: Ghostty.SurfaceConfiguration? = nil,
+        focusNewSurface: Bool = true
     ) -> Ghostty.SurfaceView? {
         // We can only create new splits for surfaces in our tree.
         guard surfaceTree.root?.node(view: oldView) != nil else { return nil }
@@ -260,10 +261,12 @@ class BaseTerminalController: NSWindowController,
             return nil
         }
 
+        // Control-API background spawns pass `focusNewSurface: false` so the new
+        // pane appears without moving keyboard focus off the surface being split.
         replaceSurfaceTree(
             newTree,
-            moveFocusTo: newView,
-            moveFocusFrom: oldView,
+            moveFocusTo: focusNewSurface ? newView : nil,
+            moveFocusFrom: focusNewSurface ? oldView : nil,
             undoAction: "New Split")
 
         return newView

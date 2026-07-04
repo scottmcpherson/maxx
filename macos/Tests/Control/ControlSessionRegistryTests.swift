@@ -349,6 +349,172 @@ struct ControlSessionRegistryTests {
         #expect(response.error?.code == "invalid_request")
     }
 
+    // MARK: Split creation
+
+    /// Create a target session and return its (session id, surface id).
+    private func makeTargetSession(
+        _ registry: ControlSessionRegistry,
+        host: FakeControlSessionHost
+    ) -> (sessionID: String, surfaceID: UUID) {
+        let surfaceID = UUID()
+        host.nextCreateID = surfaceID
+        let created = registry.handle(
+            request(.sessionsCreate, params(command: "claude")), host: host)
+        return (created.result!.session!.sessionID, surfaceID)
+    }
+
+    @Test func createSplitPassesDirectionAndTargetSurfaceToHost() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        var p = params(command: "codex", location: "split")
+        p.splitDirection = "down"
+        p.splitTarget = target.sessionID
+        let response = registry.handle(request(.sessionsCreate, p), host: host)
+
+        #expect(response.ok)
+        #expect(host.createdRequests.count == 2)
+        let req = host.createdRequests.last
+        #expect(req?.location == .split)
+        #expect(req?.splitDirection == .down)
+        // The registry resolves the *session* id to the target's *surface* id
+        // before the host is invoked.
+        #expect(req?.splitTargetSurfaceID == target.surfaceID)
+        // The pane is its own session on its own surface, distinct from the
+        // target's, with the normal stable-id contract.
+        let session = response.result?.session
+        #expect(session?.surfaceID != target.surfaceID.uuidString)
+        #expect(session?.sessionID != target.sessionID)
+        #expect(session?.lifecycle == "running")
+    }
+
+    @Test func createSplitDefaultsDirectionRight() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        var p = params(command: "codex", location: "split")
+        p.splitTarget = target.sessionID
+        let response = registry.handle(request(.sessionsCreate, p), host: host)
+
+        #expect(response.ok)
+        #expect(host.createdRequests.last?.splitDirection == .right)
+    }
+
+    @Test func createSplitRequiresTarget() {
+        let host = FakeControlSessionHost()
+        let response = makeRegistry().handle(
+            request(.sessionsCreate, params(command: "ls", location: "split")),
+            host: host)
+        #expect(response.error?.code == "invalid_request")
+        // A rejected split must not leave a stray surface behind.
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func createSplitRejectsBadDirection() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        var p = params(command: "ls", location: "split")
+        p.splitDirection = "sideways"
+        p.splitTarget = target.sessionID
+        let response = registry.handle(request(.sessionsCreate, p), host: host)
+        #expect(response.error?.code == "invalid_request")
+        #expect(host.createdRequests.count == 1)
+    }
+
+    @Test func createSplitRejectsUnknownTarget() {
+        let host = FakeControlSessionHost()
+        var p = params(command: "ls", location: "split")
+        p.splitTarget = UUID().uuidString
+        let response = makeRegistry().handle(request(.sessionsCreate, p), host: host)
+        #expect(response.error?.code == "not_found")
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func createSplitRejectsNonUUIDTarget() {
+        let host = FakeControlSessionHost()
+        var p = params(command: "ls", location: "split")
+        p.splitTarget = "not-a-uuid"
+        let response = makeRegistry().handle(request(.sessionsCreate, p), host: host)
+        #expect(response.error?.code == "invalid_request")
+        #expect(host.createdRequests.isEmpty)
+    }
+
+    @Test func createRejectsSplitParamsForNonSplitLocations() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        // A split target on a plain tab create is a caller mistake; degrading it
+        // to a tab silently would hide the error.
+        var withTarget = params(command: "ls")
+        withTarget.splitTarget = target.sessionID
+        #expect(
+            registry.handle(request(.sessionsCreate, withTarget), host: host)
+                .error?.code == "invalid_request")
+
+        var withDirection = params(command: "ls", location: "window")
+        withDirection.splitDirection = "down"
+        #expect(
+            registry.handle(request(.sessionsCreate, withDirection), host: host)
+                .error?.code == "invalid_request")
+        #expect(host.createdRequests.count == 1)
+    }
+
+    @Test func createSplitRejectsEndedTarget() {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+        _ = registry.handle(
+            request(.sessionsAction, params(id: target.sessionID, action: "cancel")),
+            host: host)
+
+        var p = params(command: "ls", location: "split")
+        p.splitTarget = target.sessionID
+        let response = registry.handle(request(.sessionsCreate, p), host: host)
+        #expect(response.error?.code == "already_ended")
+        #expect(host.createdRequests.count == 1)
+    }
+
+    @Test func createSplitPolicyDenialHappensBeforeTargetResolution() {
+        // A denied caller gets `unauthorized` whether or not the target exists —
+        // the create gate must not become a session-existence oracle.
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        for targetID in [target.sessionID, UUID().uuidString] {
+            var p = params(command: "ls", location: "split")
+            p.splitTarget = targetID
+            p.caller = "readonly-external"
+            let response = registry.handle(request(.sessionsCreate, p), host: host)
+            #expect(response.error?.code == "unauthorized")
+        }
+        #expect(host.createdRequests.count == 1)
+    }
+
+    @Test func restartOfSplitSessionFallsBackToTab() throws {
+        let registry = makeRegistry()
+        let host = FakeControlSessionHost()
+        let target = makeTargetSession(registry, host: host)
+
+        var p = params(command: "codex", location: "split")
+        p.splitTarget = target.sessionID
+        let created = registry.handle(request(.sessionsCreate, p), host: host)
+        let paneID = try #require(created.result?.session?.sessionID)
+
+        let restarted = registry.handle(
+            request(.sessionsRestart, params(id: paneID)), host: host)
+        #expect(restarted.ok)
+        // The replayed spawn degrades to a plain tab: the neighbor surface it
+        // split from may be gone, and picking a substitute would be inference.
+        #expect(host.createdRequests.last?.location == .tab)
+        #expect(host.createdRequests.last?.splitTargetSurfaceID == nil)
+    }
+
     // MARK: Metadata limits
 
     @Test func metadataTooManyKeysRejected() {
@@ -1282,7 +1448,7 @@ struct ControlSessionRegistryTests {
 
         let response = registry.handle(
             request(.sessionsSetResult, .init(
-                id: id, result: "Use the smaller parser buffer.", source: "codex")),
+                id: id, source: "codex", result: "Use the smaller parser buffer.")),
             host: host)
         #expect(response.ok)
         #expect(response.result?.session?.result == "Use the smaller parser buffer.")

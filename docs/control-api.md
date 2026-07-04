@@ -208,6 +208,15 @@ maxx +control sessions create \
 parent=$(maxx +control sessions register-current \
   | jq -r .result.session.session_id)
 
+# Create a split pane inside an existing session's tab instead of a new tab.
+# `--split-target` names the session whose surface is split (required);
+# `--split-direction right|down|left|up` picks the edge (default: right).
+# Focus stays on the target pane unless `--focus` is passed.
+maxx +control sessions create \
+  --title "codex worker" \
+  --location split --split-target "$parent" --split-direction right \
+  --command "codex"
+
 maxx +control sessions get <session_id>
 maxx +control sessions list
 maxx +control sessions update <session_id> --status waiting_for_review
@@ -531,6 +540,19 @@ from terminal output.
   }
 }
 ```
+
+`location` is `tab` (default), `window`, or `split`. A `split` create places the
+new surface as a pane inside an existing control session's tab and takes two
+extra params: `split_target` (required — the session id whose live surface is
+split; the id must name a session this registry owns _this run_, so canceled,
+archived, and restored-from-a-previous-run records are rejected as
+`already_ended`) and `split_direction` (`right` default, `down`, `left`, `up`).
+Both are rejected on tab/window creates so a typo cannot silently degrade a
+split into a plain tab. The pane is an ordinary session: its own `session_id`,
+`surface_id`, lifecycle, declarations, and events. Without `focus: true`,
+keyboard focus stays on the target pane. On `restart`, a `split` session
+respawns as a plain `tab`: its original neighbor surface may be gone, and
+picking a substitute would be inference.
 
 ### Response
 

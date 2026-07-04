@@ -484,6 +484,34 @@ struct ControlSessionPersistenceTests {
         if let surfaceID { #expect(host2.surfaces[surfaceID]?.focusCount == 0) }
     }
 
+    @Test func restoredSessionIsRejectedAsSplitTarget() throws {
+        let url = tempStoreURL()
+        let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))
+        let (registry1, host1) = makeRegistry(url: url, clock: clock)
+        let created = registry1.handle(
+            request(.sessionsCreate, .init(command: "claude")), host: host1)
+        let sid = try #require(created.result?.session?.sessionID)
+        let surfaceID = UUID(uuidString: created.result?.session?.surfaceID ?? "")
+        registry1.flush()
+
+        // Second run: a coincidental live surface reuses the persisted UUID (as
+        // macOS window restoration would rebuild), but this control API did not
+        // create it this run.
+        let registry2 = ControlSessionRegistry(
+            now: { clock.now }, store: ControlSessionStore(fileURL: url))
+        registry2.rehydrate()
+        let host2 = FakeControlSessionHost()
+        if let surfaceID { host2.surfaces[surfaceID] = FakeControlSessionHost.Surface() }
+
+        // Splitting a restored record must fail as already_ended — never attach
+        // a new pane to the coincidental, user-owned surface.
+        var p = ControlRequest.Params(command: "ls", location: "split")
+        p.splitTarget = sid
+        let response = registry2.handle(request(.sessionsCreate, p), host: host2)
+        #expect(response.error?.code == "already_ended")
+        #expect(host2.createdRequests.isEmpty)
+    }
+
     @Test func registerCurrentAfterRestartDoesNotRebindRestoredRecord() throws {
         let url = tempStoreURL()
         let clock = Clock(Date(timeIntervalSince1970: 1_700_000_000))

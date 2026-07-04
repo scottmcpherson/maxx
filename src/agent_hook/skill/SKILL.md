@@ -166,6 +166,35 @@ user-provided prompt text into `--command`; shell syntax inside the prompt would
 be evaluated. Launch the agent as the command, then submit the task as literal
 input.
 
+## Open a Pane (Split) Instead of a Tab
+
+To place a child beside an existing session in the same tab — for example a
+worker the user wants to watch next to your own pane — create it with
+`--location split`. `--split-target` (required) is the session id whose surface
+is split: your own id from `sessions register-current`, or a child you created.
+`--split-direction right|down|left|up` picks the edge (default `right`).
+
+```sh
+self=$(maxx +control sessions register-current | jq -r .result.session.session_id)
+pane=$(maxx +control sessions create \
+  --title "codex worker" \
+  --cwd "$PWD" \
+  --agent-type codex \
+  --parent "$self" \
+  --location split --split-target "$self" \
+  --command 'codex' \
+  | jq -r .result.session.session_id)
+```
+
+The pane is an ordinary session — same `session_id` handle, actions, wait/watch,
+declarations, and close. Keyboard focus stays on the split target unless you
+pass `--focus`, so spawning a pane never steals the user's cursor. Restarting a
+pane session reopens it as a plain tab (its original neighbor may be gone).
+
+If a sandboxed Codex child must declare state through `maxx +control` itself,
+launch it with `-c sandbox_workspace_write.network_access=true`; the
+workspace-write sandbox otherwise blocks connections to the control socket.
+
 ## Advanced Supervision
 
 Register the parent tab and keep its id:

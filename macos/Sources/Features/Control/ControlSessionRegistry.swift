@@ -9,6 +9,13 @@ struct ControlCreateRequest {
     var env: [String: String]
     var location: ControlLocation
     var focus: Bool
+    /// For `location == .split`: which edge of the target surface the new pane
+    /// occupies. Explicit caller input (defaulted by the registry), never derived.
+    var splitDirection: ControlSplitDirection = .right
+    /// For `location == .split`: the live surface to split. Resolved by the
+    /// registry from an explicit caller-supplied session id before the host is
+    /// invoked; nil for tab/window creates.
+    var splitTargetSurfaceID: UUID?
 }
 
 /// Explicit facts captured from an in-process spawn path that already created
@@ -25,6 +32,21 @@ struct ControlSpawnedSurfaceRegistration {
 enum ControlLocation: String, Codable {
     case tab
     case window
+    /// A split pane inside an existing control session's tab. Requires an
+    /// explicit `split_target` session id at create time. A persisted `split`
+    /// location is replayed as `tab` on restart: the neighbor surface it split
+    /// from may no longer exist, and guessing a new neighbor would be inference.
+    case split
+}
+
+/// Which edge of the split target the new pane occupies. Mirrors
+/// `SplitTree.NewDirection`; kept as its own wire/persistence enum so the
+/// control protocol does not depend on UI types.
+enum ControlSplitDirection: String, Codable {
+    case right
+    case down
+    case left
+    case up
 }
 
 /// Abstraction over the live terminal surfaces the registry manages.
@@ -543,11 +565,53 @@ final class ControlSessionRegistry {
         let location: ControlLocation
         if let raw = params?.location {
             guard let parsed = ControlLocation(rawValue: raw) else {
-                throw ControlError(.invalidRequest, "location must be 'tab' or 'window'")
+                throw ControlError(.invalidRequest, "location must be 'tab', 'window', or 'split'")
             }
             location = parsed
         } else {
             location = .tab
+        }
+
+        // Split placement is explicit: the caller names the direction and the
+        // target session whose tab hosts the new pane. Both fields are
+        // meaningless for tab/window creates and rejected there, so a typo can
+        // never silently degrade a split request into a plain tab.
+        let splitDirection: ControlSplitDirection
+        if let raw = params?.splitDirection {
+            guard location == .split else {
+                throw ControlError(.invalidRequest, "split_direction requires location 'split'")
+            }
+            guard let parsed = ControlSplitDirection(rawValue: raw) else {
+                throw ControlError(
+                    .invalidRequest, "split_direction must be 'right', 'down', 'left', or 'up'")
+            }
+            splitDirection = parsed
+        } else {
+            splitDirection = .right
+        }
+        if params?.splitTarget != nil && location != .split {
+            throw ControlError(.invalidRequest, "split_target requires location 'split'")
+        }
+        // Resolve the split target only after every capability check above has
+        // passed (the same ordering as the parent edge), so a denied create can
+        // never probe session existence through target errors. The target must
+        // resolve to a surface this registry owns *this run*: requireLiveSurface
+        // rejects canceled/archived records, and a record restored from a
+        // previous run resolves no surface (MAX-1) — a split can never attach to
+        // a coincidentally matching user-owned surface.
+        var splitTargetSurfaceID: UUID?
+        if location == .split {
+            guard let rawTarget = params?.splitTarget, !rawTarget.isEmpty else {
+                throw ControlError(
+                    .invalidRequest, "split_target session id is required for location 'split'")
+            }
+            guard let targetID = UUID(uuidString: rawTarget) else {
+                throw ControlError(.invalidRequest, "split_target is not a valid session UUID")
+            }
+            guard let target = sessions[targetID] else {
+                throw ControlError(.notFound, "no session with id \(rawTarget)")
+            }
+            splitTargetSurfaceID = try requireLiveSurface(target, host: host).surfaceID
         }
 
         let surfaceID = try host.createTerminal(.init(
@@ -556,7 +620,9 @@ final class ControlSessionRegistry {
             cwd: cwd,
             env: env,
             location: location,
-            focus: focus))
+            focus: focus,
+            splitDirection: splitDirection,
+            splitTargetSurfaceID: splitTargetSurfaceID))
 
         let createdAt = now()
         var session = ControlSession(
@@ -652,6 +718,8 @@ final class ControlSessionRegistry {
             || params?.metadata != nil
             || params?.status != nil
             || params?.location != nil
+            || params?.splitDirection != nil
+            || params?.splitTarget != nil
             || params?.focus != nil
             || params?.parent != nil
             || params?.group != nil
@@ -889,6 +957,8 @@ final class ControlSessionRegistry {
             || params?.cwd != nil
             || params?.title != nil
             || params?.location != nil
+            || params?.splitDirection != nil
+            || params?.splitTarget != nil
             || params?.focus != nil
             || params?.env != nil {
             throw ControlError(
@@ -1542,12 +1612,16 @@ final class ControlSessionRegistry {
             handle.close()
         }
 
+        // A `split` location is replayed as a plain tab: the surface it split
+        // from belonged to the old run and may be gone, and picking a substitute
+        // neighbor would be inference. The record keeps its original `split`
+        // location; only this spawn degrades.
         let newSurface = try host.createTerminal(.init(
             title: session.title,
             command: command,
             cwd: session.cwd,
             env: session.env,
-            location: session.location,
+            location: session.location == .split ? .tab : session.location,
             focus: true))
 
         session.surfaceID = newSurface

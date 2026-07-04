@@ -38,6 +38,10 @@ final class TerminalControlHost: ControlSessionHost {
             config.environmentVariables[key] = value
         }
 
+        if case .split = request.location {
+            return try createSplit(request, config: config)
+        }
+
         let parent = TerminalController.preferredParent
         let controller: TerminalController?
         switch request.location {
@@ -47,7 +51,7 @@ final class TerminalControlHost: ControlSessionHost {
                 withBaseConfig: config,
                 withParent: parent?.window,
                 focus: request.focus)
-        case .tab:
+        case .tab, .split:
             controller = TerminalController.newTab(
                 ghostty,
                 from: parent?.window,
@@ -74,6 +78,40 @@ final class TerminalControlHost: ControlSessionHost {
         }
 
         return view.id
+    }
+
+    /// Create a new pane by splitting the (registry-resolved) target surface,
+    /// via the same `newSplit` path the split keybinds use.
+    private func createSplit(
+        _ request: ControlCreateRequest,
+        config: Ghostty.SurfaceConfiguration
+    ) throws -> UUID {
+        // The registry resolved the target to a live, registry-owned surface
+        // moments ago; a miss here means it vanished in between.
+        guard let targetID = request.splitTargetSurfaceID,
+              let targetView = Self.allSurfaceViews.first(where: { $0.id == targetID }),
+              let controller = targetView.window?.windowController as? BaseTerminalController else {
+            throw ControlError(.alreadyEnded, "split target surface no longer exists")
+        }
+
+        // `focusNewSurface: false` keeps keyboard focus on the target pane so a
+        // background control spawn cannot steal the user's cursor mid-keystroke;
+        // an explicit focus request moves focus and activates the app, matching
+        // tab/window creates. No `titleOverride` here: that field names the
+        // whole tab, and the pane lives inside the *target's* tab — the caller's
+        // title stays on the session record and sidebar.
+        guard let newView = controller.newSplit(
+            at: targetView,
+            direction: request.splitDirection.treeDirection,
+            baseConfig: config,
+            focusNewSurface: request.focus) else {
+            throw ControlError(.internalError, "failed to create split surface")
+        }
+
+        if request.focus && !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return newView.id
     }
 
     func surface(for surfaceID: UUID) -> ControlSurfaceHandle? {
@@ -121,6 +159,18 @@ final class TerminalControlHost: ControlSessionHost {
             }
         }
         return bytesMatch && suppliedBytes.count == expectedBytes.count
+    }
+}
+
+extension ControlSplitDirection {
+    /// The UI split-tree direction for this wire value.
+    var treeDirection: SplitTree<Ghostty.SurfaceView>.NewDirection {
+        switch self {
+        case .right: return .right
+        case .down: return .down
+        case .left: return .left
+        case .up: return .up
+        }
     }
 }
 
