@@ -49,6 +49,13 @@ final class ControlServer {
             try startThrowing()
             Self.logger.info(
                 "control server listening at \(ControlPaths.socket.path, privacy: .public)")
+        } catch ControlServerError.alreadyRunning(let path) {
+            // Not a failure: another live Maxx instance already owns this control
+            // dir. We deliberately did not touch its socket or token, so it keeps
+            // serving. `listenFD` stays -1, leaving this instance's control
+            // surface inert.
+            Self.logger.warning(
+                "another Maxx control server is already listening at \(path, privacy: .public); not starting a second one")
         } catch {
             Self.logger.error(
                 "failed to start control server: \(String(describing: error), privacy: .public)")
@@ -120,6 +127,25 @@ final class ControlServer {
 
     private func startThrowing() throws {
         try prepareDirectory()
+
+        // Refuse to steal the control dir from another live Maxx instance. A
+        // second app launch pointed at the same dir (a dev build, an update
+        // relaunch, or a manually `open -n`'d copy) must NOT rewrite the token or
+        // unlink the socket out from under the running server: doing so orphans
+        // the live listener and, once this second process exits, leaves a dead
+        // socket file that makes every client `connect()` fail with
+        // ECONNREFUSED while the original app keeps running unreachable.
+        //
+        // This probe must run before writeToken()/rehydrate()/bind — the very
+        // first shared-state touch — so a doomed second instance leaves every
+        // on-disk artifact of the live server untouched. There is a tiny residual
+        // race if two instances cold-start within the same moment; a lock file
+        // would close it, but this guard covers the real-world failure mode
+        // (starting while a server is already fully up).
+        if Self.probeSocket(at: ControlPaths.socket.path) == .live {
+            throw ControlServerError.alreadyRunning(ControlPaths.socket.path)
+        }
+
         // The control directory is now validated as ours and private (0700, a real
         // directory, not a symlink planted by another local user). Only now is it
         // safe to read the persisted registry from it: rehydrating earlier (e.g. in
@@ -197,23 +223,15 @@ final class ControlServer {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ControlServerError.posix("socket", errno) }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-
-        let pathBytes = Array(path.utf8)
-        let capacity = MemoryLayout.size(ofValue: addr.sun_path)
-        guard pathBytes.count < capacity else {
+        guard var addr = Self.makeUnixAddr(path) else {
             Darwin.close(fd)
             throw ControlServerError.pathTooLong(path)
         }
-        withUnsafeMutablePointer(to: &addr.sun_path) { rawPtr in
-            rawPtr.withMemoryRebound(to: UInt8.self, capacity: capacity) { dst in
-                for (index, byte) in pathBytes.enumerated() { dst[index] = byte }
-                dst[pathBytes.count] = 0
-            }
-        }
 
-        // Remove any stale socket from a previous run before binding.
+        // Remove any leftover socket node before binding. startThrowing() has
+        // already probed it and confirmed no live server is behind it (a live one
+        // would have thrown `alreadyRunning`), so this only clears a stale node
+        // from a crashed or previously-exited instance.
         unlink(path)
 
         let size = socklen_t(MemoryLayout<sockaddr_un>.size)
@@ -238,6 +256,64 @@ final class ControlServer {
         }
 
         return fd
+    }
+
+    /// Liveness of whatever currently occupies the control socket path.
+    enum ExistingSocketState: Equatable {
+        /// Nothing at the path.
+        case absent
+        /// A file exists at the path but no server is listening behind it (a
+        /// stale node from a crashed/exited instance, or a non-socket leftover).
+        /// Safe to `unlink` and rebind.
+        case dead
+        /// A server is accepting connections at the path. Must not be clobbered.
+        case live
+    }
+
+    /// Probe the socket path to decide whether a live control server already
+    /// owns it. A successful `connect()` proves a listener is accepting;
+    /// `ECONNREFUSED` (or any other failure) means the node is stale and can be
+    /// replaced. This is a mechanical liveness observation, never output
+    /// inference. Static and non-private so the guard can be unit tested.
+    static func probeSocket(at path: String) -> ExistingSocketState {
+        var info = stat()
+        // lstat, not stat: never follow a symlink planted at the path.
+        guard lstat(path, &info) == 0 else { return .absent }
+        // A non-socket file squatting the path is not a live server; report it as
+        // a removable stale artifact so binding can proceed after unlink.
+        guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) else { return .dead }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return .dead }
+        defer { Darwin.close(fd) }
+
+        guard var addr = makeUnixAddr(path) else { return .dead }
+        let size = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let rc = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                connect(fd, sockPtr, size)
+            }
+        }
+        return rc == 0 ? .live : .dead
+    }
+
+    /// Fill a `sockaddr_un` for a Unix domain socket at `path`, or return nil if
+    /// the path does not fit in `sun_path`. Shared by the listener and the probe
+    /// so both agree on the exact address encoding.
+    private static func makeUnixAddr(_ path: String) -> sockaddr_un? {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        let pathBytes = Array(path.utf8)
+        let capacity = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count < capacity else { return nil }
+        withUnsafeMutablePointer(to: &addr.sun_path) { rawPtr in
+            rawPtr.withMemoryRebound(to: UInt8.self, capacity: capacity) { dst in
+                for (index, byte) in pathBytes.enumerated() { dst[index] = byte }
+                dst[pathBytes.count] = 0
+            }
+        }
+        return addr
     }
 
     // MARK: - Accept / connection handling
@@ -641,6 +717,7 @@ enum ControlServerError: Error, CustomStringConvertible {
     case posix(String, Int32)
     case pathTooLong(String)
     case insecureDirectory(String)
+    case alreadyRunning(String)
 
     var description: String {
         switch self {
@@ -650,6 +727,8 @@ enum ControlServerError: Error, CustomStringConvertible {
             return "control socket path is too long for sockaddr_un: \(path)"
         case let .insecureDirectory(path):
             return "control directory is not a private directory owned by this user: \(path)"
+        case let .alreadyRunning(path):
+            return "another Maxx control server is already listening at: \(path)"
         }
     }
 }
