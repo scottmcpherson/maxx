@@ -268,8 +268,10 @@ enum AgentTranscriptResultExtractor {
         agent: String,
         maxBytes: Int = ControlSession.Limits.maxResultBytes
     ) -> String? {
-        let normalizedAgent = agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard normalizedAgent == "codex" || normalizedAgent == "claude" else { return nil }
+        // Only a runtime with a registered transcript adapter is auto-captured; any
+        // other agent (a cross-provider runtime with no structured transcript) has
+        // no automatic result and relies on an explicit `set-result` declaration.
+        guard let runtime = runtime(for: agent) else { return nil }
 
         var candidate: String?
         for rawLine in contents.components(separatedBy: .newlines) {
@@ -280,19 +282,60 @@ enum AgentTranscriptResultExtractor {
             else {
                 continue
             }
-
-            switch normalizedAgent {
-            case "codex":
-                candidate = codexResult(from: object) ?? candidate
-            case "claude":
-                candidate = claudeResult(from: object) ?? candidate
-            default:
-                break
-            }
+            candidate = runtime.extract(object) ?? candidate
         }
 
         guard let candidate else { return nil }
         return bounded(candidate, maxBytes: maxBytes)
+    }
+
+    /// A per-runtime transcript adapter: where the runtime writes its JSONL
+    /// transcripts, and how to pull a final-answer string from one transcript
+    /// object.
+    ///
+    /// This is the single extension point for observing another agent runtime's
+    /// declared result: supporting a new runtime that writes a structured
+    /// transcript is one entry in ``runtimes`` (plus documentation) — no other code
+    /// changes. A runtime with no adapter is not inferred from output; it simply
+    /// has no automatic capture and uses explicit `set-result`. Every adapter reads
+    /// only the runtime's own transcript files under its own roots and pulls only a
+    /// declared final-answer field — never arbitrary terminal output.
+    struct Runtime {
+        let name: String
+        /// Directories (under the user's home) the runtime writes transcripts to.
+        /// A transcript path is honored only if it resolves within one of these.
+        let roots: (FileManager) -> [URL]
+        /// Pull a final-answer string from one parsed transcript object, or nil.
+        let extract: ([String: Any]) -> String?
+    }
+
+    /// The registered transcript runtimes. Add an entry to support another
+    /// runtime's automatic result capture.
+    static let runtimes: [Runtime] = [
+        Runtime(
+            name: "codex",
+            roots: { fileManager in
+                let home = fileManager.homeDirectoryForCurrentUser
+                return [
+                    home.appendingPathComponent(".codex/sessions", isDirectory: true),
+                    home.appendingPathComponent(".codex/archived_sessions", isDirectory: true),
+                ]
+            },
+            extract: codexResult(from:)),
+        Runtime(
+            name: "claude",
+            roots: { fileManager in
+                [fileManager.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects", isDirectory: true)]
+            },
+            extract: claudeResult(from:)),
+    ]
+
+    /// The adapter for `agent` (case-insensitive), or nil if none is registered.
+    static func runtime(for agent: String) -> Runtime? {
+        let normalized = agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        return runtimes.first { $0.name == normalized }
     }
 
     private static func validatedTranscriptURL(
@@ -318,20 +361,7 @@ enum AgentTranscriptResultExtractor {
     }
 
     private static func transcriptRoots(for agent: String) -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        switch agent.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "codex":
-            return [
-                home.appendingPathComponent(".codex/sessions", isDirectory: true),
-                home.appendingPathComponent(".codex/archived_sessions", isDirectory: true),
-            ]
-        case "claude":
-            return [
-                home.appendingPathComponent(".claude/projects", isDirectory: true),
-            ]
-        default:
-            return []
-        }
+        runtime(for: agent)?.roots(.default) ?? []
     }
 
     private static func tailContents(from url: URL) -> String? {

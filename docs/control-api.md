@@ -317,13 +317,54 @@ when archived for inspection. A session restart clears the previous run's
 result writes are gated by `state:set`; result reads are part of `sessions.get`
 / `sessions.list` and are gated by `tabs:list`.
 
-Maxx can also declare results from structured Codex/Claude hook transcripts when
-the hook provides a transcript path and final-answer record. Automatic capture
-only accepts `.jsonl` files under the known Codex/Claude transcript roots
-(`~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.claude/projects`). This
-reads CLI transcript JSON records from an explicit hook payload, not terminal
-scrollback, and only captures answer text; it never derives workflow truth from
-prose.
+Maxx can also declare results from structured agent hook transcripts when the
+hook provides a transcript path and final-answer record. Automatic capture is
+handled by a per-runtime **transcript adapter** table: each adapter names the
+`.jsonl` roots a runtime writes to and how to pull a final-answer field from one
+transcript record. Built-in adapters cover Codex (`~/.codex/sessions`,
+`~/.codex/archived_sessions`) and Claude Code (`~/.claude/projects`). A runtime
+with **no adapter** — e.g. a cross-provider agent that writes no structured
+transcript — is never inferred from output; it simply has no automatic capture
+and reports its answer with an explicit `set-result`. Adding auto-capture for
+another runtime that does write a structured transcript is one adapter entry, no
+other code changes. Capture reads CLI transcript JSON from an explicit hook
+payload, not terminal scrollback, and only captures answer text.
+
+### Declared result schema (structured-output contract)
+
+A caller can declare a **JSON-Schema (subset) contract** for a session's
+`result`. When set, every `set-result` — over the API *or* from an automatic
+transcript capture — must supply a `result` that parses as JSON and satisfies the
+schema, or it is rejected with `invalid_request` and the previous result is left
+untouched. This is the cross-provider equivalent of a structured-output
+contract: a parent declares the shape it expects a child's answer to take, and
+Maxx enforces it on the declared value. It is a *validation contract the agent
+declares*, never a heuristic applied to terminal output.
+
+```bash
+# Declare a contract at create time, or on an existing session.
+maxx +control sessions create --command "codex exec 'review'" \
+  --result-schema '{"type":"object","required":["verdict"],
+                    "properties":{"verdict":{"type":"string"},
+                                  "confidence":{"type":"number"}}}'
+maxx +control sessions set-result-schema <session_id> --result-schema '{"type":"array"}'
+
+# A conforming result is accepted; a non-conforming one is rejected.
+maxx +control sessions set-result <session_id> --result '{"verdict":"ship","confidence":0.9}'
+maxx +control sessions set-result <session_id> --result 'looks good'   # invalid_request
+
+maxx +control sessions clear-result-schema <session_id>
+```
+
+Supported keywords (all optional; unknown keywords are ignored so the subset can
+grow): `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`,
+`null`), `required` (property-name array), `properties` (name → sub-schema), and
+`items` (array element sub-schema). The schema is validated when declared, so a
+session never carries a contract Maxx cannot enforce. The contract is a session
+property retained across `restart` (unlike `result`, which is per-run) and
+independent of `clear-result`; it appears in the session view as `result_schema`.
+Declaring/clearing it is gated by `state:set` (the same declared-fact gate as
+`set-result`).
 
 ### Agent type and parent (persisted)
 
@@ -339,6 +380,51 @@ maxx +control sessions create --command "zig build" --parent <parent_session_id>
 `--agent-type` is validated as an opaque token (Maxx never derives meaning from
 its text) and recorded with a source and timestamp. `--parent` must reference a
 known `session_id`; the persisted edge is mechanical, never inferred.
+
+### Agent profiles (cross-provider subagents)
+
+A **profile** is a named bundle of create-time inputs — `command`, `agent_type`,
+`env`, and `metadata` — so a caller can spawn a well-known agent (Claude Code,
+Codex, an OpenRouter-backed model, a local runner, …) by name rather than
+repeating its full invocation. This is the substrate for defining custom
+subagents as any provider/model: the "brain" is whatever CLI the profile's
+`command` launches; Maxx just spawns and supervises it.
+
+Profiles are a **user-authored, read-only** config file — Maxx never writes it
+and the API never mutates it. Location: `MAXX_PROFILES_FILE`, else
+`~/Library/Application Support/<bundle-id>/agent-profiles.json`. Either shape is
+accepted — a versioned envelope or a bare name → profile map:
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "kimi-reviewer": {
+      "command": "kimi --model kimi-3 exec 'review the diff'",
+      "agent_type": "kimi",
+      "env": ["OPENROUTER_API_KEY=sk-..."],
+      "metadata": { "role": "reviewer" }
+    }
+  }
+}
+```
+
+```bash
+# Spawn a session from a profile. Explicit flags override the profile's fields.
+maxx +control sessions create --profile kimi-reviewer
+maxx +control sessions create --profile kimi-reviewer --command "kimi --model kimi-3 exec 'other task'"
+
+# Discover available profiles (env values are never returned — only key names).
+maxx +control profiles list
+```
+
+An unknown `--profile` name is `invalid_request` (never a silent fall-through to
+a bare tab). Explicit caller-supplied fields always override the profile's; env
+entries merge by key with the caller winning. Profile `env` may hold secrets, so
+— like every create-time `--env` — it is applied to the spawned process but
+**never persisted** to the session registry, and `profiles.list` returns only env
+**key names**, never values. `profiles.list` is gated by its own read capability,
+`profiles:list`.
 
 ### Parent-child tab groups (MAX-6)
 

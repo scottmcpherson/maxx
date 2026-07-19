@@ -195,18 +195,27 @@ final class ControlSessionRegistry {
         return formatter
     }()
 
+    /// User-authored agent profiles, resolved lazily per request so an edit to the
+    /// profiles file takes effect without an app restart. Injected as a closure so
+    /// tests can supply profiles without a file on disk; production reads the
+    /// user-owned profiles file (see ``ControlProfileStore``). Never written by
+    /// Maxx — profiles are the user's own definitions.
+    private let profileProvider: () -> [String: ControlAgentProfile]
+
     init(
         now: @escaping () -> Date = Date.init,
         makeID: @escaping () -> UUID = UUID.init,
         maxBusEvents: Int = 10_000,
         policy: ControlPolicy = .default,
-        store: ControlSessionStore? = nil
+        store: ControlSessionStore? = nil,
+        profiles: @escaping () -> [String: ControlAgentProfile] = { [:] }
     ) {
         self.now = now
         self.makeID = makeID
         self.maxBusEvents = max(1, maxBusEvents)
         self.policy = policy
         self.store = store
+        self.profileProvider = profiles
         // NB: rehydration is intentionally NOT done here. The store reads a file
         // from the world-writable control directory (`/tmp/maxx-control-<uid>`),
         // which must be validated as ours and private before it is trusted. The
@@ -341,6 +350,10 @@ final class ControlSessionRegistry {
                 return .success(.init(session: try setResult(request.params, host: host)))
             case .sessionsClearResult:
                 return .success(.init(session: try clearResult(request.params, host: host)))
+            case .sessionsSetResultSchema:
+                return .success(.init(session: try setResultSchema(request.params, host: host)))
+            case .sessionsClearResultSchema:
+                return .success(.init(session: try clearResultSchema(request.params, host: host)))
             case .sessionsSetAgentType:
                 return .success(.init(session: try setAgentType(request.params, host: host)))
             case .sessionsSetParent:
@@ -353,6 +366,8 @@ final class ControlSessionRegistry {
                 return .success(.init(policy: try policyCheck(request.params)))
             case .policySources:
                 return .success(.init(policySources: policy.sourceViews))
+            case .profilesList:
+                return .success(.init(profiles: profilesList()))
             case .sessionsWait, .sessionsWatch, .streamWatch, .streamWait:
                 // wait/watch (and the stream variants) are long-lived and handled
                 // by the streaming path in ControlServer; they never reach this
@@ -511,18 +526,38 @@ final class ControlSessionRegistry {
         _ params: ControlRequest.Params?,
         host: ControlSessionHost
     ) throws -> ControlSessionView {
+        // Expand a named agent profile (if any) into effective create inputs.
+        // Explicit caller-supplied fields always override the profile's; the
+        // profile only fills gaps. Resolved before validation so the merged values
+        // are what gets validated and spawned. An unknown profile name is a client
+        // error (`invalid_request`), never a silent fall-through to a bare tab.
+        let profile = try resolveProfile(params?.profile)
         let title = try ControlValidation.validateTitle(params?.title)
-        let command = try ControlValidation.validateCommand(params?.command)
+        let command = try ControlValidation.validateCommand(params?.command ?? profile?.command)
         let cwd = try ControlValidation.validateCwd(params?.cwd)
-        let env = try ControlValidation.validateEnv(params?.env)
-        let metadata = try ControlValidation.validateMetadata(params?.metadata)
+        // Profile env first, caller env last: `validateEnv` builds a dict where a
+        // later `KEY=VALUE` overwrites an earlier one, so caller entries win by key.
+        let env = try ControlValidation.validateEnv((profile?.env ?? []) + (params?.env ?? []))
+        // Profile metadata first, caller metadata overrides by key.
+        let metadata = try ControlValidation.validateMetadata(
+            mergedMetadata(base: profile?.metadata ?? [:], override: params?.metadata))
         let status = try ControlValidation.validateStatus(params?.status) ?? "created"
         let group = try ControlValidation.validateGroup(params?.group)
-        let agentType = try ControlValidation.validateAgentType(params?.agentType)
+        let agentType = try ControlValidation.validateAgentType(params?.agentType ?? profile?.agentType)
         // A create-time agent-type is the same explicit declared fact as the
         // standalone `set-agent-type`, and carries a source. Validate the source up
         // front (before spawning) so an invalid one can't leave a stray tab behind.
         let agentTypeSource = try agentType.map { _ in
+            try ControlValidation.validateSource(params?.source)
+        }
+        // A create-time result-schema contract is the same explicit declared fact
+        // as the standalone `set-result-schema`: validate it (shape + subset) up
+        // front so a malformed schema can't leave a stray tab behind, and gate it
+        // like the other declared-fact verbs (below).
+        let resultSchema = try params?.resultSchema.map {
+            try ControlValidation.validateResultSchema($0)
+        }
+        let resultSchemaSource = try resultSchema.map { _ in
             try ControlValidation.validateSource(params?.source)
         }
         // A parent association (MAX-5) is an explicit, caller-supplied edge to a
@@ -553,7 +588,11 @@ final class ControlSessionRegistry {
                 .tabsFocus, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
         }
-        if agentType != nil {
+        if agentType != nil || resultSchema != nil {
+            // Declaring an agent type or a result-schema contract at create is the
+            // same declared-fact surface as the standalone verbs, gated by
+            // `state:set` — otherwise create would be a way to declare them without
+            // the capability. One check covers both (idempotent if both are set).
             try enforceCapability(
                 .stateSet, caller: params?.caller, confirm: params?.confirm,
                 target: ControlPolicyMapping.target(for: .sessionsCreate, params: params))
@@ -646,6 +685,9 @@ final class ControlSessionRegistry {
         // Baseline the observed lifecycle so reconciliation later emits exactly
         // one `exited`/`closed` event on the kernel-reported transition.
         session.lastObservedLifecycle = ControlLifecycle.running.rawValue
+        // A create-time result-schema contract is retained on the record (it is a
+        // session contract, not a per-run value), set before the first store.
+        session.resultSchema = resultSchema
         // `touch: false` keeps updatedAt == createdAt for a brand-new record.
         store(&session, touch: false)
 
@@ -677,6 +719,15 @@ final class ControlSessionRegistry {
             record(
                 &session, kind: .metadata, name: "agent_type", source: agentTypeSource,
                 message: agentType, createdAt: session.createdAt, pid: pid)
+            store(&session, touch: false)
+        }
+        // A create-time result-schema declaration is likewise an explicit declared
+        // fact — record it in the audit log with its source so supervisors observe
+        // the contract and it persists. `touch: false` keeps updatedAt == createdAt.
+        if resultSchema != nil, let resultSchemaSource {
+            record(
+                &session, kind: .metadata, name: "result_schema", source: resultSchemaSource,
+                message: "declared", createdAt: session.createdAt, pid: pid)
             store(&session, touch: false)
         }
         // Surface any metadata supplied at create time so the UI shows it from
@@ -1335,6 +1386,14 @@ final class ControlSessionRegistry {
         source: String,
         host: ControlSessionHost
     ) throws -> ControlSessionView {
+        // Enforce a declared result-schema contract before recording anything, so a
+        // result that violates it is rejected (`invalid_request`) and the previous
+        // result/audit log is left untouched. This runs on BOTH the API path and
+        // the trusted agent-hook transcript capture, since both funnel through here
+        // — a schema-constrained session never records a non-conforming answer.
+        if let schema = session.resultSchema {
+            try ControlValidation.enforceResultSchema(result: result, schema: schema)
+        }
         let at = now()
         let handle = liveSurface(of: session, host: host)
         let sessionID = session.id.uuidString
@@ -1377,6 +1436,60 @@ final class ControlSessionRegistry {
             &session,
             kind: .result,
             name: "result.cleared",
+            source: source,
+            message: "cleared",
+            createdAt: now(),
+            pid: handle?.pid)
+        store(&session)
+        return view(of: session, host: host)
+    }
+
+    /// Declare a `result_schema` contract (`set-result-schema`) that every future
+    /// `set-result` must satisfy. An explicit structured-output contract on the
+    /// session — validated (shape + subset) before any field is touched, so a
+    /// malformed schema leaves the current contract intact. Setting the schema to
+    /// the value it already holds is an idempotent no-op (matches the metadata /
+    /// parent / group mutators): no audit entry, no `updated_at` bump, no rewrite.
+    private func setResultSchema(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let schema = try ControlValidation.validateResultSchema(params?.resultSchema)
+        let source = try ControlValidation.validateSource(params?.source)
+        guard session.resultSchema != schema else { return view(of: session, host: host) }
+
+        let handle = liveSurface(of: session, host: host)
+        session.resultSchema = schema
+        record(
+            &session,
+            kind: .metadata,
+            name: "result_schema",
+            source: source,
+            message: "declared",
+            createdAt: now(),
+            pid: handle?.pid)
+        store(&session)
+        return view(of: session, host: host)
+    }
+
+    /// Clear the declared `result_schema` contract (`clear-result-schema`) so
+    /// future results are unconstrained again. Clearing an already-absent contract
+    /// is an idempotent no-op. Does not touch `result` itself.
+    private func clearResultSchema(
+        _ params: ControlRequest.Params?,
+        host: ControlSessionHost
+    ) throws -> ControlSessionView {
+        var session = try requireSession(params?.id)
+        let source = try ControlValidation.validateSource(params?.source)
+        guard session.resultSchema != nil else { return view(of: session, host: host) }
+
+        let handle = liveSurface(of: session, host: host)
+        session.resultSchema = nil
+        record(
+            &session,
+            kind: .metadata,
+            name: "result_schema.cleared",
             source: source,
             message: "cleared",
             createdAt: now(),
@@ -2289,6 +2402,50 @@ final class ControlSessionRegistry {
         return id
     }
 
+    /// Resolve a `create --profile <name>` to its user-authored profile. Absent/
+    /// empty name → nil (no profile). A named profile that does not exist is a
+    /// client error (`invalid_request`) so a typo never silently spawns a bare
+    /// tab. Profiles are the user's own config — never inferred, never written.
+    private func resolveProfile(_ name: String?) throws -> ControlAgentProfile? {
+        guard let name, !name.isEmpty else { return nil }
+        guard let profile = profileProvider()[name] else {
+            throw ControlError(.invalidRequest, "no agent profile named '\(name)'")
+        }
+        return profile
+    }
+
+    /// Merge a profile's metadata (base) with the caller's (override) so a
+    /// caller-supplied key wins over the profile's. Returns nil when both are empty
+    /// so `validateMetadata` treats it as "no metadata".
+    private func mergedMetadata(
+        base: [String: ControlJSONValue],
+        override: [String: ControlJSONValue]?
+    ) -> [String: ControlJSONValue]? {
+        let override = override ?? [:]
+        if base.isEmpty && override.isEmpty { return nil }
+        var merged = base
+        merged.merge(override) { _, new in new }
+        return merged
+    }
+
+    /// Build the `profiles.list` view. Env *values* are deliberately dropped —
+    /// only the sorted key names are returned — so a profile's secrets are never
+    /// exposed over the socket. Names are sorted for a stable, deterministic list.
+    private func profilesList() -> [ControlProfileView] {
+        profileProvider()
+            .sorted { $0.key < $1.key }
+            .map { name, profile in
+                ControlProfileView(
+                    name: name,
+                    command: profile.command,
+                    agentType: profile.agentType,
+                    envKeys: profile.env.compactMap { entry in
+                        entry.firstIndex(of: "=").map { String(entry[..<$0]) }
+                    }.sorted(),
+                    metadata: profile.metadata)
+            }
+    }
+
     private func requireSession(_ idString: String?) throws -> ControlSession {
         guard let idString, !idString.isEmpty else {
             throw ControlError(.invalidRequest, "session id is required")
@@ -2417,7 +2574,8 @@ final class ControlSessionRegistry {
             summarySource: session.summarySource,
             result: session.result,
             resultAt: session.resultAt.map(Self.iso8601.string(from:)),
-            resultSource: session.resultSource)
+            resultSource: session.resultSource,
+            resultSchema: session.resultSchema)
     }
 
     /// Build the wire view of an audit-log entry.

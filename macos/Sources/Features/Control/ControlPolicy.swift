@@ -56,6 +56,9 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
     case groupsCreate = "groups:create"
     /// Fire a webhook / automation trigger.
     case automationTrigger = "automation:trigger"
+    /// List the user-authored agent profiles (`profiles.list`). A read of
+    /// user-owned config; env values are never exposed by the method behind it.
+    case profilesList = "profiles:list"
 
     /// True when a method actually exists for this capability in this build.
     ///
@@ -69,7 +72,8 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
     var isImplemented: Bool {
         switch self {
         case .tabsList, .tabsSpawn, .tabsRestart, .tabsFocus, .tabsClose,
-             .inputSend, .keysPress, .stateSet, .metadataSet, .groupsCreate:
+             .inputSend, .keysPress, .stateSet, .metadataSet, .groupsCreate,
+             .profilesList:
             return true
         case .outputRead, .groupsList, .automationTrigger:
             return false
@@ -79,7 +83,7 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
     /// A read-only observation capability (vs. a state mutation).
     var isRead: Bool {
         switch self {
-        case .tabsList, .outputRead, .groupsList:
+        case .tabsList, .outputRead, .groupsList, .profilesList:
             return true
         default:
             return false
@@ -121,6 +125,7 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
         case .groupsList: return "list groups in"
         case .groupsCreate: return "create a group in"
         case .automationTrigger: return "trigger automation in"
+        case .profilesList: return "list agent profiles in"
         }
     }
 
@@ -142,6 +147,8 @@ enum ControlCapability: String, CaseIterable, Codable, Sendable {
             return "this changes control-plane state shown in the UI"
         case .outputRead:
             return "this exposes terminal contents to the caller"
+        case .profilesList:
+            return "this reveals which agent profiles are configured"
         default:
             return "this affects terminal state"
         }
@@ -549,11 +556,18 @@ enum ControlPolicyMapping {
             default: return nil
             }
         case .sessionsDeclareState, .sessionsEmitEvent, .sessionsSetState, .sessionsSetSummary,
-             .sessionsSetResult, .sessionsClearResult, .sessionsSetAgentType:
+             .sessionsSetResult, .sessionsClearResult, .sessionsSetAgentType,
+             .sessionsSetResultSchema, .sessionsClearResultSchema:
             // Declaring the agent type (MAX-5) is an agent self-declaration, gated
             // like the other declared-fact verbs by `state:set`. Results (MAX-25)
-            // are likewise explicit agent-declared facts, not output readback.
+            // and the result-schema contract are likewise explicit agent-declared
+            // facts, not output readback.
             return .stateSet
+        case .profilesList:
+            // Listing user-authored agent profiles is a read of user-owned config,
+            // gated by its own read capability so a source's access to profile
+            // definitions is configured independently of session enumeration.
+            return .profilesList
         case .sessionsUpdate:
             // `update` writes caller-owned `status` and/or `metadata`. A `status`
             // write is a state mutation — the same field `declare-state` writes

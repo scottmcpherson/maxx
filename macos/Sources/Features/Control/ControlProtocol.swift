@@ -91,6 +91,13 @@ enum ControlMethod: String, Codable {
     /// Clear the currently declared result for a fresh run or explicit reset.
     case sessionsClearResult = "sessions.clear-result"
 
+    /// Declare a JSON-Schema (subset) contract every future `result` must satisfy.
+    /// An explicit structured-output contract, validated by `set-result`.
+    case sessionsSetResultSchema = "sessions.set-result-schema"
+
+    /// Clear the declared result-schema contract.
+    case sessionsClearResultSchema = "sessions.clear-result-schema"
+
     // MARK: Persistent session registry (MAX-5)
 
     /// Declare the session's agent type (e.g. `claude-code`, `codex`), persisted
@@ -129,6 +136,13 @@ enum ControlMethod: String, Codable {
     /// List active policy sources. Read-only diagnostics for operators; the
     /// response is explicit configuration only, not runtime/session state.
     case policySources = "policy.sources"
+
+    // MARK: Agent profiles
+
+    /// List the user-authored agent profiles available to `create --profile`.
+    /// Read-only; env *values* are never returned (only their key names), so a
+    /// profile's secrets are not exposed over the socket.
+    case profilesList = "profiles.list"
 }
 
 // MARK: - Errors
@@ -251,6 +265,10 @@ struct ControlRequest: Codable {
         /// Bounded child-answer/result text for `set-result`. This is separate
         /// from `summary`, which remains a short display line.
         var result: String?
+        /// JSON-Schema (subset) contract text for `set-result-schema`, or attached
+        /// at `create` time. When declared, `set-result` validates each result
+        /// against it. See ``ControlResultSchema``.
+        var resultSchema: String?
 
         // MARK: Persistent session registry (MAX-5)
 
@@ -262,6 +280,11 @@ struct ControlRequest: Codable {
         /// never inferred), or, on `list`, filters to a parent's children. Empty
         /// on `set-parent` clears the edge.
         var parent: String?
+        /// Agent-profile name for `sessions.create`: expands to the profile's
+        /// `command`/`agent_type`/`env`/`metadata` from the user-authored profiles
+        /// file. Explicit caller-supplied fields override the profile's. An unknown
+        /// name is `invalid_request`. See ``ControlProfileStore``.
+        var profile: String?
 
         // MARK: Structured event stream (MAX-7)
 
@@ -307,8 +330,9 @@ struct ControlRequest: Codable {
             case timeoutMs = "timeout_ms"
             case since
             case summary, result
+            case resultSchema = "result_schema"
             case agentType = "agent_type"
-            case parent
+            case parent, profile
             case group, tab, all
             case caller, confirm, capability
         }
@@ -395,6 +419,9 @@ struct ControlSessionView: Codable, Equatable {
     var resultAt: String?
     /// Who declared `result`, if ever.
     var resultSource: String?
+    /// Declared JSON-Schema (subset) contract for `result`, if any. Verbatim
+    /// schema text; omitted until declared via `create`/`set-result-schema`.
+    var resultSchema: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -420,6 +447,7 @@ struct ControlSessionView: Codable, Equatable {
         case result
         case resultAt = "result_at"
         case resultSource = "result_source"
+        case resultSchema = "result_schema"
     }
 }
 
@@ -443,6 +471,25 @@ struct ControlPolicyDecisionView: Codable, Equatable {
         case decision, source
         case sourceKind = "source_kind"
         case capability, target, reason, prompt
+    }
+}
+
+/// The wire view of a user-authored agent profile, returned by `profiles.list`.
+/// Deliberately omits env *values* — only the key names are exposed — so a
+/// profile's secrets (API keys) are never returned over the control socket.
+struct ControlProfileView: Codable, Equatable {
+    var name: String
+    var command: String?
+    var agentType: String?
+    /// The names of the env vars this profile sets, without their values.
+    var envKeys: [String]
+    var metadata: [String: ControlJSONValue]
+
+    enum CodingKeys: String, CodingKey {
+        case name, command
+        case agentType = "agent_type"
+        case envKeys = "env_keys"
+        case metadata
     }
 }
 
@@ -475,12 +522,15 @@ struct ControlResponse: Codable {
         var policy: ControlPolicyDecisionView?
         /// Active policy sources, returned by `policy.sources`.
         var policySources: [ControlPolicySourceView]?
+        /// User-authored agent profiles, returned by `profiles.list`.
+        var profiles: [ControlProfileView]?
 
         enum CodingKeys: String, CodingKey {
             case session, sessions, canceled, applied, outcome, event, events
             case streamEvent = "stream_event"
             case policy
             case policySources = "policy_sources"
+            case profiles
         }
 
         init(
@@ -493,7 +543,8 @@ struct ControlResponse: Codable {
             events: [ControlEventView]? = nil,
             streamEvent: ControlStreamEventView? = nil,
             policy: ControlPolicyDecisionView? = nil,
-            policySources: [ControlPolicySourceView]? = nil
+            policySources: [ControlPolicySourceView]? = nil,
+            profiles: [ControlProfileView]? = nil
         ) {
             self.session = session
             self.sessions = sessions
@@ -505,6 +556,7 @@ struct ControlResponse: Codable {
             self.streamEvent = streamEvent
             self.policy = policy
             self.policySources = policySources
+            self.profiles = profiles
         }
     }
 

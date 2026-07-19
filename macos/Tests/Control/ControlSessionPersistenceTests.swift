@@ -77,6 +77,7 @@ struct ControlSessionPersistenceTests {
         session.result = "Child final answer"
         session.resultAt = date
         session.resultSource = "codex-transcript"
+        session.resultSchema = "{\"type\":\"object\"}"
         session.lastSeenAt = date
         session.restartCount = 2
         session.appendEvent(
@@ -101,6 +102,7 @@ struct ControlSessionPersistenceTests {
         #expect(restored?.result == "Child final answer")
         #expect(restored?.resultAt == date)
         #expect(restored?.resultSource == "codex-transcript")
+        #expect(restored?.resultSchema == "{\"type\":\"object\"}")
         #expect(restored?.restartCount == 2)
         #expect(restored?.events.count == 1)
         #expect(restored?.events.first?.name == "complete")

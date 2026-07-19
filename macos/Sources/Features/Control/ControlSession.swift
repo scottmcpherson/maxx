@@ -126,6 +126,16 @@ struct ControlSession {
     /// Who declared `result` (defaults to `agent`).
     var resultSource: String?
 
+    /// Optional declared JSON-Schema (subset) contract for `result`. When set, a
+    /// `set-result` — over the API or from a trusted agent-hook transcript
+    /// capture — must supply a `result` that parses as JSON and satisfies this
+    /// schema, else it is rejected with `invalid_request` (see
+    /// ``ControlResultSchema``). Unlike `result`, which is per-run and cleared on
+    /// `restart`/`clear-result`, this is a create-time/declared *contract* on the
+    /// session that is retained across restart. Stored verbatim as the caller's
+    /// schema text; Maxx never originates or infers it.
+    var resultSchema: String?
+
     /// True when this record was rehydrated from disk on app launch rather than
     /// created live this run (MAX-5). A mechanical fact about *this* run — Maxx
     /// knows it loaded the record from its own store — not anything inferred
@@ -199,6 +209,10 @@ struct ControlSession {
         /// Max UTF-8 bytes for an agent-declared session result. This keeps the
         /// durable registry bounded while still allowing a full short answer.
         static let maxResultBytes = 16 * 1024
+        /// Max UTF-8 bytes for a declared `result_schema` contract. Small: a schema
+        /// describing a structured answer is far smaller than the answer itself,
+        /// and this bounds the extra durable field the registry now persists.
+        static let maxResultSchemaBytes = 8 * 1024
         static let maxGroupLength = 128
         static let maxAgentTypeLength = 128
     }
@@ -369,6 +383,55 @@ enum ControlValidation {
                 "result exceeds \(ControlSession.Limits.maxResultBytes) bytes")
         }
         return result
+    }
+
+    /// Validate a declared `result_schema` contract: bounded, valid JSON, and a
+    /// well-formed schema in the supported subset (``ControlResultSchema``). The
+    /// caller's raw schema text is returned verbatim for storage. Rejecting a
+    /// malformed schema up front means a session never carries a contract Maxx
+    /// cannot enforce, so `set-result` either enforces a real schema or none.
+    static func validateResultSchema(_ schema: String?) throws -> String {
+        guard let schema, !schema.isEmpty else {
+            throw ControlError(.invalidRequest, "result_schema must not be empty")
+        }
+        guard schema.utf8.count <= ControlSession.Limits.maxResultSchemaBytes else {
+            throw ControlError(
+                .invalidRequest,
+                "result_schema exceeds \(ControlSession.Limits.maxResultSchemaBytes) bytes")
+        }
+        let parsed: ControlJSONValue
+        do {
+            parsed = try JSONDecoder().decode(ControlJSONValue.self, from: Data(schema.utf8))
+        } catch {
+            throw ControlError(.invalidRequest, "result_schema is not valid JSON")
+        }
+        try ControlResultSchema.validateSchema(parsed)
+        return schema
+    }
+
+    /// Validate an already-declared `result` against an already-validated
+    /// `result_schema` contract. Throws `invalid_request` when the result is not
+    /// valid JSON or does not satisfy the schema. Enforced on every `set-result`
+    /// path (API and hook) so the contract holds regardless of who declares.
+    static func enforceResultSchema(result: String, schema: String) throws {
+        let resultValue: ControlJSONValue
+        do {
+            resultValue = try JSONDecoder().decode(
+                ControlJSONValue.self, from: Data(result.utf8))
+        } catch {
+            throw ControlError(
+                .invalidRequest,
+                "result does not satisfy result_schema: result is not valid JSON")
+        }
+        // The schema was validated when it was declared, so a decode failure here
+        // would be a persisted-file corruption; treat an unreadable schema as
+        // "no constraint" rather than blocking a legitimate result.
+        guard let schemaValue = try? JSONDecoder().decode(
+            ControlJSONValue.self, from: Data(schema.utf8)) else { return }
+        if let reason = ControlResultSchema.mismatch(resultValue, schema: schemaValue) {
+            throw ControlError(
+                .invalidRequest, "result does not satisfy result_schema: \(reason)")
+        }
     }
 
     static func validateCommand(_ command: String?) throws -> String? {
@@ -690,6 +753,7 @@ extension ControlSession: Codable {
         case result
         case resultAt = "result_at"
         case resultSource = "result_source"
+        case resultSchema = "result_schema"
     }
 
     init(from decoder: Decoder) throws {
@@ -746,7 +810,8 @@ extension ControlSession: Codable {
             summarySource: try container.decodeIfPresent(String.self, forKey: .summarySource),
             result: try container.decodeIfPresent(String.self, forKey: .result),
             resultAt: try container.decodeIfPresent(Date.self, forKey: .resultAt),
-            resultSource: try container.decodeIfPresent(String.self, forKey: .resultSource))
+            resultSource: try container.decodeIfPresent(String.self, forKey: .resultSource),
+            resultSchema: try container.decodeIfPresent(String.self, forKey: .resultSchema))
     }
 
     func encode(to encoder: Encoder) throws {
@@ -784,5 +849,6 @@ extension ControlSession: Codable {
         try container.encodeIfPresent(result, forKey: .result)
         try container.encodeIfPresent(resultAt, forKey: .resultAt)
         try container.encodeIfPresent(resultSource, forKey: .resultSource)
+        try container.encodeIfPresent(resultSchema, forKey: .resultSchema)
     }
 }

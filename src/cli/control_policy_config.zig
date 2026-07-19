@@ -35,6 +35,7 @@ const valid_capabilities = [_][]const u8{
     "groups:list",
     "groups:create",
     "automation:trigger",
+    "profiles:list",
 };
 
 pub const Source = struct {

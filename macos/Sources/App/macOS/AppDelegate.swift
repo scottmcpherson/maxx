@@ -260,10 +260,14 @@ class AppDelegate: NSObject,
         // control directory (MAX-5), so the last known session graph and declared
         // state survive an app restart.
         let controlPolicy = ControlPolicyConfigLoader.loadOrDefault()
+        // User-authored agent profiles (cross-provider subagents), read lazily per
+        // request so an edit to the profiles file takes effect without a restart.
+        let profileStore = ControlProfileStore(fileURL: ControlProfileStore.defaultFileURL())
         let controlServer = ControlServer(
             registry: ControlSessionRegistry(
                 policy: controlPolicy,
-                store: ControlSessionStore(fileURL: ControlPaths.registryFile)),
+                store: ControlSessionStore(fileURL: ControlPaths.registryFile),
+                profiles: { profileStore.load() }),
             host: TerminalControlHost(ghostty: ghostty))
         controlServer.start()
         self.controlServer = controlServer

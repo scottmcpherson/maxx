@@ -27,6 +27,7 @@ const Group = enum {
     stream,
     event,
     policy,
+    profiles,
 };
 
 const Verb = enum {
@@ -52,6 +53,9 @@ const Verb = enum {
     // MAX-25 agent-declared child result verbs.
     @"set-result",
     @"clear-result",
+    // Agent-declared result-schema contract verbs.
+    @"set-result-schema",
+    @"clear-result-schema",
     // MAX-5 persistent session registry verbs.
     @"set-agent-type",
     // MAX-6 parent-child tab group verbs.
@@ -110,9 +114,12 @@ const Command = struct {
     signal: ?[]const u8 = null,
     summary: ?[]const u8 = null,
     result: ?[]const u8 = null,
+    result_schema: ?[]const u8 = null,
     // MAX-5 persistent session registry fields.
     agent_type: ?[]const u8 = null,
     parent: ?[]const u8 = null,
+    // Agent-profile name for `sessions create --profile`.
+    profile: ?[]const u8 = null,
     // MAX-7 structured event stream fields.
     group_name: ?[]const u8 = null,
     tab: ?[]const u8 = null,
@@ -152,6 +159,8 @@ const Command = struct {
                 .@"set-summary" => "sessions.set-summary",
                 .@"set-result" => "sessions.set-result",
                 .@"clear-result" => "sessions.clear-result",
+                .@"set-result-schema" => "sessions.set-result-schema",
+                .@"clear-result-schema" => "sessions.clear-result-schema",
                 .@"set-agent-type" => "sessions.set-agent-type",
                 .@"set-parent" => "sessions.set-parent",
                 .@"set-group" => "sessions.set-group",
@@ -173,6 +182,8 @@ const Command = struct {
                 .@"policy-validate" => unreachable,
                 else => unreachable,
             },
+            // `profiles list` enumerates the user-authored agent profiles.
+            .profiles => "profiles.list",
         };
     }
 
@@ -371,7 +382,7 @@ pub fn run(alloc: Allocator) !u8 {
         error.MissingGroup, error.MissingVerb => return Action.help_error,
         error.UnknownGroup => {
             try stderr.print(
-                "error: expected a 'sessions', 'stream', 'event', or 'policy' subcommand group\n",
+                "error: expected a 'sessions', 'stream', 'event', 'policy', or 'profiles' subcommand group\n",
                 .{},
             );
             return 1;
@@ -382,10 +393,12 @@ pub fn run(alloc: Allocator) !u8 {
                     "  sessions: create, get, list, update, cancel, action, wait, watch, " ++
                     "archive, restart, events, declare-state, emit-event, set-metadata, " ++
                     "remove-metadata, clear-metadata, set-state, set-summary, set-result, " ++
-                    "clear-result, set-agent-type, set-parent, set-group, register-current\n" ++
+                    "clear-result, set-result-schema, clear-result-schema, set-agent-type, " ++
+                    "set-parent, set-group, register-current\n" ++
                     "  stream:   watch, wait\n" ++
                     "  event:    emit\n" ++
-                    "  policy:   check, sources, validate\n",
+                    "  policy:   check, sources, validate\n" ++
+                    "  profiles: list\n",
                 .{},
             );
             return 1;
@@ -708,10 +721,14 @@ fn parseCommand(alloc: Allocator, iter: anytype) ParseError!Command {
             cmd.summary = v;
         } else if (try flagValue(alloc, arg, iter, "--result")) |v| {
             cmd.result = v;
+        } else if (try flagValue(alloc, arg, iter, "--result-schema")) |v| {
+            cmd.result_schema = v;
         } else if (try flagValue(alloc, arg, iter, "--agent-type")) |v| {
             cmd.agent_type = v;
         } else if (try flagValue(alloc, arg, iter, "--parent")) |v| {
             cmd.parent = v;
+        } else if (try flagValue(alloc, arg, iter, "--profile")) |v| {
+            cmd.profile = v;
         } else if (try flagValue(alloc, arg, iter, "--session")) |v| {
             // `--session <id>` is the stream/event spelling of the target id.
             cmd.id = v;
@@ -787,19 +804,21 @@ fn parseVerb(group: Group, s: []const u8) ?Verb {
         .stream => streamVerb(s),
         .event => eventVerb(s),
         .policy => policyVerb(s),
+        .profiles => profilesVerb(s),
     };
 }
 
 fn sessionsVerb(s: []const u8) ?Verb {
     const candidates = [_]Verb{
-        .create,            .@"register-current", .get,
-        .list,              .update,              .cancel,
-        .action,            .wait,                .watch,
-        .archive,           .restart,             .events,
-        .@"declare-state",  .@"emit-event",       .@"set-metadata",
-        .@"set-state",      .@"set-summary",      .@"set-result",
-        .@"clear-result",   .@"set-group",        .@"remove-metadata",
-        .@"clear-metadata", .@"set-agent-type",   .@"set-parent",
+        .create,               .@"register-current",    .get,
+        .list,                 .update,                 .cancel,
+        .action,               .wait,                   .watch,
+        .archive,              .restart,                .events,
+        .@"declare-state",     .@"emit-event",          .@"set-metadata",
+        .@"set-state",         .@"set-summary",         .@"set-result",
+        .@"clear-result",      .@"set-group",           .@"remove-metadata",
+        .@"clear-metadata",    .@"set-agent-type",      .@"set-parent",
+        .@"set-result-schema", .@"clear-result-schema",
     };
     inline for (candidates) |v| {
         if (std.mem.eql(u8, s, @tagName(v))) return v;
@@ -822,6 +841,11 @@ fn policyVerb(s: []const u8) ?Verb {
     if (std.mem.eql(u8, s, "check")) return .@"policy-check";
     if (std.mem.eql(u8, s, "sources")) return .@"policy-sources";
     if (std.mem.eql(u8, s, "validate")) return .@"policy-validate";
+    return null;
+}
+
+fn profilesVerb(s: []const u8) ?Verb {
+    if (std.mem.eql(u8, s, "list")) return .list;
     return null;
 }
 
@@ -989,12 +1013,20 @@ fn buildRequest(alloc: Allocator, cmd: Command, token: []const u8) ![]u8 {
         try json.objectField("result");
         try json.write(v);
     }
+    if (cmd.result_schema) |v| {
+        try json.objectField("result_schema");
+        try json.write(v);
+    }
     if (cmd.agent_type) |v| {
         try json.objectField("agent_type");
         try json.write(v);
     }
     if (cmd.parent) |v| {
         try json.objectField("parent");
+        try json.write(v);
+    }
+    if (cmd.profile) |v| {
+        try json.objectField("profile");
         try json.write(v);
     }
     if (cmd.group_name) |v| {
