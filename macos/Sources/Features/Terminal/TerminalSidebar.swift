@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TerminalSidebarTheme: Equatable {
     let background: NSColor
@@ -272,6 +273,27 @@ private final class TerminalSidebarModel: ObservableObject {
         }
     }
 
+    func move(
+        _ session: TerminalSidebarSession,
+        relativeTo destination: TerminalSidebarSession,
+        placement: TerminalSidebarDropPlacement
+    ) {
+        let windows = tabWindows()
+        guard let sourceIndex = windows.firstIndex(where: { ObjectIdentifier($0) == session.id }),
+              let destinationIndex = windows.firstIndex(where: { ObjectIdentifier($0) == destination.id }),
+              let controller = windows[sourceIndex].windowController as? TerminalController
+        else { return }
+
+        let finalIndex = TerminalSidebarReordering.destinationIndex(
+            sourceIndex: sourceIndex,
+            destinationIndex: destinationIndex,
+            placement: placement)
+        guard finalIndex != sourceIndex else { return }
+
+        _ = controller.moveTab(to: finalIndex)
+        syncSoon()
+    }
+
     func newSession() {
         guard let hostWindow else { return }
 
@@ -444,6 +466,9 @@ private struct TerminalSidebarView: View {
     @ObservedObject var model: TerminalSidebarModel
     let updateViewModel: UpdateViewModel?
 
+    @StateObject private var dragState = TerminalSidebarDragState()
+    @State private var dropInsertionIndex: Int?
+
     var body: some View {
         VStack(spacing: 0) {
             sessionList
@@ -467,12 +492,13 @@ private struct TerminalSidebarView: View {
 
     private var sessionList: some View {
         ScrollView {
-            LazyVStack(spacing: 3) {
-                ForEach(model.sessions) { session in
+            LazyVStack(spacing: 0) {
+                ForEach(Array(model.sessions.enumerated()), id: \.element.id) { index, session in
                     TerminalSidebarRow(
                         session: session,
                         theme: model.theme,
                         isEditing: model.editingSessionID == session.id,
+                        isLast: index == model.sessions.count - 1,
                         onSelect: {
                             model.select(session)
                         },
@@ -487,8 +513,42 @@ private struct TerminalSidebarView: View {
                         },
                         onCancelRename: {
                             model.cancelRename()
+                        },
+                        onDragStarted: {
+                            dragState.sessionID = session.id
+                        },
+                        onDragEnded: {
+                            dragState.sessionID = nil
+                            dropInsertionIndex = nil
+                        },
+                        dragState: dragState,
+                        onDropTargetChanged: { placement in
+                            dropInsertionIndex = placement.map {
+                                TerminalSidebarDropTargeting.insertionIndex(
+                                    destinationIndex: index,
+                                    placement: $0)
+                            }
+                        },
+                        onDrop: { placement in
+                            guard let sourceID = dragState.sessionID,
+                                  let source = model.sessions.first(where: { $0.id == sourceID })
+                            else { return }
+                            model.move(
+                                source,
+                                relativeTo: session,
+                                placement: placement)
                         }
                     )
+                    .overlay(alignment: .top) {
+                        if index == 0, dropInsertionIndex == 0 {
+                            TerminalSidebarDropIndicator()
+                        }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if dropInsertionIndex == index + 1 {
+                            TerminalSidebarDropIndicator()
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 7)
@@ -496,6 +556,67 @@ private struct TerminalSidebarView: View {
             .padding(.bottom, 8)
         }
     }
+}
+
+enum TerminalSidebarDropPlacement: Equatable {
+    case before
+    case after
+}
+
+enum TerminalSidebarReordering {
+    static func destinationIndex(
+        sourceIndex: Int,
+        destinationIndex: Int,
+        placement: TerminalSidebarDropPlacement
+    ) -> Int {
+        switch placement {
+        case .before:
+            return sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex
+        case .after:
+            return sourceIndex < destinationIndex ? destinationIndex : destinationIndex + 1
+        }
+    }
+}
+
+enum TerminalSidebarDropTargeting {
+    static let rowHeight: CGFloat = 32
+    static let rowSpacing: CGFloat = 3
+
+    static func insertionIndex(
+        destinationIndex: Int,
+        placement: TerminalSidebarDropPlacement
+    ) -> Int {
+        destinationIndex + (placement == .after ? 1 : 0)
+    }
+
+    static func trailingSpacing(isLast: Bool) -> CGFloat {
+        isLast ? 0 : rowSpacing
+    }
+
+    static func targetRange(rowIndex: Int, rowCount: Int) -> Range<CGFloat> {
+        let lowerBound = CGFloat(rowIndex) * (rowHeight + rowSpacing)
+        let upperBound = lowerBound + rowHeight + trailingSpacing(isLast: rowIndex == rowCount - 1)
+        return lowerBound..<upperBound
+    }
+}
+
+private final class TerminalSidebarDragState: ObservableObject {
+    var sessionID: ObjectIdentifier?
+    var destinationID: ObjectIdentifier?
+}
+
+private struct TerminalSidebarDropIndicator: View {
+    var body: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(height: 2)
+            .padding(.horizontal, 6)
+            .allowsHitTesting(false)
+    }
+}
+
+private extension UTType {
+    static let terminalSidebarSession = UTType(exportedAs: "com.mitchellh.ghostty.terminal-sidebar-session")
 }
 
 private struct TerminalSidebarFooter: View {
@@ -598,15 +719,57 @@ private struct TerminalSidebarRow: View {
     let session: TerminalSidebarSession
     let theme: TerminalSidebarTheme
     let isEditing: Bool
+    let isLast: Bool
     let onSelect: () -> Void
     let onRename: () -> Void
     let onClose: () -> Void
     let onCommitRename: (String) -> Void
     let onCancelRename: () -> Void
+    let onDragStarted: () -> Void
+    let onDragEnded: () -> Void
+    let dragState: TerminalSidebarDragState
+    let onDropTargetChanged: (TerminalSidebarDropPlacement?) -> Void
+    let onDrop: (TerminalSidebarDropPlacement) -> Void
 
     @State private var draftTitle = ""
 
     var body: some View {
+        rowContent
+            .padding(.bottom, TerminalSidebarDropTargeting.trailingSpacing(isLast: isLast))
+            .overlay {
+                if !isEditing {
+                    TerminalSidebarClickTarget(
+                        onSelect: onSelect,
+                        onRename: onRename,
+                        onClose: onClose,
+                        onDragStarted: onDragStarted,
+                        onDragEnded: onDragEnded,
+                        dragState: dragState,
+                        destinationID: session.id,
+                        onDropTargetChanged: onDropTargetChanged,
+                        onDrop: onDrop
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .accessibilityElement(children: isEditing ? .contain : .ignore)
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityIdentifier("TerminalSidebarSession-\(session.index)")
+            .accessibilityAction {
+                onSelect()
+            }
+            .onAppear {
+                guard isEditing else { return }
+                draftTitle = session.title
+            }
+            .onChange(of: isEditing) { newValue in
+                if newValue {
+                    draftTitle = session.title
+                }
+            }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 8) {
             if let tabColor = session.tabColor {
                 RoundedRectangle(cornerRadius: 2)
@@ -642,34 +805,9 @@ private struct TerminalSidebarRow: View {
         }
         .padding(.leading, 10)
         .padding(.trailing, 7)
-        .frame(height: 32)
+        .frame(height: TerminalSidebarDropTargeting.rowHeight)
         .background(rowBackground)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay {
-            if !isEditing {
-                TerminalSidebarClickTarget(
-                    onSelect: onSelect,
-                    onRename: onRename,
-                    onClose: onClose
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .accessibilityElement(children: isEditing ? .contain : .ignore)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityIdentifier("TerminalSidebarSession-\(session.index)")
-        .accessibilityAction {
-            onSelect()
-        }
-        .onAppear {
-            guard isEditing else { return }
-            draftTitle = session.title
-        }
-        .onChange(of: isEditing) { newValue in
-            if newValue {
-                draftTitle = session.title
-            }
-        }
     }
 
     private var titleForeground: NSColor {
@@ -916,10 +1054,19 @@ private struct TerminalSidebarClickTarget: NSViewRepresentable {
     let onSelect: () -> Void
     let onRename: () -> Void
     let onClose: () -> Void
+    let onDragStarted: () -> Void
+    let onDragEnded: () -> Void
+    let dragState: TerminalSidebarDragState
+    let destinationID: ObjectIdentifier
+    let onDropTargetChanged: (TerminalSidebarDropPlacement?) -> Void
+    let onDrop: (TerminalSidebarDropPlacement) -> Void
 
     func makeNSView(context: Context) -> TerminalSidebarClickView {
         let view = TerminalSidebarClickView()
         view.setAccessibilityElement(false)
+        view.registerForDraggedTypes([
+            NSPasteboard.PasteboardType(UTType.terminalSidebarSession.identifier),
+        ])
         updateNSView(view, context: context)
         return view
     }
@@ -928,13 +1075,29 @@ private struct TerminalSidebarClickTarget: NSViewRepresentable {
         view.onSelect = onSelect
         view.onRename = onRename
         view.onClose = onClose
+        view.onDragStarted = onDragStarted
+        view.onDragEnded = onDragEnded
+        view.dragState = dragState
+        view.destinationID = destinationID
+        view.onDropTargetChanged = onDropTargetChanged
+        view.onDrop = onDrop
     }
 }
 
-private final class TerminalSidebarClickView: NSView {
+private final class TerminalSidebarClickView: NSView, NSDraggingSource {
     var onSelect: (() -> Void)?
     var onRename: (() -> Void)?
     var onClose: (() -> Void)?
+    var onDragStarted: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    weak var dragState: TerminalSidebarDragState?
+    var destinationID: ObjectIdentifier?
+    var onDropTargetChanged: ((TerminalSidebarDropPlacement?) -> Void)?
+    var onDrop: ((TerminalSidebarDropPlacement) -> Void)?
+
+    private var isDragging = false
+
+    override var isFlipped: Bool { true }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
@@ -946,6 +1109,100 @@ private final class TerminalSidebarClickView: NSView {
         if event.clickCount >= 2 {
             onRename?()
         }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !isDragging else { return }
+
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setData(
+            Data(),
+            forType: NSPasteboard.PasteboardType(UTType.terminalSidebarSession.identifier))
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+
+        let preview: NSImage = superview?.screenshot() ?? NSImage(size: bounds.size)
+        draggingItem.setDraggingFrame(bounds, contents: preview)
+
+        isDragging = true
+        onDragStarted?()
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = false
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return updateDropTarget(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        updateDropTarget(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        guard let destinationID else { return }
+        DispatchQueue.main.async { [weak self, weak dragState] in
+            guard dragState?.destinationID == destinationID else { return }
+            dragState?.destinationID = nil
+            self?.onDropTargetChanged?(nil)
+        }
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard accepts(sender) else {
+            onDropTargetChanged?(nil)
+            return false
+        }
+
+        let placement = dropPlacement(sender)
+        dragState?.destinationID = nil
+        onDropTargetChanged?(nil)
+        onDrop?(placement)
+        return true
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        operation: NSDragOperation
+    ) {
+        isDragging = false
+        dragState?.destinationID = nil
+        onDragEnded?()
+    }
+
+    private func updateDropTarget(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard accepts(sender) else {
+            if dragState?.destinationID == destinationID {
+                dragState?.destinationID = nil
+                onDropTargetChanged?(nil)
+            }
+            return []
+        }
+
+        dragState?.destinationID = destinationID
+        onDropTargetChanged?(dropPlacement(sender))
+        return .move
+    }
+
+    private func accepts(_ sender: NSDraggingInfo) -> Bool {
+        guard let sourceID = dragState?.sessionID,
+              let destinationID,
+              sourceID != destinationID
+        else { return false }
+
+        let pasteboardType = NSPasteboard.PasteboardType(UTType.terminalSidebarSession.identifier)
+        return sender.draggingPasteboard.availableType(from: [pasteboardType]) != nil
+    }
+
+    private func dropPlacement(_ sender: NSDraggingInfo) -> TerminalSidebarDropPlacement {
+        let location = convert(sender.draggingLocation, from: nil)
+        return location.y < bounds.midY ? .before : .after
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

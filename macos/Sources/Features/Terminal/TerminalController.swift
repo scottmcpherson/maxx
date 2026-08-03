@@ -1480,13 +1480,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let action = notification.userInfo?[Notification.Name.GhosttyMoveTabKey] as? Ghostty.Action.MoveTab else { return }
         guard action.amount != 0 else { return }
 
-        // Determine our current selected index
-        guard let windowController = window.windowController else { return }
-        guard let tabGroup = windowController.window?.tabGroup else { return }
-        guard let selectedWindow = tabGroup.selectedWindow else { return }
+        // Determine our current index
+        guard let tabGroup = window.tabGroup else { return }
         let tabbedWindows = tabGroup.windows
         guard tabbedWindows.count > 0 else { return }
-        guard let selectedIndex = tabbedWindows.firstIndex(where: { $0 == selectedWindow }) else { return }
+        guard let selectedIndex = tabbedWindows.firstIndex(where: { $0 === window }) else { return }
 
         // Determine the final index we want to insert our tab
         let finalIndex: Int
@@ -1497,8 +1495,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             finalIndex = selectedIndex + min(remaining, action.amount)
         }
 
-        // If our index is the same we do nothing
-        guard finalIndex != selectedIndex else { return }
+        _ = moveTab(to: finalIndex)
+    }
+
+    /// Moves this controller's window to an absolute index in its native tab group.
+    /// This is shared by keybindings and the custom sidebar's drag-and-drop ordering.
+    @discardableResult
+    func moveTab(to finalIndex: Int) -> Bool {
+        guard let window,
+              let tabGroup = window.tabGroup
+        else { return false }
+
+        let tabbedWindows = tabGroup.windows
+        guard let sourceIndex = tabbedWindows.firstIndex(where: { $0 === window }),
+              tabbedWindows.indices.contains(finalIndex),
+              finalIndex != sourceIndex
+        else { return false }
 
         // Get our target window
         let targetWindow = tabbedWindows[finalIndex]
@@ -1510,13 +1522,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Reproduction: titlebar tabs, create two tabs, "move tab left"
         if #available(macOS 26, *) {
             if window is TitlebarTabsTahoeTerminalWindow {
-                tabGroup.removeWindow(selectedWindow)
-                targetWindow.addTabbedWindowSafely(selectedWindow, ordered: action.amount < 0 ? .below : .above)
+                tabGroup.removeWindow(window)
+                let success = targetWindow.addTabbedWindowSafely(
+                    window,
+                    ordered: finalIndex < sourceIndex ? .below : .above)
                 DispatchQueue.main.async {
-                    selectedWindow.makeKey()
+                    window.makeKey()
                 }
 
-                return
+                return success
             }
         }
 
@@ -1525,13 +1539,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         NSAnimationContext.current.duration = 0
 
         // Remove and re-add the window in the correct position
-        tabGroup.removeWindow(selectedWindow)
-        targetWindow.addTabbedWindowSafely(selectedWindow, ordered: action.amount < 0 ? .below : .above)
+        tabGroup.removeWindow(window)
+        let success = targetWindow.addTabbedWindowSafely(
+            window,
+            ordered: finalIndex < sourceIndex ? .below : .above)
 
         // Ensure our window remains selected
-        selectedWindow.makeKey()
+        window.makeKey()
 
         NSAnimationContext.endGrouping()
+        return success
     }
 
     @objc private func onGotoTab(notification: SwiftUI.Notification) {
