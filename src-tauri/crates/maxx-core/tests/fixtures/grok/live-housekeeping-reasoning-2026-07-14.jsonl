@@ -1,0 +1,15 @@
+{"fixture":{"provider":"grok","version":"0.2.101","scenario":"live-housekeeping-reasoning-2026-07-14"}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"grok-session-live","models":{"currentModelId":"grok-4.5"}}}
+{"jsonrpc":"2.0","method":"_x.ai/mcp/init_progress","params":{"connected":0,"sessionId":"grok-session-live","total":2}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"availableCommands":[],"sessionUpdate":"available_commands_update"}}}
+{"jsonrpc":"2.0","method":"_x.ai/queue/changed","params":{"entries":[{"id":"queue-entry-live","kind":"prompt","position":0,"text":"this is a test","version":0}],"sessionId":"grok-session-live"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"content":{"text":"this is a test","type":"text"},"sessionUpdate":"user_message_chunk"}}}
+{"jsonrpc":"2.0","method":"_x.ai/mcp/server_status","params":{"detail":"Auth required","name":"exa","reason":"handshake_failed","sessionId":"grok-session-live","source":"local","status":"unavailable","tools":null}}
+{"jsonrpc":"2.0","method":"_x.ai/mcp_initialized","params":{"elapsedMs":535,"mcpToolCount":29,"sessionId":"grok-session-live"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"content":{"text":"Short","type":"text"},"sessionUpdate":"agent_thought_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"content":{"text":" thought.","type":"text"},"sessionUpdate":"agent_thought_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"content":{"text":"Test ","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-live","update":{"content":{"text":"received.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"sessionId":"grok-session-live","update":{"prompt_id":"prompt-live","sessionUpdate":"turn_completed","stop_reason":"end_turn","usage":{"inputTokens":16072,"outputTokens":47,"reasoningTokens":22,"totalTokens":16119}}}}
+{"jsonrpc":"2.0","method":"_x.ai/session/prompt_complete","params":{"agentResult":null,"promptId":"prompt-live","sessionId":"grok-session-live","stopReason":"end_turn"}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}

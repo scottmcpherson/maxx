@@ -1,0 +1,10 @@
+{"fixture":{"provider":"codex","version":"0.144.1","scenario":"start-stream-approval-complete"}}
+{"method":"thread/started","params":{"thread":{"id":"codex-session-1","status":{"type":"idle"},"turns":[]}}}
+{"method":"turn/started","params":{"threadId":"codex-session-1","turn":{"id":"codex-turn-1","status":"inProgress","items":[]}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","itemId":"message-1","delta":"Hello "}}
+{"method":"item/agentMessage/delta","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","itemId":"message-1","delta":"world"}}
+{"method":"item/started","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","item":{"id":"command-1","type":"commandExecution","command":"swift test","cwd":"/tmp/project","status":"inProgress"}}}
+{"method":"item/commandExecution/outputDelta","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","itemId":"command-1","delta":"ok\n"}}
+{"id":41,"method":"item/commandExecution/requestApproval","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","itemId":"command-1","command":"swift test","cwd":"/tmp/project","reason":"Run tests"}}
+{"method":"item/completed","params":{"threadId":"codex-session-1","turnId":"codex-turn-1","item":{"id":"command-1","type":"commandExecution","command":"swift test","cwd":"/tmp/project","status":"completed","aggregatedOutput":"ok\n","exitCode":0}}}
+{"method":"turn/completed","params":{"threadId":"codex-session-1","turn":{"id":"codex-turn-1","status":"completed","items":[],"error":null}}}

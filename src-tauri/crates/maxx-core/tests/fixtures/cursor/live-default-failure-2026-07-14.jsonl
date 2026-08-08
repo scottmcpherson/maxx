@@ -1,0 +1,8 @@
+{"fixture":{"provider":"cursor","version":"2026.07.09-a3815c0","scenario":"live-default-failure-2026-07-14"}}
+{"jsonrpc":"2.0","id":3,"result":{"sessionId":"cursor-session-live","models":{"currentModelId":"default[]","availableModels":[{"modelId":"default[]","name":"Auto"},{"modelId":"composer-2.5[fast=true]","name":"composer-2.5"}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-live","update":{"availableCommands":[],"sessionUpdate":"available_commands_update"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-live","update":{"sessionUpdate":"session_info_update","title":"Test Chat"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-live","update":{"content":{"text":"The user sent a test","type":"text"},"sessionUpdate":"agent_thought_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-live","update":{"content":{"text":" message.","type":"text"},"sessionUpdate":"agent_thought_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-live","update":{"content":{"text":"\n\nError: NonRetriableError: Provider Error We're having trouble finding the resource you requested. If the problem persists, please contact support.","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}

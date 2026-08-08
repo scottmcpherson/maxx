@@ -1,0 +1,7 @@
+{"fixture":{"provider":"cursor","version":"fixture","scenario":"acp-stream-question-complete"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{}},"authMethods":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"cursor-session-1","models":{"currentModelId":"default","availableModels":[]},"modes":{"currentModeId":"default","availableModes":[]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Planning"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-1","update":{"sessionUpdate":"plan","entries":[{"content":"Inspect files","status":"in_progress","priority":"high"}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done"}}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}

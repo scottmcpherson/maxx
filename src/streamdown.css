@@ -1,0 +1,29 @@
+/*
+ * Tailwind v4 utilities scoped to Streamdown's markdown renderer.
+ * source(none) + explicit @source keeps generation limited to Streamdown's
+ * dist output, so no utilities leak from the app's own class names.
+ * The app's styles stay hand-written in styles.css.
+ */
+/* Utilities intentionally NOT layered: styles.css has an unlayered
+   `* { margin: 0 }` reset, and unlayered rules would beat layered utilities
+   regardless of specificity (killing Streamdown's margin classes). */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" source(none);
+@source "../node_modules/streamdown/dist";
+@source "../node_modules/@streamdown/code/dist";
+
+/* App renders dark-only; html carries class="dark" (index.html). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Map Streamdown's shadcn-style tokens onto the app theme (styles.css). */
+@theme {
+  --color-background: var(--bg-inset);
+  --color-foreground: var(--text);
+  --color-muted: var(--bg-raised);
+  --color-muted-foreground: var(--text-dim);
+  --color-primary: var(--purple);
+  --color-primary-foreground: #ffffff;
+  --color-sidebar: var(--bg-card);
+  --color-border: var(--border);
+  --font-mono: var(--mono);
+}

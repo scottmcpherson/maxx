@@ -1,0 +1,323 @@
+//! Port of `ProviderRuntime`: owns one engine per provider, routes
+//! interactive-request resolution to the originating engine, and runs the
+//! stamping loop that turns adapter drafts into canonical events with the
+//! single-terminal guarantee.
+
+use super::{
+    acp::AcpEngine, claude::ClaudeEngine, codex::CodexEngine, opencode::OpenCodeEngine,
+    pi::PiEngine, DraftReceiver, ProviderEngine, TurnRequest,
+};
+use maxx_core::contract::*;
+use maxx_core::TurnStamper;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
+
+use crate::browser_runtime::{BrowserRuntime, BrowserSessionScope};
+
+pub use super::TurnRequest as RuntimeTurnRequest;
+
+/// Live turn visible to the frontend for sidebar activity / hydrate.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActiveTurnInfo {
+    #[serde(rename = "projectID")]
+    pub project_id: Uuid,
+    #[serde(rename = "threadID")]
+    pub thread_id: Uuid,
+    #[serde(rename = "turnID")]
+    pub turn_id: Uuid,
+}
+
+struct LiveTurn {
+    project_id: Uuid,
+    thread_id: Uuid,
+    provider: ChatProvider,
+}
+
+pub struct Runtime {
+    engines: HashMap<ChatProvider, Arc<dyn ProviderEngine>>,
+    /// In-flight turns keyed by turn id. Source of truth for sidebar activity.
+    live_turns: Mutex<HashMap<Uuid, LiveTurn>>,
+    request_routes: Mutex<HashMap<Uuid, ChatProvider>>,
+    browser: Option<Arc<BrowserRuntime>>,
+}
+
+impl Runtime {
+    pub fn new(browser: Arc<BrowserRuntime>) -> Self {
+        Self::with_optional_browser(Some(browser))
+    }
+
+    /// Construct the provider runtime without issuing browser capabilities.
+    /// Used by transport tests that exercise providers in isolation.
+    pub fn without_browser() -> Self {
+        Self::with_optional_browser(None)
+    }
+
+    fn with_optional_browser(browser: Option<Arc<BrowserRuntime>>) -> Self {
+        let engines: Vec<Arc<dyn ProviderEngine>> = vec![
+            Arc::new(CodexEngine::default()),
+            Arc::new(ClaudeEngine::default()),
+            Arc::new(AcpEngine::grok()),
+            Arc::new(AcpEngine::cursor()),
+            Arc::new(AcpEngine::hermes()),
+            Arc::new(OpenCodeEngine::default()),
+            Arc::new(PiEngine::default()),
+        ];
+        Self {
+            engines: engines.into_iter().map(|e| (e.provider(), e)).collect(),
+            live_turns: Mutex::new(HashMap::new()),
+            request_routes: Mutex::new(HashMap::new()),
+            browser,
+        }
+    }
+
+    /// Register a turn as live before the engine task starts so inventory is
+    /// visible as soon as `send_prompt` returns (authoritative hydrate).
+    pub async fn track_turn(
+        &self,
+        project_id: Uuid,
+        thread_id: Uuid,
+        turn_id: Uuid,
+        provider: ChatProvider,
+    ) {
+        self.live_turns.lock().await.insert(
+            turn_id,
+            LiveTurn {
+                project_id,
+                thread_id,
+                provider,
+            },
+        );
+    }
+
+    /// Begin a turn and return the canonical event stream. The receiver yields
+    /// already-stamped events ending with exactly one `turn.terminal`.
+    pub async fn events_for(
+        &self,
+        project_id: Uuid,
+        mut request: TurnRequest,
+    ) -> mpsc::Receiver<ProviderRuntimeEvent> {
+        let (event_tx, event_rx) = mpsc::channel::<ProviderRuntimeEvent>(1024);
+        let (draft_tx, draft_rx) = mpsc::channel(1024);
+        // Idempotent with `track_turn` from send_prompt.
+        self.track_turn(
+            project_id,
+            request.thread_id,
+            request.turn_id,
+            request.provider,
+        )
+        .await;
+
+        if let Some(browser) = &self.browser {
+            let mut scope = BrowserSessionScope::full_access(
+                project_id,
+                request.thread_id,
+                request.provider,
+                request.provider_instance_id,
+            );
+            scope.provider_session_id = request.session_id.clone();
+            scope.agent_id = request.agent_id;
+            scope.file_roots = vec![request.working_directory.clone().into()];
+            request.browser_access = Some(browser.access_for_scope(scope));
+        }
+
+        let stamper = TurnStamper::new(
+            request.provider_instance_id,
+            request.thread_id,
+            request.turn_id,
+        );
+        match self.engines.get(&request.provider) {
+            Some(engine) => {
+                engine.run_turn(request.clone(), draft_tx).await;
+                tokio::spawn(stamping_loop(stamper, draft_rx, event_tx));
+            }
+            None => {
+                drop(draft_tx);
+                let mut stamper = stamper;
+                for event in stamper.fail(format!(
+                    "No adapter for provider {}",
+                    request.provider.raw_value()
+                )) {
+                    let _ = event_tx.send(event).await;
+                }
+            }
+        }
+        event_rx
+    }
+
+    /// Inventory of turns still live in the runtime (backend-authoritative).
+    pub async fn active_turns(&self) -> Vec<ActiveTurnInfo> {
+        self.live_turns
+            .lock()
+            .await
+            .iter()
+            .map(|(turn_id, live)| ActiveTurnInfo {
+                project_id: live.project_id,
+                thread_id: live.thread_id,
+                turn_id: *turn_id,
+            })
+            .collect()
+    }
+
+    pub async fn register_route(&self, request_id: Uuid, provider: ChatProvider) {
+        self.request_routes
+            .lock()
+            .await
+            .insert(request_id, provider);
+    }
+
+    pub async fn finish_turn(&self, turn_id: Uuid) {
+        self.live_turns.lock().await.remove(&turn_id);
+    }
+
+    pub async fn cancel(&self, turn_id: Uuid) {
+        let route = {
+            self.live_turns
+                .lock()
+                .await
+                .get(&turn_id)
+                .map(|turn| (turn.provider, turn.thread_id))
+        };
+        let Some((provider, thread_id)) = route else {
+            return;
+        };
+        if let Some(browser) = &self.browser {
+            browser.interrupt_thread(thread_id).await;
+        }
+        if let Some(engine) = self.engines.get(&provider) {
+            engine.cancel(turn_id).await;
+        }
+    }
+
+    pub async fn resolve(
+        &self,
+        provider: ChatProvider,
+        request_id: Uuid,
+        decision: RuntimeInteractionDecision,
+    ) -> Result<(), String> {
+        // Prefer the recorded route; fall back to the event's provider.
+        let routed = { self.request_routes.lock().await.remove(&request_id) };
+        let provider = routed.unwrap_or(provider);
+        let engine = self
+            .engines
+            .get(&provider)
+            .ok_or_else(|| format!("No adapter for provider {}", provider.raw_value()))?;
+        let result = engine.resolve(request_id, decision).await;
+        if result.is_err() {
+            // Restore the route so a retry can still reach the engine.
+            self.request_routes
+                .lock()
+                .await
+                .insert(request_id, provider);
+        }
+        result
+    }
+
+    pub async fn shutdown(&self) {
+        for engine in self.engines.values() {
+            engine.shutdown().await;
+        }
+        self.live_turns.lock().await.clear();
+        self.request_routes.lock().await.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maxx_core::persist::ProviderProfile;
+
+    fn sample_request(turn_id: Uuid, thread_id: Uuid) -> TurnRequest {
+        TurnRequest {
+            turn_id,
+            thread_id,
+            provider_instance_id: Uuid::nil(),
+            provider: ChatProvider::Claude,
+            model: "default".into(),
+            effort: None,
+            speed: None,
+            agent_instructions: None,
+            prompt: "hi".into(),
+            attachments: Vec::new(),
+            working_directory: "/tmp".into(),
+            session_id: None,
+            agent_id: None,
+            browser_access: None,
+            profile: ProviderProfile::default_for(ChatProvider::Claude),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_turns_tracks_live_inventory_until_finish() {
+        let runtime = Runtime::without_browser();
+        let project_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+
+        assert!(runtime.active_turns().await.is_empty());
+
+        let _rx = runtime
+            .events_for(project_id, sample_request(turn_id, thread_id))
+            .await;
+        let inventory = runtime.active_turns().await;
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].project_id, project_id);
+        assert_eq!(inventory[0].thread_id, thread_id);
+        assert_eq!(inventory[0].turn_id, turn_id);
+
+        runtime.finish_turn(turn_id).await;
+        assert!(runtime.active_turns().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn track_turn_is_visible_before_events_for() {
+        let runtime = Runtime::with_optional_browser(None);
+        let project_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+
+        runtime
+            .track_turn(project_id, thread_id, turn_id, ChatProvider::Claude)
+            .await;
+        let inventory = runtime.active_turns().await;
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].turn_id, turn_id);
+        assert_eq!(inventory[0].thread_id, thread_id);
+
+        // events_for re-tracks the same turn (idempotent).
+        let _rx = runtime
+            .events_for(project_id, sample_request(turn_id, thread_id))
+            .await;
+        assert_eq!(runtime.active_turns().await.len(), 1);
+
+        runtime.finish_turn(turn_id).await;
+        assert!(runtime.active_turns().await.is_empty());
+    }
+}
+
+async fn stamping_loop(
+    mut stamper: TurnStamper,
+    mut drafts: DraftReceiver,
+    events: mpsc::Sender<ProviderRuntimeEvent>,
+) {
+    while let Some(draft) = drafts.recv().await {
+        let stamped = match draft {
+            Ok(draft) => stamper.stamp(draft),
+            Err(message) => stamper.fail(message),
+        };
+        for event in stamped {
+            if events.send(event).await.is_err() {
+                return;
+            }
+        }
+        if stamper.is_terminated() {
+            break;
+        }
+    }
+    if !stamper.is_terminated() {
+        for event in stamper.finish() {
+            let _ = events.send(event).await;
+        }
+    }
+}

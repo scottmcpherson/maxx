@@ -1,0 +1,8 @@
+{"fixture":{"provider":"grok","version":"0.2.93","scenario":"acp-stream-permission-complete"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{}},"authMethods":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"grok-session-1","models":{"currentModelId":"grok-4.5","availableModels":[]},"modes":{"currentModeId":"default","availableModes":[]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello "}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Run tests","kind":"execute","status":"pending","rawInput":{"command":"swift test"}}}}
+{"jsonrpc":"2.0","id":51,"method":"session/request_permission","params":{"sessionId":"grok-session-1","toolCall":{"toolCallId":"tool-1","title":"Run tests"},"options":[{"optionId":"once","name":"Allow once","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"grok-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}

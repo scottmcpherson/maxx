@@ -1,0 +1,6 @@
+{"fixture":{"provider":"claude","version":"2.1.207","scenario":"live-text-block-stop-2026-07-14"}}
+{"type":"system","subtype":"init","session_id":"claude-session-live"}
+{"type":"stream_event","session_id":"claude-session-live","uuid":"claude-message-live","event":{"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}}
+{"type":"stream_event","session_id":"claude-session-live","uuid":"claude-message-live","event":{"delta":{"text":"Test received.","type":"text_delta"},"index":0,"type":"content_block_delta"}}
+{"type":"stream_event","session_id":"claude-session-live","uuid":"claude-message-live","event":{"index":0,"type":"content_block_stop"}}
+{"type":"result","subtype":"success","session_id":"claude-session-live","is_error":false,"result":"Test received."}

@@ -1,0 +1,8 @@
+{"fixture":{"provider":"opencode","version":"fixture","scenario":"server-stream-question-complete"}}
+{"type":"server.connected","properties":{}}
+{"type":"session.created","properties":{"info":{"id":"opencode-session-1","title":"Maxx fixture"}}}
+{"type":"message.part.updated","properties":{"part":{"id":"part-1","sessionID":"opencode-session-1","messageID":"message-1","type":"text","text":"Hello"},"delta":"Hello"}}
+{"type":"message.part.updated","properties":{"part":{"id":"tool-1","sessionID":"opencode-session-1","messageID":"message-1","type":"tool","tool":"bash","state":{"status":"running","input":{"command":"swift test"}}}}}
+{"type":"permission.asked","properties":{"id":"permission-1","sessionID":"opencode-session-1","permission":"bash","patterns":["swift test"],"metadata":{}}}
+{"type":"question.asked","properties":{"id":"question-1","sessionID":"opencode-session-1","questions":[{"header":"Choice","question":"Continue?","options":[{"label":"Yes","description":"Continue"}],"multiple":false}]}}
+{"type":"session.idle","properties":{"sessionID":"opencode-session-1"}}

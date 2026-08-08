@@ -1,0 +1,11 @@
+[package]
+name = "maxx-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure domain logic for Maxx: provider runtime contract, native event normalization, persistence."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

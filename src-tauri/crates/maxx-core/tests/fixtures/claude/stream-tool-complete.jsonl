@@ -1,0 +1,11 @@
+{"fixture":{"provider":"claude","version":"2.1.207","scenario":"stream-tool-complete"}}
+{"type":"system","subtype":"init","session_id":"claude-session-1","model":"claude-sonnet-4-6","tools":["Bash"]}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"swift test"}}}}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool-2","name":"TodoWrite","input":{"todos":[{"content":"Inspect runtime","status":"completed"},{"content":"Verify provider","status":"in_progress"}]}}}}
+{"type":"stream_event","session_id":"claude-session-1","event":{"type":"message_delta","usage":{"output_tokens":5}}}
+{"type":"rate_limit_event","session_id":"claude-session-1","rate_limit_info":{"status":"throttled","message":"Retrying after provider backoff"}}
+{"type":"assistant","session_id":"claude-session-1","message":{"usage":{"input_tokens":12,"output_tokens":5},"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"swift test"}}]}}
+{"type":"result","subtype":"success","session_id":"claude-session-1","is_error":false,"result":"Hello world","usage":{"input_tokens":12,"output_tokens":5}}

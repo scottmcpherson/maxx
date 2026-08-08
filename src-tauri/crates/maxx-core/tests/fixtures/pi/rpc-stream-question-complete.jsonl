@@ -1,0 +1,15 @@
+{"fixture":{"provider":"pi","name":"rpc-stream-question-complete","thread":"fixture-thread-pi","expectedTerminal":"completed"}}
+{"id":"state-1","type":"response","command":"get_state","success":true,"data":{"sessionId":"pi-session-1","messageCount":2}}
+{"type":"agent_start"}
+{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello "}}
+{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":1,"delta":"Thinking"}}
+{"type":"tool_execution_start","toolCallId":"tool-1","toolName":"bash","args":{"command":"swift test"}}
+{"type":"tool_execution_update","toolCallId":"tool-1","toolName":"bash","args":{"command":"swift test"},"partialResult":{"content":[{"type":"text","text":"ok\n"}]}}
+{"type":"tool_execution_end","toolCallId":"tool-1","toolName":"bash","args":{"command":"swift test"},"result":{"content":[{"type":"text","text":"ok\n"}]},"isError":false}
+{"type":"tool_execution_start","toolCallId":"tool-2","toolName":"edit","args":{"path":"Sources/App.swift"}}
+{"type":"tool_execution_end","toolCallId":"tool-2","toolName":"edit","args":{"path":"Sources/App.swift"},"result":{"content":[{"type":"text","text":"updated"}]},"isError":false}
+{"type":"extension_ui_request","id":"pi-question-1","method":"select","title":"Which scope?","options":["Fast","Full"],"timeout":30000}
+{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"world"}}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":2,"cacheRead":1,"cost":{"total":0.001}}}}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled"}

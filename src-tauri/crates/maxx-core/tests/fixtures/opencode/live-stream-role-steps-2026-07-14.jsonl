@@ -1,0 +1,18 @@
+{"fixture":{"provider":"opencode","version":"1.17.19","scenario":"live-stream-role-steps-2026-07-14"}}
+{"type":"session.created","properties":{"sessionID":"opencode-session-live","info":{"id":"opencode-session-live","title":"Maxx capture"}}}
+{"type":"message.updated","properties":{"sessionID":"opencode-session-live","info":{"id":"opencode-user-message","role":"user","sessionID":"opencode-session-live"}}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"type":"text","text":"this is a test","messageID":"opencode-user-message","sessionID":"opencode-session-live","id":"opencode-user-part"}}}
+{"type":"session.status","properties":{"sessionID":"opencode-session-live","status":{"type":"busy"}}}
+{"type":"message.updated","properties":{"sessionID":"opencode-session-live","info":{"id":"opencode-assistant-message","parentID":"opencode-user-message","role":"assistant","sessionID":"opencode-session-live"}}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-step-start","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"step-start"}}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-reasoning-part","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"reasoning","text":""}}}
+{"type":"message.part.delta","properties":{"sessionID":"opencode-session-live","messageID":"opencode-assistant-message","partID":"opencode-reasoning-part","field":"text","delta":"Short"}}
+{"type":"message.part.delta","properties":{"sessionID":"opencode-session-live","messageID":"opencode-assistant-message","partID":"opencode-reasoning-part","field":"text","delta":" thought."}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-reasoning-part","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"reasoning","text":"Short thought."}}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-text-part","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"text","text":""}}}
+{"type":"message.part.delta","properties":{"sessionID":"opencode-session-live","messageID":"opencode-assistant-message","partID":"opencode-text-part","field":"text","delta":"Test "}}
+{"type":"message.part.delta","properties":{"sessionID":"opencode-session-live","messageID":"opencode-assistant-message","partID":"opencode-text-part","field":"text","delta":"received."}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-text-part","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"text","text":"Test received."}}}
+{"type":"message.part.updated","properties":{"sessionID":"opencode-session-live","part":{"id":"opencode-step-finish","messageID":"opencode-assistant-message","sessionID":"opencode-session-live","type":"step-finish","reason":"stop","tokens":{"total":8638,"input":56,"output":24,"reasoning":46,"cache":{"write":0,"read":8512}},"cost":0}}}
+{"type":"message.updated","properties":{"sessionID":"opencode-session-live","info":{"id":"opencode-assistant-message","role":"assistant","sessionID":"opencode-session-live","tokens":{"total":8638,"input":56,"output":24,"reasoning":46,"cache":{"write":0,"read":8512}},"finish":"stop"}}}
+{"type":"session.status","properties":{"sessionID":"opencode-session-live","status":{"type":"idle"}}}

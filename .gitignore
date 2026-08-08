@@ -1,0 +1,31 @@
+# Dependencies
+/node_modules/
+
+# Frontend build and test output
+/dist/
+/coverage/
+*.tsbuildinfo
+
+# Rust and Tauri generated output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+*.rs.bk
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local verification artifacts
+/.maxx-ocu-preview.png

@@ -1,0 +1,61 @@
+[workspace]
+members = ["crates/maxx-core"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+
+[package]
+name = "maxx"
+version = "0.1.0"
+description = "Maxx — multi-provider AI agent terminal (Tauri v2 port)"
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+name = "maxx_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+maxx-core = { path = "crates/maxx-core" }
+# `tray-icon` gates `tauri::tray` and `image-png` gates decoding the tray
+# template image.
+tauri = { version = "2", features = [
+    "protocol-asset",
+    "tray-icon",
+    "image-png",
+] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+rmcp = { version = "0.16", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+chromiumoxide = "0.9.1"
+# Streaming speech-to-text runs over a WebSocket (see `src/voice.rs`). rustls
+# rather than native-tls so the trust roots are the same in every build; the
+# `ring` provider is installed explicitly at startup because rustls 0.23 has no
+# default when more than one backend could be linked.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "connect"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
+libc = "0.2"
+dirs = "6"
+log = "0.4"
+env_logger = "0.11"

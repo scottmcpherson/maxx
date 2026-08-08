@@ -1,0 +1,4 @@
+{"fixture":{"provider":"codex","version":"0.144.1","scenario":"live-usage-warning-2026-07-14"}}
+{"method":"warning","params":{"threadId":"codex-thread-live","message":"Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"codex-thread-live","turnId":"codex-turn-live","tokenUsage":{"last":{"cachedInputTokens":9984,"inputTokens":21816,"outputTokens":12,"reasoningOutputTokens":0,"totalTokens":21828},"modelContextWindow":258400,"total":{"cachedInputTokens":9984,"inputTokens":21816,"outputTokens":12,"reasoningOutputTokens":0,"totalTokens":21828}}}}
+{"method":"turn/completed","params":{"threadId":"codex-thread-live","turn":{"id":"codex-turn-live","status":"completed","items":[]}}}

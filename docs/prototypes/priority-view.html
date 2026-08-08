@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Maxx — Priority view prototypes</title>
+<style>
+  /* ===== Maxx design tokens (verbatim from src/styles.css) ===== */
+  :root {
+    color-scheme: dark;
+    --bg: #191919;
+    --bg-sidebar: #232323;
+    --bg-raised: #242424;
+    --bg-hover: rgba(255, 255, 255, 0.055);
+    --bg-active: rgba(255, 255, 255, 0.085);
+    --border: rgba(255, 255, 255, 0.095);
+    --border-strong: rgba(255, 255, 255, 0.17);
+    --text: #e7e7e7;
+    --text-dim: #a7a7a7;
+    --text-faint: #747474;
+    --purple: #7657ee;
+    --green: #6fc58b;
+    --red: #e47370;
+    --yellow: #d7ae5c;
+    --link: #75a7e8;
+    --page: #121212;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    font-size: 13px;
+    background: var(--page);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    padding: 40px 32px 80px;
+  }
+  button { font: inherit; color: inherit; }
+  button:focus-visible { outline: 1px solid rgba(133, 111, 255, 0.75); outline-offset: 1px; }
+
+  /* ===== Page chrome ===== */
+  .page { max-width: 1220px; margin: 0 auto; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-faint); margin-bottom: 10px;
+  }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -.015em; margin-bottom: 8px; }
+  .lede { color: var(--text-dim); max-width: 68ch; line-height: 1.55; }
+  .lede + .lede { margin-top: 6px; }
+  .lede strong { color: var(--text); font-weight: 570; }
+
+  .global-controls {
+    display: flex; align-items: center; gap: 10px; margin: 22px 0 34px;
+  }
+  .sim-button {
+    display: inline-flex; align-items: center; gap: 8px;
+    height: 32px; padding: 0 14px;
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--bg-raised); color: var(--text); cursor: pointer;
+  }
+  .sim-button:hover { background: #2d2d2d; }
+  .sim-button .pulse-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--link);
+  }
+  .sim-button.secondary { color: var(--text-dim); border-color: var(--border); }
+  .sim-hint { color: var(--text-faint); font-size: 12px; }
+
+  .options-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 34px 28px;
+  }
+  .option-card { min-width: 0; }
+  .option-head { margin-bottom: 12px; }
+  .option-label {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--link); font-weight: 600; margin-bottom: 4px;
+  }
+  .option-card[data-kind="codex"] .option-label { color: var(--text-faint); }
+  .option-title { font-size: 15px; font-weight: 620; letter-spacing: -.01em; }
+  .option-desc { color: var(--text-dim); line-height: 1.5; margin-top: 5px; font-size: 12.5px; }
+  .option-notes { margin-top: 12px; font-size: 12px; line-height: 1.55; color: var(--text-faint); }
+  .option-notes b { color: var(--text-dim); font-weight: 570; }
+  .option-notes .plus { color: var(--green); }
+  .option-notes .minus { color: var(--red); }
+
+  /* ===== App frame ===== */
+  .frame {
+    position: relative;
+    height: 520px; border-radius: 10px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,.08);
+    background: var(--bg);
+    display: flex;
+    box-shadow: 0 14px 40px rgba(0,0,0,.4);
+  }
+  .frame .sidebar {
+    width: 250px; flex: 0 0 250px; height: 100%;
+    display: flex; flex-direction: column;
+    background: var(--bg-sidebar);
+    border-right: 1px solid rgba(0,0,0,.2);
+  }
+  .frame .content-stub {
+    flex: 1; min-width: 0; background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    padding: 18px 14px; gap: 10px;
+  }
+  .stub-line { width: 100%; border-radius: 5px; background: rgba(255,255,255,.045); height: 10px; }
+  .stub-line.short { width: 62%; align-self: flex-end; background: rgba(255,255,255,.07); }
+  .stub-input { width: 100%; height: 44px; border-radius: 10px; background: #202020; border: 1px solid var(--border); margin-top: 8px; }
+
+  .titlebar {
+    height: 40px; flex: 0 0 40px; display: flex; align-items: center; padding: 0 12px; gap: 6px;
+  }
+  .traffic { display: flex; gap: 7px; margin-right: 4px; }
+  .traffic i { width: 11px; height: 11px; border-radius: 50%; background: #454545; }
+
+  .heading-row {
+    height: 36px; padding: 0 8px 0 14px;
+    display: flex; align-items: center; gap: 2px;
+  }
+  .app-title { color: #e1e1e1; font-size: 16px; font-weight: 600; letter-spacing: -.01em; margin-right: auto; }
+
+  .icon-button {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    position: relative;
+  }
+  .icon-button:hover { background: var(--bg-hover); color: var(--text); }
+
+  /* Bell with Codex-style notched dot */
+  .bell-btn.has-unread .bell-dot { opacity: 1; transform: scale(1); }
+  .bell-dot {
+    position: absolute; top: 3px; right: 4px;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--link);
+    box-shadow: 0 0 0 2.5px var(--bg-sidebar); /* notch illusion */
+    opacity: 0; transform: scale(.4);
+    transition: opacity 160ms ease, transform 200ms cubic-bezier(.2,.9,.3,1.4);
+    pointer-events: none;
+  }
+  .bell-btn.active { background: rgba(117, 167, 232, 0.14); color: var(--link); }
+  .bell-btn.active:hover { background: rgba(117, 167, 232, 0.2); color: var(--link); }
+  .bell-btn.active .bell-dot { box-shadow: 0 0 0 2.5px #2c3540; }
+
+  .nav-rows { padding: 2px 8px 9px; display: flex; flex-direction: column; gap: 2px; }
+  .nav-row {
+    width: 100%; height: 30px; padding: 0 9px 0 6px;
+    display: flex; align-items: center; gap: 9px;
+    border: 0; border-radius: 6px; background: transparent;
+    color: #c9c9c9; text-align: left; cursor: pointer; line-height: 1;
+  }
+  .nav-row:hover { background: var(--bg-hover); color: var(--text); }
+  .nav-row svg { flex: 0 0 auto; }
+
+  .sidebar-body { min-height: 0; overflow-y: auto; flex: 1; padding: 2px 7px 12px; }
+  .sidebar-footer { padding: 4px 8px 9px; border-top: 1px solid transparent; }
+
+  .section-label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 4px 4px 7px; color: #888; font-size: 11.5px;
+  }
+  .section-label .count,
+  .prio-disclosure .count {
+    font-size: 10px; color: var(--link);
+    background: rgba(117,167,232,.12); border-radius: 8px; padding: 1.5px 6px;
+  }
+
+  .project-header {
+    height: 29px; padding: 0 2px 0 7px;
+    display: flex; align-items: center; gap: 6px; border-radius: 6px;
+    color: #c9c9c9; cursor: default;
+  }
+  .project-header:hover { background: var(--bg-hover); }
+  .project-header .folder { color: var(--text-faint); display: flex; }
+  .thread-list { list-style: none; padding: 0; }
+
+  .thread-row {
+    width: 100%; height: 31px; padding: 0 8px 0 11px;
+    border: 0; border-radius: 6px; background: transparent;
+    display: flex; align-items: center; gap: 7px;
+    color: #c9c9c9; text-align: left; cursor: pointer;
+  }
+  .thread-row:hover { background: var(--bg-hover); color: #d2d2d2; }
+  .thread-row.selected { background: var(--bg-hover); color: var(--text); }
+  .thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .thread-time { font-size: 10.5px; color: var(--text-faint); flex: 0 0 auto; }
+
+  .thread-state { width: 12px; height: 12px; flex: 0 0 12px; display: grid; place-items: center; }
+  .spinner {
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 1.5px solid rgba(231,231,231,.3); border-top-color: var(--text);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .waiting-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--yellow);
+    animation: wait-pulse 1.4s ease-out infinite;
+  }
+  @keyframes wait-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(215,174,92,.5); }
+    70% { box-shadow: 0 0 0 5px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .unseen-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--link); }
+
+  /* Two-line rows used in activity / priority lists */
+  .thread-row.two-line { height: auto; padding: 6px 8px 6px 11px; align-items: flex-start; }
+  .thread-row.two-line .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .row-crumb {
+    display: flex; align-items: center; gap: 5px;
+    color: var(--text-faint); font-size: 11.5px;
+  }
+  .row-crumb svg { flex: 0 0 auto; }
+  .thread-row.two-line .thread-state { margin-top: 4px; }
+
+  /* B: pinned priority section */
+  .pinned-priority {
+    margin: 2px 1px 6px; padding: 2px 0 4px;
+    border-bottom: 1px solid var(--border);
+    animation: section-in 240ms cubic-bezier(.2,.9,.3,1);
+  }
+  .prio-disclosure {
+    width: 100%; border: 0; background: transparent; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 4px 4px 7px; color: #888; font-size: 11.5px; text-align: left;
+  }
+  .prio-chevron {
+    flex: 0 0 auto; opacity: 0; display: flex;
+    transform: rotate(0deg);
+    transition: opacity .1s ease, transform .13s ease;
+  }
+  .prio-chevron.is-expanded { transform: rotate(90deg); }
+  .prio-disclosure:hover .prio-chevron,
+  .prio-disclosure:focus-visible .prio-chevron { opacity: 1; }
+  .pinned-priority.collapsed { padding-bottom: 6px; }
+  @keyframes section-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+  /* C: tray popover */
+  .tray-popover {
+    position: absolute; top: 68px; left: 12px; z-index: 30;
+    width: 246px; padding: 5px;
+    border: 1px solid var(--border-strong); border-radius: 10px;
+    background: var(--bg-raised);
+    box-shadow: 0 18px 50px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    animation: pop-in 130ms cubic-bezier(.2,.9,.3,1);
+  }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
+  .tray-head {
+    display: flex; align-items: center; padding: 6px 8px 5px;
+    color: var(--text-faint); font-size: 11.5px;
+  }
+  .tray-clear {
+    margin-left: auto; border: 0; background: transparent; cursor: pointer;
+    color: var(--text-faint); font-size: 11.5px; border-radius: 4px; padding: 2px 6px;
+  }
+  .tray-clear:hover { background: var(--bg-hover); color: var(--text); }
+  .tray-empty { padding: 14px 10px 16px; color: var(--text-faint); }
+
+  /* D: focus dim */
+  .dimmable { transition: opacity 220ms ease; }
+  .focus-on .dimmable.dim { opacity: .22; }
+  .focus-on .thread-row.prio {
+    background: rgba(117,167,232,.08);
+    box-shadow: inset 2px 0 0 var(--link);
+  }
+  .focus-banner {
+    margin: 4px 1px 2px; padding: 5px 9px;
+    border-radius: 6px; background: rgba(117,167,232,.09);
+    color: var(--link); font-size: 11.5px;
+    display: none;
+  }
+  .focus-on .focus-banner { display: block; animation: section-in 200ms ease; }
+
+  /* E: next-up bar */
+  .nextup {
+    margin: 0 1px; height: 34px; padding: 0 10px;
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: #1e2126; color: var(--text-dim);
+    cursor: pointer; width: calc(100% - 2px);
+    transition: border-color 150ms ease;
+  }
+  .nextup:hover { border-color: var(--border-strong); color: var(--text); }
+  .nextup .unseen-dot { flex: 0 0 auto; }
+  .nextup .label { flex: 1; text-align: left; font-size: 12px; }
+  .nextup kbd {
+    font-size: 10.5px; color: var(--text-faint);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+  }
+  .nextup.done { border-color: transparent; background: rgba(111,197,139,.08); color: var(--green); cursor: default; }
+
+  .footnote {
+    margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+    color: var(--text-dim); max-width: 74ch; line-height: 1.6; font-size: 12.5px;
+  }
+  .footnote b { color: var(--text); font-weight: 570; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner, .waiting-dot { animation: none; }
+    * { transition-duration: 0s !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow">Maxx · Design exploration</div>
+  <h1>Priority view — five ways in</h1>
+  <p class="lede">Every mock below is live. Maxx already tracks the two ingredients — threads <strong>waiting for approval</strong> (amber pulse) and threads that <strong>finished while you were away</strong> (blue dot). The question is where that attention list lives.</p>
+  <p class="lede">Codex, for reference: the bell swaps the <em>entire</em> sidebar between a Projects view and an Activity view (Priority + Today/Yesterday), shortcut ⌥⌘U, with the unread dot notched into the bell outline.</p>
+
+  <div class="global-controls">
+    <button class="sim-button" id="simulate"><span class="pulse-dot"></span>Simulate an agent finishing in the background</button>
+    <button class="sim-button secondary" id="reset">Reset</button>
+    <span class="sim-hint">Watch the dots arrive in all five mocks at once.</span>
+  </div>
+
+  <div class="options-grid" id="grid"></div>
+
+  <div class="footnote">
+    <b>Recommendation:</b> ship <b>B (pinned Priority section)</b> first — it needs no new mental model, reuses the existing unseen/waiting state, and is invisible when you're caught up. <b>A (activity toggle)</b> composes with it later as the power-user view once thread volume justifies a second sidebar mode; the bell button and ⌥⌘U slot into the existing heading row unchanged. C works well if we'd rather not touch sidebar layout at all; D and E are seasoning — E pairs unusually well with B.
+  </div>
+</div>
+
+<script>
+/* ---------- Icons (Maxx style: 24 viewBox, stroke 1.75, currentColor) ---------- */
+const icon = (paths, size = 16) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const I = {
+  search: (s) => icon('<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>', s),
+  compose: (s) => icon('<path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="m15.5 4.5 4 4M10 14l1-4 6.5-6.5a2 2 0 0 1 3 3L14 13l-4 1Z"/>', s),
+  agent: (s) => icon('<path d="m4 5 16 3-7 4-4 7-2-7-3-7Z"/><path d="m7 12 6 0"/>', s),
+  folder: (s) => icon('<path d="M3.5 7.5h6l2-2h9v13h-17z"/>', s),
+  bell: (s) => icon('<path d="M18 9.5a6 6 0 0 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10 19a2.2 2.2 0 0 0 4 0"/>', s),
+  bellFocus: (s) => icon('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/>', s),
+  chevron: (s) => icon('<path d="m9 6 6 6-6 6"/>', s),
+};
+
+/* ---------- Shared data ---------- */
+const seedThreads = () => ([
+  { id: "t1", title: "Priority view prototype", project: "maxx-tauri", state: "idle",    time: "2m",  day: "today", selected: true },
+  { id: "t2", title: "Fix provider health polling", project: "maxx-tauri", state: "running", time: "now", day: "today" },
+  { id: "t3", title: "Replace agents icon", project: "maxx-tauri", state: "idle",    time: "3h",  day: "today" },
+  { id: "t4", title: "Charlie Dirk persona seed", project: "movae", state: "unseen",  time: "12m", day: "today" },
+  { id: "t5", title: "Caption pipeline migration", project: "movae", state: "waiting", time: "4m",  day: "today" },
+  { id: "t6", title: "Render farm cost report", project: "movae", state: "idle",    time: "1d",  day: "yesterday" },
+  { id: "t7", title: "Refactor lens cache", project: "iris",  state: "idle",    time: "2d",  day: "yesterday" },
+  { id: "t8", title: "Bump Tauri to 2.4", project: "iris",  state: "unseen",  time: "1h",  day: "today" },
+]);
+const PROJECTS = ["maxx-tauri", "movae", "iris"];
+const simPool = [
+  { title: "Nightly test triage", project: "iris" },
+  { title: "Changelog draft", project: "movae" },
+  { title: "Sidebar perf pass", project: "maxx-tauri" },
+  { title: "Release notes sweep", project: "iris" },
+];
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const prioOf = (t) => t.state === "waiting" ? 0 : t.state === "unseen" ? 1 : 9;
+const priorityItems = (threads) =>
+  threads.filter((t) => t.state === "waiting" || t.state === "unseen")
+         .sort((a, b) => prioOf(a) - prioOf(b));
+
+const stateMark = (t) => {
+  if (t.state === "running") return '<span class="thread-state" title="Running"><span class="spinner"></span></span>';
+  if (t.state === "waiting") return '<span class="thread-state" title="Waiting for approval"><span class="waiting-dot"></span></span>';
+  if (t.state === "unseen") return '<span class="thread-state" title="Finished while away"><span class="unseen-dot"></span></span>';
+  return '<span class="thread-state"></span>';
+};
+
+const threadRowHTML = (t, extra = "") =>
+  `<button class="thread-row ${t.selected ? "selected" : ""} ${extra}" data-id="${t.id}">
+     ${stateMark(t)}<span class="thread-title">${esc(t.title)}</span><span class="thread-time">${t.time}</span>
+   </button>`;
+
+const twoLineRowHTML = (t) =>
+  `<button class="thread-row two-line ${t.selected ? "selected" : ""}" data-id="${t.id}">
+     <span class="row-main">
+       <span class="thread-title">${esc(t.title)}</span>
+       <span class="row-crumb">${I.folder(12)}${esc(t.project)}</span>
+     </span>
+     ${stateMark(t)}
+   </button>`;
+
+const projectTreeHTML = (threads, { dimmable = false, focusOn = false } = {}) =>
+  PROJECTS.map((p) => {
+    const rows = threads.filter((t) => t.project === p);
+    const hasPrio = rows.some((t) => t.state === "waiting" || t.state === "unseen");
+    const dimClass = dimmable && focusOn && !hasPrio ? "dim" : "";
+    return `<div class="project ${dimmable ? "dimmable" : ""} ${dimClass}">
+      <div class="project-header"><span class="folder">${I.folder(13)}</span>${esc(p)}</div>
+      <div class="thread-list">
+        ${rows.map((t) => {
+          const isPrio = t.state === "waiting" || t.state === "unseen";
+          const cls = dimmable ? (isPrio ? "prio" : "dimmable " + (focusOn ? "dim" : "")) : "";
+          return threadRowHTML(t, cls);
+        }).join("")}
+      </div>
+    </div>`;
+  }).join("");
+
+const frameShell = (sidebarHTML) =>
+  `<div class="frame">
+     <div class="sidebar">
+       <div class="titlebar"><span class="traffic"><i></i><i></i><i></i></span></div>
+       ${sidebarHTML}
+     </div>
+     <div class="content-stub">
+       <div class="stub-line short"></div><div class="stub-line"></div>
+       <div class="stub-line" style="width:78%"></div><div class="stub-input"></div>
+     </div>
+   </div>`;
+
+const headingRow = (bell) =>
+  `<div class="heading-row"><span class="app-title">Maxx</span>
+     <button class="icon-button" title="Search">${I.search()}</button>${bell || ""}
+   </div>`;
+const bellButton = (state, active, title) =>
+  `<button class="icon-button bell-btn ${state ? "has-unread" : ""} ${active ? "active" : ""}"
+     data-act="bell" title="${title}">${I.bell()}<span class="bell-dot"></span></button>`;
+const navRows = `<div class="nav-rows">
+    <button class="nav-row">${I.compose(15)}<span>New agent</span></button>
+    <button class="nav-row">${I.agent(15)}<span>Agents</span></button>
+  </div>`;
+
+/* ---------- Option definitions ---------- */
+const OPTIONS = [
+  {
+    key: "A", kind: "codex",
+    title: "Activity toggle — Codex parity",
+    desc: "The bell swaps the whole sidebar between the Projects tree and an Activity view: Priority on top, then recents by day. ⌥⌘U.",
+    notes: `<span class="plus">+</span> Proven pattern; scales to many projects. <span class="plus">+</span> Priority gets real estate and two-line rows.<br><span class="minus">−</span> A mode switch — you lose project context while toggled. <b>Clears:</b> opening a thread.`,
+    init: (s) => { s.activity = true; },
+    render(s) {
+      const prio = priorityItems(s.threads);
+      const bell = bellButton(prio.length > 0, s.activity, s.activity ? "Turn off activity view (⌥⌘U)" : "View activity (⌥⌘U)");
+      let body;
+      if (s.activity) {
+        const today = s.threads.filter((t) => t.day === "today");
+        const yest = s.threads.filter((t) => t.day === "yesterday");
+        body = `
+          ${prio.length ? `<div class="section-label">Priority</div>${prio.map(twoLineRowHTML).join("")}` : ""}
+          <div class="section-label">Today</div>${today.map(twoLineRowHTML).join("")}
+          <div class="section-label">Yesterday</div>${yest.map(twoLineRowHTML).join("")}`;
+      } else {
+        body = projectTreeHTML(s.threads);
+      }
+      return `${headingRow(bell)}${navRows}<div class="sidebar-body">${body}</div>`;
+    },
+    onAction(s) { s.activity = !s.activity; },
+  },
+  {
+    key: "B", kind: "",
+    title: "Pinned Priority section — always there, only when needed",
+    desc: "The sidebar stays a project tree. A compact Priority section slides in above it whenever something needs you, and vanishes when you're caught up.",
+    notes: `<span class="plus">+</span> Zero new chrome, zero modes — nothing to learn or toggle. <span class="plus">+</span> Self-cleaning: empty state costs no pixels.<br><span class="minus">−</span> Pushes the tree down when busy; needs a cap (show 3, “+N more”). <b>Collapsible</b> like a project: folded, it degrades to a one-line counter — the badge keeps the signal alive.`,
+    init: (s) => { s.collapsed = false; },
+    render(s) {
+      const prio = priorityItems(s.threads);
+      const cap = prio.slice(0, 3);
+      const more = prio.length - cap.length;
+      const pinned = prio.length
+        ? `<div class="pinned-priority ${s.collapsed ? "collapsed" : ""}">
+             <button class="prio-disclosure" data-act="collapse" title="${s.collapsed ? "Expand" : "Collapse"}">
+               <span>Priority</span> <span class="count">${prio.length}</span>
+               <span class="prio-chevron ${s.collapsed ? "" : "is-expanded"}">${I.chevron(11)}</span>
+             </button>
+             ${s.collapsed ? "" : `${cap.map(twoLineRowHTML).join("")}
+             ${more > 0 ? `<div class="section-label" style="padding-top:2px">+${more} more</div>` : ""}`}
+           </div>` : "";
+      return `${headingRow()}${navRows}<div class="sidebar-body">${pinned}${projectTreeHTML(s.threads)}</div>`;
+    },
+    onAction(s, act) { if (act === "collapse") s.collapsed = !s.collapsed; },
+  },
+  {
+    key: "C", kind: "",
+    title: "Bell tray — a scoped notification center",
+    desc: "The bell opens an anchored popover listing what needs attention; the sidebar itself never changes shape. Click an item to jump, or clear all.",
+    notes: `<span class="plus">+</span> Sidebar layout is untouched — safest change. <span class="plus">+</span> Familiar from every inbox ever.<br><span class="minus">−</span> Attention is hidden behind a click; easy to ignore. <b>Best when</b> notifications are occasional.`,
+    init: (s) => { s.open = false; },
+    render(s) {
+      const prio = priorityItems(s.threads);
+      const bell = bellButton(prio.length > 0, s.open, "Activity");
+      const tray = s.open
+        ? `<div class="tray-popover">
+             <div class="tray-head">Needs attention
+               <button class="tray-clear" data-act="clear">Clear all</button></div>
+             ${prio.length ? prio.map(twoLineRowHTML).join("") : `<div class="tray-empty">All caught up.</div>`}
+           </div>` : "";
+      return `${headingRow(bell)}${navRows}<div class="sidebar-body">${projectTreeHTML(s.threads)}</div>${tray}`;
+    },
+    onAction(s, act) {
+      if (act === "bell") s.open = !s.open;
+      if (act === "clear") s.threads.forEach((t) => { if (t.state === "unseen") t.state = "idle"; });
+    },
+    afterThreadClick(s) { s.open = false; },
+  },
+  {
+    key: "D", kind: "",
+    title: "Focus dim — filter in place",
+    desc: "The bell doesn't navigate anywhere: it dims everything that doesn't need you, right where it is. Threads keep their spatial position — muscle memory survives.",
+    notes: `<span class="plus">+</span> No layout change at all; you always see where an item lives. <span class="plus">+</span> Great “sweep the queue” mode.<br><span class="minus">−</span> Dimmed rows still occupy space — weak with long lists.`,
+    init: (s) => { s.focus = false; },
+    render(s) {
+      const prio = priorityItems(s.threads);
+      const bell = `<button class="icon-button bell-btn ${prio.length ? "has-unread" : ""} ${s.focus ? "active" : ""}"
+        data-act="bell" title="${s.focus ? "Show everything" : "Focus on what needs attention"}">${I.bellFocus()}<span class="bell-dot"></span></button>`;
+      return `${headingRow(bell)}${navRows}
+        <div class="sidebar-body ${s.focus ? "focus-on" : ""}">
+          <div class="focus-banner">Showing ${prio.length} item${prio.length === 1 ? "" : "s"} that need attention</div>
+          ${projectTreeHTML(s.threads, { dimmable: true, focusOn: s.focus })}
+        </div>`;
+    },
+    onAction(s) { s.focus = !s.focus; },
+  },
+  {
+    key: "E", kind: "",
+    title: "Next-up navigator — a queue, not a list",
+    desc: "A slim bar above the footer counts what's waiting and walks you through it one keystroke at a time — Slack's unread-jump, for agents. No bell, no mode.",
+    notes: `<span class="plus">+</span> Turns triage into a flow: hit next, review, repeat until green. <span class="plus">+</span> One-row footprint, composes with B.<br><span class="minus">−</span> No overview — you trust the queue's ordering.`,
+    init() {},
+    render(s) {
+      const prio = priorityItems(s.threads);
+      const bar = prio.length
+        ? `<button class="nextup" data-act="next">
+             <span class="unseen-dot"></span>
+             <span class="label">${prio.length} need${prio.length === 1 ? "s" : ""} attention</span>
+             <span style="font-size:12px">Next</span><kbd>⌥↵</kbd>
+           </button>`
+        : `<div class="nextup done"><span class="label">All caught up ✓</span></div>`;
+      return `${headingRow()}${navRows}<div class="sidebar-body">${projectTreeHTML(s.threads)}</div>
+        <div class="sidebar-footer">${bar}</div>`;
+    },
+    onAction(s, act, card) {
+      if (act !== "next") return;
+      const prio = priorityItems(s.threads);
+      if (prio.length) card.selectThread(prio[0].id);
+    },
+  },
+];
+
+/* ---------- Card runtime ---------- */
+class Card {
+  constructor(opt, host) {
+    this.opt = opt;
+    this.host = host;
+    this.reset();
+    host.addEventListener("click", (e) => {
+      const actEl = e.target.closest("[data-act]");
+      if (actEl) {
+        this.opt.onAction?.(this.state, actEl.dataset.act, this);
+        this.render();
+        return;
+      }
+      const row = e.target.closest(".thread-row");
+      if (row) this.selectThread(row.dataset.id);
+    });
+  }
+  reset() {
+    this.state = { threads: seedThreads() };
+    this.opt.init?.(this.state);
+    this.render();
+  }
+  selectThread(id) {
+    const s = this.state;
+    s.threads.forEach((t) => (t.selected = t.id === id));
+    const t = s.threads.find((t) => t.id === id);
+    if (t && (t.state === "unseen" || t.state === "waiting")) {
+      setTimeout(() => {
+        if (t.selected && (t.state === "unseen" || t.state === "waiting")) {
+          t.state = "idle";
+          this.render();
+        }
+      }, 650);
+    }
+    this.opt.afterThreadClick?.(s);
+    this.render();
+  }
+  simulate(spec) {
+    const s = this.state;
+    const t = { id: "sim" + Math.random().toString(36).slice(2, 7), title: spec.title, project: spec.project, state: "running", time: "now", day: "today" };
+    s.threads.push(t);
+    this.render();
+    setTimeout(() => { if (t.state === "running") { t.state = "unseen"; this.render(); } }, 2400);
+  }
+  render() {
+    this.host.innerHTML = frameShell(this.opt.render(this.state));
+  }
+}
+
+/* ---------- Page assembly ---------- */
+const grid = document.getElementById("grid");
+const cards = OPTIONS.map((opt) => {
+  const el = document.createElement("div");
+  el.className = "option-card";
+  el.dataset.kind = opt.kind;
+  el.innerHTML = `<div class="option-head">
+      <div class="option-label">Option ${opt.key}${opt.kind === "codex" ? " · what Codex does" : ""}</div>
+      <div class="option-title">${opt.title}</div>
+      <div class="option-desc">${opt.desc}</div>
+    </div>
+    <div class="frame-host"></div>
+    <div class="option-notes">${opt.notes}</div>`;
+  grid.appendChild(el);
+  return new Card(opt, el.querySelector(".frame-host"));
+});
+
+let simIdx = 0;
+document.getElementById("simulate").addEventListener("click", () => {
+  const spec = simPool[simIdx % simPool.length];
+  simIdx += 1;
+  cards.forEach((c) => c.simulate(spec));
+});
+document.getElementById("reset").addEventListener("click", () => {
+  simIdx = 0;
+  cards.forEach((c) => c.reset());
+});
+</script>
+</body>
+</html>
