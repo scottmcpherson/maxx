@@ -159,7 +159,8 @@ export function buildTimeline(events: ProviderRuntimeEvent[]): TimelineItem[] {
         // command / file.change / diff / tool / plan / usage / warning / error
         // and unknown future kinds render as activity cards; updates with the
         // same itemID collapse into one card.
-        const key = `card:${event.kind}:${event.turnID}:${event.itemID ?? event.id}`;
+        const identity = event.itemID ?? `${event.kind}:${event.id}`;
+        const key = `card:${event.turnID}:${identity}`;
         upsert(key, { type: "card", key, turnID: event.turnID, kind: event.kind, event });
         break;
       }

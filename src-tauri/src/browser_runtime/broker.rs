@@ -1,7 +1,6 @@
 use super::{
-    AuthenticatedBrowserSession, BrowserArtifactStore, BrowserHumanInput, BrowserOperation,
-    BrowserOperationResult, BrowserRenderedFrame, BrowserRuntimeError, BrowserTabId,
-    BrowserTabSummary,
+    AuthenticatedBrowserSession, BrowserArtifactStore, BrowserObservationId, BrowserOperation,
+    BrowserOperationResult, BrowserRuntimeError, BrowserTabId, BrowserTabSummary,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -11,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const MAX_ACTION_TIMELINE: usize = 200;
@@ -112,6 +111,10 @@ impl BrowserEngineContext {
 pub trait BrowserEngine: Send + Sync {
     fn name(&self) -> &'static str;
 
+    async fn shutdown(&self) -> Result<(), BrowserRuntimeError> {
+        Ok(())
+    }
+
     async fn execute(
         &self,
         context: BrowserEngineContext,
@@ -119,34 +122,6 @@ pub trait BrowserEngine: Send + Sync {
     ) -> Result<BrowserOperationResult, BrowserRuntimeError>;
 
     async fn interrupt(&self, _tab_id: BrowserTabId) {}
-
-    async fn start_frame_stream(
-        &self,
-        _tab_id: BrowserTabId,
-    ) -> Result<BrowserFrameStream, BrowserRuntimeError> {
-        Err(BrowserRuntimeError::new(
-            "browser.visual-unavailable",
-            "this browser engine does not provide a visual frame stream",
-        ))
-    }
-
-    async fn stop_frame_stream(&self, _tab_id: BrowserTabId, _stream_id: Uuid) {}
-
-    async fn human_input(
-        &self,
-        _tab_id: BrowserTabId,
-        _input: BrowserHumanInput,
-    ) -> Result<(), BrowserRuntimeError> {
-        Err(BrowserRuntimeError::new(
-            "browser.human-input-unavailable",
-            "this browser engine does not accept human input",
-        ))
-    }
-}
-
-pub struct BrowserFrameStream {
-    pub id: Uuid,
-    pub frames: watch::Receiver<Option<BrowserRenderedFrame>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,7 +153,9 @@ pub struct BrowserActionRecord {
 
 struct TabRuntime {
     summary: BrowserTabSummary,
+    order: u64,
     document_generation: u64,
+    last_observation_id: Option<BrowserObservationId>,
     epoch: Arc<AtomicU64>,
     queue: Arc<Mutex<()>>,
     active_action_id: Option<Uuid>,
@@ -188,6 +165,7 @@ struct TabRuntime {
 struct BrokerState {
     tabs: HashMap<BrowserTabId, TabRuntime>,
     selected_tab: Option<BrowserTabId>,
+    next_tab_order: u64,
     timeline: VecDeque<BrowserActionRecord>,
 }
 
@@ -208,6 +186,10 @@ impl BrowserBroker {
 
     pub fn engine_name(&self) -> &'static str {
         self.engine.name()
+    }
+
+    pub async fn shutdown(&self) -> Result<(), BrowserRuntimeError> {
+        self.engine.shutdown().await
     }
 
     pub async fn execute(
@@ -240,6 +222,70 @@ impl BrowserBroker {
         self.state.lock().await.timeline.iter().cloned().collect()
     }
 
+    pub async fn selected_tab_for(
+        &self,
+        session: &AuthenticatedBrowserSession,
+    ) -> Option<BrowserTabId> {
+        let state = self.state.lock().await;
+        state
+            .selected_tab
+            .filter(|tab_id| session.scope.assigned_tabs.contains(tab_id))
+            .or_else(|| session.scope.assigned_tabs.iter().copied().next())
+    }
+
+    pub async fn validate_observation(
+        &self,
+        session: &AuthenticatedBrowserSession,
+        tab_id: BrowserTabId,
+        observation_id: BrowserObservationId,
+        document_generation: u64,
+    ) -> Result<(), BrowserRuntimeError> {
+        if !session.scope.assigned_tabs.contains(&tab_id) {
+            return Err(BrowserRuntimeError::new(
+                "browser.tab-denied",
+                "the browser tab is not assigned to this provider session",
+            ));
+        }
+        let state = self.state.lock().await;
+        let tab = state.tabs.get(&tab_id).ok_or_else(|| {
+            BrowserRuntimeError::new("browser.tab-not-found", "browser tab does not exist")
+        })?;
+        if tab.last_observation_id != Some(observation_id)
+            || tab.document_generation != document_generation
+        {
+            return Err(BrowserRuntimeError::new(
+                "browser.stale-observation",
+                "the page changed after this observation; observe again before acting",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn validate_control_epoch(
+        &self,
+        session: &AuthenticatedBrowserSession,
+        tab_id: BrowserTabId,
+        expected: u64,
+    ) -> Result<(), BrowserRuntimeError> {
+        if !session.scope.assigned_tabs.contains(&tab_id) {
+            return Err(BrowserRuntimeError::new(
+                "browser.tab-denied",
+                "the browser tab is not assigned to this provider session",
+            ));
+        }
+        let state = self.state.lock().await;
+        let tab = state.tabs.get(&tab_id).ok_or_else(|| {
+            BrowserRuntimeError::new("browser.tab-not-found", "browser tab does not exist")
+        })?;
+        if tab.epoch.load(Ordering::SeqCst) != expected {
+            return Err(BrowserRuntimeError::new(
+                "browser.human-takeover",
+                "human input interrupted browser control",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn human_input(&self, tab_id: BrowserTabId) -> Result<u64, BrowserRuntimeError> {
         let next = {
             let mut state = self.state.lock().await;
@@ -255,43 +301,18 @@ impl BrowserBroker {
         Ok(next)
     }
 
-    pub async fn start_frame_stream(
+    pub async fn native_state(
         &self,
         tab_id: BrowserTabId,
-    ) -> Result<BrowserFrameStream, BrowserRuntimeError> {
-        {
-            let state = self.state.lock().await;
-            if !state.tabs.contains_key(&tab_id) {
-                return Err(BrowserRuntimeError::new(
-                    "browser.tab-not-found",
-                    "browser tab does not exist",
-                ));
-            }
+        url: String,
+        title: String,
+        loading: bool,
+    ) {
+        if let Some(tab) = self.state.lock().await.tabs.get_mut(&tab_id) {
+            tab.summary.url = url;
+            tab.summary.title = title;
+            tab.summary.loading = loading;
         }
-        self.engine.start_frame_stream(tab_id).await
-    }
-
-    pub async fn stop_frame_stream(&self, tab_id: BrowserTabId, stream_id: Uuid) {
-        self.engine.stop_frame_stream(tab_id, stream_id).await;
-    }
-
-    pub async fn observe_frame(&self, frame: &BrowserRenderedFrame) {
-        let mut state = self.state.lock().await;
-        if let Some(tab) = state.tabs.get_mut(&frame.tab_id) {
-            tab.summary.url = frame.url.clone();
-            tab.summary.title = frame.title.clone();
-            tab.summary.loading = frame.loading;
-        }
-    }
-
-    pub async fn dispatch_human_input(
-        &self,
-        tab_id: BrowserTabId,
-        input: BrowserHumanInput,
-    ) -> Result<u64, BrowserRuntimeError> {
-        let epoch = self.human_input(tab_id).await?;
-        self.engine.human_input(tab_id, input).await?;
-        Ok(epoch)
     }
 
     pub async fn release_to_human(&self, tab_id: BrowserTabId) {
@@ -356,6 +377,8 @@ impl BrowserBroker {
         let epoch = Arc::new(AtomicU64::new(0));
         {
             let mut state = self.state.lock().await;
+            let order = state.next_tab_order;
+            state.next_tab_order += 1;
             state.selected_tab = Some(tab_id);
             state.tabs.insert(
                 tab_id,
@@ -369,7 +392,9 @@ impl BrowserBroker {
                         control_epoch: 0,
                         controller_session_id: Some(session.session_id),
                     },
+                    order,
                     document_generation: 0,
+                    last_observation_id: None,
                     epoch: epoch.clone(),
                     queue: Arc::new(Mutex::new(())),
                     active_action_id: None,
@@ -398,6 +423,9 @@ impl BrowserBroker {
             Ok(mut result) => {
                 result.tab_id = Some(tab_id);
                 result.control_epoch = 0;
+                if let Some(tab) = self.state.lock().await.tabs.get_mut(&tab_id) {
+                    update_summary(&mut tab.summary, &result.value);
+                }
                 if result.value.is_null() {
                     result.value = json!({"tabId": tab_id, "selected": true});
                 }
@@ -407,7 +435,7 @@ impl BrowserBroker {
                 let mut state = self.state.lock().await;
                 state.tabs.remove(&tab_id);
                 if state.selected_tab == Some(tab_id) {
-                    state.selected_tab = state.tabs.keys().next().copied();
+                    state.selected_tab = first_tab_id(&state);
                     sync_selected(&mut state);
                 }
                 Err(error)
@@ -475,6 +503,7 @@ impl BrowserBroker {
         }
 
         let mutation = operation.is_mutating();
+        let snapshot = matches!(operation, BrowserOperation::Snapshot { .. });
         let select = matches!(operation, BrowserOperation::SelectTab { .. });
         let close = matches!(operation, BrowserOperation::CloseTab { .. });
         let navigation = matches!(
@@ -512,17 +541,29 @@ impl BrowserBroker {
         if close && execution.is_ok() {
             state.tabs.remove(&tab_id);
             if state.selected_tab == Some(tab_id) {
-                state.selected_tab = state.tabs.keys().next().copied();
+                state.selected_tab = first_tab_id(&state);
             }
             sync_selected(&mut state);
         } else if let Some(tab) = state.tabs.get_mut(&tab_id) {
             tab.active_action_id = None;
             tab.summary.control_epoch = final_epoch;
-            if navigation && execution.is_ok() {
-                tab.document_generation += 1;
-            }
             if let Ok(result) = &execution {
                 update_summary(&mut tab.summary, &result.value);
+                if snapshot {
+                    tab.last_observation_id = result.observation_id;
+                    if let Some(generation) = result
+                        .value
+                        .get("documentGeneration")
+                        .and_then(Value::as_u64)
+                    {
+                        tab.document_generation = generation;
+                    }
+                } else if mutation {
+                    tab.last_observation_id = None;
+                    if navigation {
+                        tab.document_generation += 1;
+                    }
+                }
             }
             if select && execution.is_ok() {
                 state.selected_tab = Some(tab_id);
@@ -568,10 +609,18 @@ fn ordered_summaries(state: &BrokerState) -> Vec<BrowserTabSummary> {
     let mut tabs = state
         .tabs
         .values()
-        .map(|tab| tab.summary.clone())
+        .map(|tab| (tab.order, tab.summary.clone()))
         .collect::<Vec<_>>();
-    tabs.sort_by_key(|tab| tab.id);
-    tabs
+    tabs.sort_by_key(|(order, _)| *order);
+    tabs.into_iter().map(|(_, summary)| summary).collect()
+}
+
+fn first_tab_id(state: &BrokerState) -> Option<BrowserTabId> {
+    state
+        .tabs
+        .values()
+        .min_by_key(|tab| tab.order)
+        .map(|tab| tab.summary.id)
 }
 
 fn sync_selected(state: &mut BrokerState) {
@@ -715,6 +764,7 @@ mod tests {
                 BrowserOperation::Snapshot {
                     tab_id: Uuid::new_v4(),
                     include_screenshot: false,
+                    since_observation_id: None,
                 },
             )
             .await
@@ -744,6 +794,7 @@ mod tests {
                 BrowserOperation::Snapshot {
                     tab_id,
                     include_screenshot: false,
+                    since_observation_id: None,
                 },
             )
             .await
@@ -754,6 +805,56 @@ mod tests {
             .expect("close");
         assert!(broker.tab_summaries().await.is_empty());
         assert_eq!(engine.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn acting_invalidates_the_observation_guard() {
+        let broker = BrowserBroker::new(Arc::new(FakeBrowserEngine::default()), artifacts());
+        let bootstrap = session(HashSet::new());
+        let opened = broker
+            .execute(&bootstrap, BrowserOperation::OpenTab { url: None })
+            .await
+            .expect("open");
+        let tab_id = opened.tab_id.expect("tab id");
+        let assigned = session([tab_id]);
+        let observed = broker
+            .execute(
+                &assigned,
+                BrowserOperation::Snapshot {
+                    tab_id,
+                    include_screenshot: false,
+                    since_observation_id: None,
+                },
+            )
+            .await
+            .expect("observe");
+        let observation_id = observed.observation_id.expect("observation id");
+
+        let wrong_generation = broker
+            .validate_observation(&assigned, tab_id, observation_id, 1)
+            .await
+            .expect_err("wrong document generation must be rejected");
+        assert_eq!(wrong_generation.code, "browser.stale-observation");
+        broker
+            .validate_observation(&assigned, tab_id, observation_id, 0)
+            .await
+            .expect("fresh observation");
+        broker
+            .execute(
+                &assigned,
+                BrowserOperation::Click {
+                    tab_id,
+                    reference: "e1".into(),
+                },
+            )
+            .await
+            .expect("act");
+
+        let stale = broker
+            .validate_observation(&assigned, tab_id, observation_id, 0)
+            .await
+            .expect_err("mutation must invalidate the prior observation");
+        assert_eq!(stale.code, "browser.stale-observation");
     }
 
     #[tokio::test]
@@ -774,6 +875,11 @@ mod tests {
             .expect("second tab id");
 
         let tabs = broker.tab_summaries().await;
+        assert_eq!(
+            tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![first, second],
+            "browser tabs stay in creation order",
+        );
         assert!(
             !tabs
                 .iter()
@@ -826,6 +932,8 @@ mod tests {
 
     async fn insert_test_tab(broker: &BrowserBroker, tab_id: BrowserTabId) {
         let mut state = broker.state.lock().await;
+        let order = state.next_tab_order;
+        state.next_tab_order += 1;
         state.tabs.insert(
             tab_id,
             TabRuntime {
@@ -838,7 +946,9 @@ mod tests {
                     control_epoch: 0,
                     controller_session_id: None,
                 },
+                order,
                 document_generation: 0,
+                last_observation_id: None,
                 epoch: Arc::new(AtomicU64::new(0)),
                 queue: Arc::new(Mutex::new(())),
                 active_action_id: None,

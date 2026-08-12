@@ -319,11 +319,20 @@ export interface ProviderProfile {
   isEnabled: boolean;
 }
 
+export interface TitleGenerationRuntime {
+  provider: ChatProvider;
+  model: string;
+  effort?: string | null;
+  speed?: "normal" | "fast" | null;
+}
+
 export interface WorkspaceDocument {
   schemaVersion: number;
   projects: ChatProject[];
   providerProfiles: ProviderProfile[];
   agents: AgentDefinition[];
+  /** Null/absent means generated titles inherit the runtime used by the chat. */
+  titleGenerationRuntime?: TitleGenerationRuntime | null;
   voice: VoiceSettings;
 }
 
@@ -338,6 +347,12 @@ export interface TurnFinishedEnvelope {
   threadID: string;
   turnID: string;
   terminalState?: ProviderTurnTerminalState;
+}
+
+export interface ThreadTitleUpdatedEnvelope {
+  projectID: string;
+  threadID: string;
+  title: string;
 }
 
 /** Backend inventory of in-flight turns (sidebar activity hydrate). */

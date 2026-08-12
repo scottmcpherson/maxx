@@ -7,18 +7,16 @@
 
 mod artifact;
 mod broker;
-mod chrome;
 mod contract;
 mod gateway;
+mod remote;
 mod session;
 mod stdio_bridge;
-mod ui;
 
 pub use artifact::*;
 pub use broker::*;
-pub use chrome::*;
 pub use contract::*;
 pub use gateway::*;
+pub use remote::*;
 pub use session::*;
 pub use stdio_bridge::*;
-pub use ui::*;

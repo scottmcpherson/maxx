@@ -3,6 +3,9 @@
 
 # Frontend build and test output
 /dist/
+/dist-electron/
+/release/
+/.pnpm-store/
 /coverage/
 *.tsbuildinfo
 

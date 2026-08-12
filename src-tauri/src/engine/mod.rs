@@ -110,6 +110,10 @@ pub trait ProviderEngine: Send + Sync {
         request_id: Uuid,
         decision: RuntimeInteractionDecision,
     ) -> Result<(), String>;
+    /// Tear down the provider-native session owned by one Maxx thread.
+    /// Background text generation uses isolated synthetic thread IDs and must
+    /// release them as soon as the result has been collected.
+    async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid);
     async fn shutdown(&self);
 }
 

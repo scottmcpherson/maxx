@@ -164,6 +164,18 @@ impl ProviderEngine for CodexEngine {
         Err("The Codex request is no longer actionable.".into())
     }
 
+    async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
+        let key = (provider_instance_id, thread_id);
+        let instance = self.instances.lock().await.remove(&key);
+        self.instance_by_turn
+            .lock()
+            .await
+            .retain(|_, route| *route != key);
+        if let Some(instance) = instance {
+            retire_instance(&instance).await;
+        }
+    }
+
     async fn shutdown(&self) {
         let instances: Vec<Arc<CodexInstance>> = self
             .instances
@@ -174,27 +186,32 @@ impl ProviderEngine for CodexEngine {
             .collect();
         self.instance_by_turn.lock().await.clear();
         for instance in instances {
-            let (client, turns) = {
-                let mut state = instance.state.lock().await;
-                let turns: Vec<DraftSender> = state
-                    .active_by_native_thread
-                    .drain()
-                    .map(|(_, t)| t.sink)
-                    .collect();
-                state.interactions.clear();
-                (state.client.take(), turns)
-            };
-            for sink in turns {
-                yield_draft(
-                    &sink,
-                    ProviderEventDraft::Terminal(ProviderTurnTerminalState::Cancelled),
-                )
-                .await;
-            }
-            if let Some(client) = client {
-                client.shutdown().await;
-            }
+            retire_instance(&instance).await;
         }
+    }
+}
+
+async fn retire_instance(instance: &Arc<CodexInstance>) {
+    let (client, turns) = {
+        let mut state = instance.state.lock().await;
+        let turns: Vec<DraftSender> = state
+            .active_by_native_thread
+            .drain()
+            .map(|(_, turn)| turn.sink)
+            .collect();
+        state.interactions.clear();
+        state.native_thread_by_thread.clear();
+        (state.client.take(), turns)
+    };
+    for sink in turns {
+        yield_draft(
+            &sink,
+            ProviderEventDraft::Terminal(ProviderTurnTerminalState::Cancelled),
+        )
+        .await;
+    }
+    if let Some(client) = client {
+        client.shutdown().await;
     }
 }
 

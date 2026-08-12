@@ -192,7 +192,7 @@ fn swift_json_field_names_and_reference_dates_are_preserved() {
 }
 
 #[test]
-fn legacy_project_array_and_older_schemas_migrate_to_schema_five() {
+fn legacy_project_array_and_older_schemas_migrate_to_current_schema() {
     let dir = std::env::temp_dir().join(format!("maxx-core-test-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("workspace.json");
@@ -216,11 +216,44 @@ fn legacy_project_array_and_older_schemas_migrate_to_schema_five() {
 
     persistence.save(&loaded.document).unwrap();
     let reloaded = persistence.load().unwrap();
-    assert_eq!(reloaded.source_format, SourceFormat::VersionedDocument(5));
+    assert_eq!(
+        reloaded.source_format,
+        SourceFormat::VersionedDocument(CURRENT_WORKSPACE_SCHEMA_VERSION)
+    );
     assert_eq!(
         reloaded.document.schema_version,
         CURRENT_WORKSPACE_SCHEMA_VERSION
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn title_generation_runtime_round_trips_and_can_be_unset() {
+    let dir = std::env::temp_dir().join(format!("maxx-core-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("workspace.json");
+    let persistence = WorkspacePersistence::new(&path);
+
+    let mut document = WorkspaceDocument {
+        title_generation_runtime: Some(TitleGenerationRuntime {
+            provider: ChatProvider::Claude,
+            model: "claude-sonnet-4-5".into(),
+            effort: Some("high".into()),
+            speed: None,
+        }),
+        ..Default::default()
+    };
+    persistence.save(&document).unwrap();
+    assert_eq!(
+        persistence.load().unwrap().document.title_generation_runtime,
+        document.title_generation_runtime
+    );
+
+    document.title_generation_runtime = None;
+    persistence.save(&document).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(json.get("titleGenerationRuntime").is_none());
 
     std::fs::remove_dir_all(&dir).ok();
 }

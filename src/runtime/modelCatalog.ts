@@ -191,6 +191,22 @@ export function filterRuntimeCatalog(
   return { providers, models, modelHitsAcrossProviders };
 }
 
+/** Catalog failures are relevant to search only when the query names the
+ * unavailable provider. A missing provider must not poison unrelated model
+ * results from catalogs that loaded successfully. */
+export function filterUnavailableProvidersForQuery(
+  profiles: SearchableProviderRow[],
+  unavailableProviders: ChatProvider[],
+  query: string,
+): SearchableProviderRow[] {
+  if (!query.trim()) return [];
+  const unavailable = new Set(unavailableProviders);
+  return profiles.filter((profile) =>
+    profile.enabled
+    && unavailable.has(profile.provider)
+    && textMatchesQuery(profile.label, query));
+}
+
 /** Normalize effort for storage; empty/default → null. */
 export function normalizeEffort(
   _provider: ChatProvider,

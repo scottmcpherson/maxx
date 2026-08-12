@@ -1,5 +1,5 @@
-// Browser-pane logic and the typed shared-frame contract. Chromium targets,
-// semantic tools, and human control are owned by the Rust browser broker.
+// Browser-pane logic and the typed direct-rendering contract. Electron owns
+// pixels and Chromium lifecycle; Rust owns provider scope and control epochs.
 
 import { MIN_WORKSPACE_WIDTH } from "./layout";
 
@@ -110,6 +110,9 @@ export interface BrowserTabSummary {
   selected: boolean;
   controlEpoch: number;
   controllerSessionId?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  crashed?: boolean;
 }
 
 export interface BrowserUiReveal {
@@ -131,31 +134,37 @@ export function browserArtifactDataURL(content: BrowserArtifactContent): string 
   return `data:${content.mimeType};base64,${content.dataBase64}`;
 }
 
-export interface BrowserRenderedFrame {
-  tabId: string;
+export interface BrowserNativeState {
+  id: string;
   url: string;
   title: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
-  viewportWidth: number;
-  viewportHeight: number;
-  mimeType: string;
-  dataBase64: string;
+  crashed?: boolean;
 }
 
-export interface BrowserFrameSubscription {
-  streamId: string;
-  initialFrame: BrowserRenderedFrame;
+export interface BrowserAnnotation {
+  id: string;
+  tabId: string;
+  url: string;
+  selector: string;
+  tagName: string;
+  role: string | null;
+  name: string;
+  text: string;
+  rect: { x: number; y: number; width: number; height: number };
+  createdAt: number;
 }
 
-export type BrowserHumanInput =
-  | { type: "pointer_move"; x: number; y: number; buttons: number }
-  | { type: "pointer_down"; x: number; y: number; button: string }
-  | { type: "pointer_up"; x: number; y: number; button: string }
-  | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number }
-  | { type: "key"; key: string; code: string; modifiers: number; text: string }
-  | { type: "text"; text: string };
+export interface ChromeImportStatus {
+  available: boolean;
+  profiles: { id: string; name: string }[];
+  importedAt: number | null;
+  lastProfile: string | null;
+  cookieCount: number;
+  passwordCount: number;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Visibility                                                                  */

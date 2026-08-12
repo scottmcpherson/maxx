@@ -1,5 +1,5 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { CSSProperties, useState } from "react";
+import { mediaURL } from "../ipc";
 
 /** Palette for freshly created agents; the editor can shuffle through it. */
 export const AGENT_COLORS = [
@@ -63,7 +63,7 @@ export function AgentAvatar({
     <span className="agent-avatar" style={style} role="img" aria-label={`${name} avatar`}>
       {showImage ? (
         <img
-          src={convertFileSrc(imagePath)}
+          src={mediaURL(imagePath)}
           alt=""
           draggable={false}
           onError={() => setFailedPath(imagePath)}

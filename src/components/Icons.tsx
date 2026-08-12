@@ -89,6 +89,12 @@ export const Icons = {
       <path d="M12 3.5c2.2 2.3 3.3 5.2 3.3 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.3-5.2-3.3-8.5S9.8 5.8 12 3.5Z" />
     </IconBase>
   ),
+  lock: (props: IconProps) => (
+    <IconBase {...props}>
+      <rect x="5" y="10" width="14" height="10" rx="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+    </IconBase>
+  ),
   reload: (props: IconProps) => (
     <IconBase {...props}>
       <path d="M20 12a8 8 0 1 1-2.6-5.9" />

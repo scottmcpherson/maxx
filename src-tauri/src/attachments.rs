@@ -3,28 +3,7 @@ use maxx_core::persist::ChatImageAttachment;
 use maxx_core::persist::WorkspaceDocument;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
 use uuid::Uuid;
-
-#[tauri::command]
-pub fn authorize_image_previews(app: AppHandle, image_paths: Vec<String>) -> Result<(), String> {
-    for image_path in image_paths {
-        let path = PathBuf::from(&image_path);
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        if !path.is_file() || !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
-        {
-            return Err("Only PNG, JPEG, GIF, and WebP images can be attached.".into());
-        }
-        app.asset_protocol_scope()
-            .allow_file(path)
-            .map_err(|error| format!("Could not preview the image: {error}"))?;
-    }
-    Ok(())
-}
 
 pub fn import_images(source_paths: &[String]) -> Result<Vec<ChatImageAttachment>, String> {
     let directory = crate::state::chat_images_dir();

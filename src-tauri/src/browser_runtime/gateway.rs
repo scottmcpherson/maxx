@@ -1,7 +1,8 @@
 use super::{
     AuthenticatedBrowserSession, BrowserArtifactStore, BrowserBroker, BrowserCapability,
-    BrowserCredential, BrowserEngine, BrowserOperation, BrowserOperationResult,
-    BrowserRuntimeError, BrowserSessionRegistry, BrowserSessionScope, BrowserUiReveal,
+    BrowserCredential, BrowserEngine, BrowserObservationId, BrowserOperation,
+    BrowserOperationResult, BrowserRuntimeError, BrowserSessionRegistry, BrowserSessionScope,
+    BrowserUiReveal,
 };
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -23,6 +24,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -181,6 +183,10 @@ impl BrowserRuntime {
 
     pub fn subscribe_ui_reveals(&self) -> broadcast::Receiver<BrowserUiReveal> {
         self.ui_reveals.subscribe()
+    }
+
+    pub async fn shutdown(&self) -> Result<(), BrowserRuntimeError> {
+        self.broker.shutdown().await
     }
 
     pub async fn human_open_tab(
@@ -379,6 +385,99 @@ struct BrowserMcpServer {
     ui_reveals: broadcast::Sender<BrowserUiReveal>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserActRequest {
+    tab_id: Uuid,
+    observation_id: BrowserObservationId,
+    document_generation: u64,
+    control_epoch: u64,
+    actions: Vec<BrowserActAction>,
+    #[serde(default)]
+    postconditions: Vec<BrowserPostcondition>,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum BrowserActAction {
+    Click {
+        reference: String,
+    },
+    Fill {
+        reference: String,
+        value: String,
+    },
+    Press {
+        key: String,
+    },
+    Scroll {
+        delta_x: f64,
+        delta_y: f64,
+    },
+    Navigate {
+        url: String,
+    },
+    Back,
+    Forward,
+    Reload,
+    Wait {
+        condition: String,
+        #[serde(default = "default_wait_timeout_ms")]
+        timeout_ms: u64,
+    },
+    Extract {
+        expression: String,
+    },
+}
+
+impl BrowserActAction {
+    fn into_operation(self, tab_id: Uuid) -> BrowserOperation {
+        match self {
+            Self::Click { reference } => BrowserOperation::Click { tab_id, reference },
+            Self::Fill { reference, value } => BrowserOperation::Fill {
+                tab_id,
+                reference,
+                value,
+            },
+            Self::Press { key } => BrowserOperation::Press { tab_id, key },
+            Self::Scroll { delta_x, delta_y } => BrowserOperation::Scroll {
+                tab_id,
+                delta_x,
+                delta_y,
+            },
+            Self::Navigate { url } => BrowserOperation::Navigate { tab_id, url },
+            Self::Back => BrowserOperation::GoBack { tab_id },
+            Self::Forward => BrowserOperation::GoForward { tab_id },
+            Self::Reload => BrowserOperation::Reload { tab_id },
+            Self::Wait {
+                condition,
+                timeout_ms,
+            } => BrowserOperation::Wait {
+                tab_id,
+                condition,
+                timeout_ms,
+            },
+            Self::Extract { expression } => BrowserOperation::Evaluate { tab_id, expression },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPostcondition {
+    condition: String,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+const fn default_wait_timeout_ms() -> u64 {
+    10_000
+}
+
 impl ServerHandler for BrowserMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -395,7 +494,7 @@ impl ServerHandler for BrowserMcpServer {
                 website_url: None,
             },
             instructions: Some(
-                "These tools control the visible, built-in Maxx browser. Reuse known assigned tabs. To open a requested URL, call browser_open_tab directly; it selects and reveals the new tab. Call browser_status, browser_list_tabs, or browser_select_tab only when their information or behavior is actually needed. Do not search for a Maxx CLI, use a terminal browser skill, or control an external browser. Observe before acting; prefer semantic element references, with coordinates only as a fallback. Human input interrupts agent control.".into(),
+                "Maxx Browser is the only browser-control surface for this session. Call browser_open once with the destination URL, then reuse the assigned tab. browser_open and browser_act return a fresh observation; pass its observationId and documentGeneration into the next browser_act. Batch related actions, waits, assertions, and extraction into one browser_act call. Wait conditions use text:<literal visible text> (preferred) or a JavaScript boolean expression. A stale observation is rejected. Do not launch Chrome, use terminal browser automation, or control an external browser. Human input interrupts agent control.".into(),
             ),
             ..Default::default()
         }
@@ -427,42 +526,15 @@ impl ServerHandler for BrowserMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let session = session_from_context(&context)?;
-        let operation = operation_from_call(&request.name, request.arguments)?;
-        let selected_tab = operation.target_tab();
-        let reveal = matches!(
-            operation,
-            BrowserOperation::OpenTab { .. } | BrowserOperation::SelectTab { .. }
-        );
-        match self.broker.execute(&session, operation).await {
-            Ok(result) => {
-                if request.name == "browser_open_tab" {
-                    if let Some(tab_id) = result.tab_id {
-                        if let Err(error) = self.sessions.assign_tab(session.session_id, tab_id) {
-                            return Ok(runtime_error_result(error));
-                        }
-                    }
-                }
-                if request.name == "browser_close_tab" {
-                    if let Some(tab_id) = result.tab_id {
-                        self.sessions.remove_tab(tab_id);
-                    }
-                }
-                if reveal {
-                    if let Some(tab_id) = result.tab_id.or(selected_tab) {
-                        let _ = self.ui_reveals.send(BrowserUiReveal {
-                            thread_id: session.scope.thread_id,
-                            tab_id,
-                        });
-                    }
-                }
-                Ok(
-                    match browser_call_tool_result(&self.artifacts, &session, &result) {
-                        Ok(result) => result,
-                        Err(error) => runtime_error_result(error),
-                    },
-                )
-            }
+        let mut session = session_from_context(&context)?;
+        let arguments = request.arguments.unwrap_or_default();
+        match execute_core_tool(self, &mut session, &request.name, arguments).await {
+            Ok(result) => Ok(
+                match browser_call_tool_result(&self.artifacts, &session, &result) {
+                    Ok(result) => result,
+                    Err(error) => runtime_error_result(error),
+                },
+            ),
             Err(error) => Ok(runtime_error_result(error)),
         }
     }
@@ -516,24 +588,323 @@ fn session_from_context(
         .ok_or_else(|| McpError::internal_error("browser session identity is missing", None))
 }
 
-fn operation_from_call(
+async fn execute_core_tool(
+    server: &BrowserMcpServer,
+    session: &mut AuthenticatedBrowserSession,
     name: &str,
-    arguments: Option<Map<String, Value>>,
-) -> Result<BrowserOperation, McpError> {
-    if !TOOL_SPECS.iter().any(|spec| spec.name == name) {
-        return Err(McpError::invalid_params(
+    arguments: Map<String, Value>,
+) -> Result<BrowserOperationResult, BrowserRuntimeError> {
+    match name {
+        "browser_open" => {
+            let url = Some(required_string(&arguments, "url")?);
+            let opened = server
+                .broker
+                .execute(session, BrowserOperation::OpenTab { url })
+                .await?;
+            let tab_id = opened.tab_id.ok_or_else(|| {
+                BrowserRuntimeError::new("browser.missing-tab", "opened tab has no identifier")
+            })?;
+            server.sessions.assign_tab(session.session_id, tab_id)?;
+            session.scope.assigned_tabs.insert(tab_id);
+            let _ = server.ui_reveals.send(BrowserUiReveal {
+                thread_id: session.scope.thread_id,
+                tab_id,
+            });
+            let observed = server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Snapshot {
+                        tab_id,
+                        include_screenshot: optional_bool(&arguments, "includeScreenshot", false)?,
+                        since_observation_id: None,
+                    },
+                )
+                .await?;
+            Ok(add_result_metadata(observed, "opened", opened.value))
+        }
+        "browser_observe" => {
+            let tab_id = resolve_tab(server, session, &arguments).await?;
+            server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Snapshot {
+                        tab_id,
+                        include_screenshot: optional_bool(&arguments, "includeScreenshot", false)?,
+                        since_observation_id: optional_uuid(&arguments, "sinceObservationId")?,
+                    },
+                )
+                .await
+        }
+        "browser_act" => execute_browser_act(server, session, arguments).await,
+        "browser_wait" => {
+            let tab_id = resolve_tab(server, session, &arguments).await?;
+            let waited = server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Wait {
+                        tab_id,
+                        condition: required_string(&arguments, "condition")?,
+                        timeout_ms: optional_u64(
+                            &arguments,
+                            "timeoutMs",
+                            default_wait_timeout_ms(),
+                        )?,
+                    },
+                )
+                .await?;
+            let observed = server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Snapshot {
+                        tab_id,
+                        include_screenshot: false,
+                        since_observation_id: None,
+                    },
+                )
+                .await?;
+            Ok(add_result_metadata(observed, "wait", waited.value))
+        }
+        "browser_extract" => {
+            let tab_id = resolve_tab(server, session, &arguments).await?;
+            let extracted = server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Evaluate {
+                        tab_id,
+                        expression: required_string(&arguments, "expression")?,
+                    },
+                )
+                .await?;
+            let observed = server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Snapshot {
+                        tab_id,
+                        include_screenshot: false,
+                        since_observation_id: None,
+                    },
+                )
+                .await?;
+            Ok(add_result_metadata(observed, "extracted", extracted.value))
+        }
+        "browser_screenshot" => {
+            let tab_id = resolve_tab(server, session, &arguments).await?;
+            server
+                .broker
+                .execute(
+                    session,
+                    BrowserOperation::Screenshot {
+                        tab_id,
+                        full_page: optional_bool(&arguments, "fullPage", false)?,
+                    },
+                )
+                .await
+        }
+        _ => Err(BrowserRuntimeError::new(
+            "browser.unknown-tool",
             format!("unknown browser tool {name}"),
-            None,
+        )),
+    }
+}
+
+async fn execute_browser_act(
+    server: &BrowserMcpServer,
+    session: &AuthenticatedBrowserSession,
+    arguments: Map<String, Value>,
+) -> Result<BrowserOperationResult, BrowserRuntimeError> {
+    let request: BrowserActRequest =
+        serde_json::from_value(Value::Object(arguments)).map_err(|error| {
+            BrowserRuntimeError::new(
+                "browser.invalid-arguments",
+                format!("invalid arguments for browser_act: {error}"),
+            )
+        })?;
+    if request.actions.is_empty() || request.actions.len() > 20 {
+        return Err(BrowserRuntimeError::new(
+            "browser.invalid-batch",
+            "browser_act requires between 1 and 20 actions",
         ));
     }
-    let operation_name = name
-        .strip_prefix("browser_")
-        .expect("tool catalog only contains browser tools");
-    let mut value = arguments.unwrap_or_default();
-    value.insert("operation".into(), Value::String(operation_name.into()));
-    serde_json::from_value(Value::Object(value)).map_err(|error| {
-        McpError::invalid_params(format!("invalid arguments for {name}: {error}"), None)
-    })
+    if request.postconditions.len() > 8 {
+        return Err(BrowserRuntimeError::new(
+            "browser.invalid-batch",
+            "browser_act accepts at most 8 postconditions",
+        ));
+    }
+    server
+        .broker
+        .validate_observation(
+            session,
+            request.tab_id,
+            request.observation_id,
+            request.document_generation,
+        )
+        .await?;
+    server
+        .broker
+        .validate_control_epoch(session, request.tab_id, request.control_epoch)
+        .await?;
+
+    let mut results = Vec::new();
+    for action in request.actions {
+        server
+            .broker
+            .validate_control_epoch(session, request.tab_id, request.control_epoch)
+            .await?;
+        let operation = action.into_operation(request.tab_id);
+        let tool = operation.tool_name();
+        let result = server.broker.execute(session, operation).await?;
+        results.push(json!({"operation": tool, "value": result.value}));
+    }
+    for postcondition in request.postconditions {
+        server
+            .broker
+            .validate_control_epoch(session, request.tab_id, request.control_epoch)
+            .await?;
+        let result = server
+            .broker
+            .execute(
+                session,
+                BrowserOperation::Wait {
+                    tab_id: request.tab_id,
+                    condition: postcondition.condition,
+                    timeout_ms: postcondition.timeout_ms,
+                },
+            )
+            .await?;
+        results.push(json!({"operation": "postcondition", "value": result.value}));
+    }
+    let observed = server
+        .broker
+        .execute(
+            session,
+            BrowserOperation::Snapshot {
+                tab_id: request.tab_id,
+                include_screenshot: false,
+                since_observation_id: None,
+            },
+        )
+        .await?;
+    Ok(add_result_metadata(
+        observed,
+        "actionResults",
+        Value::Array(results),
+    ))
+}
+
+async fn resolve_tab(
+    server: &BrowserMcpServer,
+    session: &AuthenticatedBrowserSession,
+    arguments: &Map<String, Value>,
+) -> Result<Uuid, BrowserRuntimeError> {
+    if let Some(tab_id) = optional_uuid(arguments, "tabId")? {
+        return Ok(tab_id);
+    }
+    server
+        .broker
+        .selected_tab_for(session)
+        .await
+        .ok_or_else(|| {
+            BrowserRuntimeError::new(
+                "browser.tab-required",
+                "no assigned tab is selected; call browser_open first",
+            )
+        })
+}
+
+fn add_result_metadata(
+    mut result: BrowserOperationResult,
+    key: &str,
+    value: Value,
+) -> BrowserOperationResult {
+    if let Some(object) = result.value.as_object_mut() {
+        object.insert(key.into(), value);
+    }
+    result
+}
+
+fn required_string(
+    arguments: &Map<String, Value>,
+    name: &str,
+) -> Result<String, BrowserRuntimeError> {
+    arguments
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            BrowserRuntimeError::new(
+                "browser.invalid-arguments",
+                format!("{name} must be a non-empty string"),
+            )
+        })
+}
+
+fn optional_string(
+    arguments: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<String>, BrowserRuntimeError> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        _ => Err(BrowserRuntimeError::new(
+            "browser.invalid-arguments",
+            format!("{name} must be a string"),
+        )),
+    }
+}
+
+fn optional_uuid(
+    arguments: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<Uuid>, BrowserRuntimeError> {
+    optional_string(arguments, name)?
+        .map(|value| {
+            Uuid::parse_str(&value).map_err(|_| {
+                BrowserRuntimeError::new(
+                    "browser.invalid-arguments",
+                    format!("{name} must be a UUID"),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn optional_bool(
+    arguments: &Map<String, Value>,
+    name: &str,
+    default: bool,
+) -> Result<bool, BrowserRuntimeError> {
+    match arguments.get(name) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(BrowserRuntimeError::new(
+            "browser.invalid-arguments",
+            format!("{name} must be a boolean"),
+        )),
+    }
+}
+
+fn optional_u64(
+    arguments: &Map<String, Value>,
+    name: &str,
+    default: u64,
+) -> Result<u64, BrowserRuntimeError> {
+    match arguments.get(name) {
+        None => Ok(default),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            BrowserRuntimeError::new(
+                "browser.invalid-arguments",
+                format!("{name} must be a non-negative integer"),
+            )
+        }),
+    }
 }
 
 fn runtime_error_result(error: BrowserRuntimeError) -> CallToolResult {
@@ -587,37 +958,12 @@ struct ToolSpec {
 }
 
 const TOOL_SPECS: &[ToolSpec] = &[
-    spec("browser_status", "Report the browser engine and tabs assigned to this agent session.", BrowserCapability::Observe, true, false),
-    spec("browser_list_tabs", "List tabs assigned to this agent session.", BrowserCapability::Observe, true, false),
-    spec("browser_open_tab", "Open, select, and reveal a new isolated browser tab assigned to this agent session.", BrowserCapability::Navigate, false, false),
-    spec("browser_select_tab", "Reveal an assigned browser tab in Maxx.", BrowserCapability::Navigate, false, false),
-    spec("browser_close_tab", "Close an assigned browser tab.", BrowserCapability::Navigate, false, true),
-    spec("browser_navigate", "Navigate an assigned tab to an HTTP or HTTPS URL.", BrowserCapability::Navigate, false, true),
-    spec("browser_go_back", "Go back in an assigned tab's history.", BrowserCapability::Navigate, false, true),
-    spec("browser_go_forward", "Go forward in an assigned tab's history.", BrowserCapability::Navigate, false, true),
-    spec("browser_reload", "Reload an assigned browser tab.", BrowserCapability::Navigate, false, true),
-    spec("browser_snapshot", "Observe page state, visible text, accessibility elements, console errors, and failed requests.", BrowserCapability::Observe, true, false),
-    spec("browser_click", "Click an element from the latest semantic snapshot.", BrowserCapability::Interact, false, true),
-    spec("browser_fill", "Replace the value of an editable element.", BrowserCapability::Interact, false, true),
-    spec("browser_press", "Send a keyboard key or shortcut to the page.", BrowserCapability::Interact, false, true),
-    spec("browser_hover", "Hover an element from the latest semantic snapshot.", BrowserCapability::Interact, false, false),
-    spec("browser_scroll", "Scroll the assigned browser tab.", BrowserCapability::Interact, false, false),
-    spec("browser_drag", "Drag one referenced element onto another.", BrowserCapability::Interact, false, true),
-    spec("browser_wait", "Wait for a page condition without polling in model context.", BrowserCapability::Interact, true, false),
-    spec("browser_evaluate", "Evaluate JavaScript in the assigned page and return a JSON result.", BrowserCapability::Evaluate, false, true),
-    spec("browser_screenshot", "Capture the assigned browser tab and return the image directly to the model and Maxx conversation.", BrowserCapability::Observe, true, false),
-    spec("browser_console_list", "List buffered browser console entries.", BrowserCapability::Debug, true, false),
-    spec("browser_console_get", "Read one console entry including source and stack.", BrowserCapability::Debug, true, false),
-    spec("browser_network_list", "List buffered browser network requests and failures.", BrowserCapability::Debug, true, false),
-    spec("browser_network_get", "Read one redacted network request and response.", BrowserCapability::Debug, true, false),
-    spec("browser_trace_start", "Start a browser performance trace.", BrowserCapability::Trace, false, false),
-    spec("browser_trace_stop", "Stop a performance trace and return an artifact URI.", BrowserCapability::Trace, false, false),
-    spec("browser_resize", "Resize the tab viewport.", BrowserCapability::Emulate, false, false),
-    spec("browser_emulate", "Apply a named browser device emulation profile.", BrowserCapability::Emulate, false, false),
-    spec("browser_storage", "Read or modify storage in the assigned tab.", BrowserCapability::Storage, false, true),
-    spec("browser_handle_dialog", "Accept or dismiss the page's pending dialog.", BrowserCapability::Interact, false, true),
-    spec("browser_upload", "Attach approved project files to a referenced file input.", BrowserCapability::Files, false, true),
-    spec("browser_downloads", "List downloads owned by the assigned tab.", BrowserCapability::Files, true, false),
+    spec("browser_open", "Open, select, reveal, and observe a new isolated Maxx browser tab.", BrowserCapability::Navigate, false, false),
+    spec("browser_observe", "Return a compact semantic observation, optionally as changes since the prior observation.", BrowserCapability::Observe, true, false),
+    spec("browser_act", "Run a guarded batch of browser actions, waits, postconditions, and extraction, then return a fresh observation.", BrowserCapability::Interact, false, true),
+    spec("browser_wait", "Wait for a page condition without model polling, then return a fresh observation.", BrowserCapability::Interact, true, false),
+    spec("browser_extract", "Evaluate a JSON-returning expression in the assigned page, then return a fresh observation.", BrowserCapability::Evaluate, false, true),
+    spec("browser_screenshot", "Capture the assigned Maxx browser tab and return the image directly.", BrowserCapability::Observe, true, false),
 ];
 
 const fn spec(
@@ -647,123 +993,82 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
 
 fn input_schema(name: &str) -> Map<String, Value> {
     let (properties, required): (Map<String, Value>, Vec<&str>) = match name {
-        "browser_status" | "browser_list_tabs" => (Map::new(), vec![]),
-        "browser_open_tab" => (properties(&[("url", string_schema())]), vec![]),
-        "browser_select_tab"
-        | "browser_close_tab"
-        | "browser_go_back"
-        | "browser_go_forward"
-        | "browser_reload"
-        | "browser_console_list"
-        | "browser_network_list"
-        | "browser_trace_start"
-        | "browser_trace_stop"
-        | "browser_downloads" => (tab_properties(), vec!["tabId"]),
-        "browser_navigate" => (
-            properties(&[("tabId", uuid_schema()), ("url", string_schema())]),
-            vec!["tabId", "url"],
-        ),
-        "browser_snapshot" => (
+        "browser_open" => (
             properties(&[
-                ("tabId", uuid_schema()),
+                (
+                    "url",
+                    json!({
+                        "type": "string",
+                        "description": "Absolute HTTP or HTTPS destination URL to open."
+                    }),
+                ),
                 ("includeScreenshot", bool_schema()),
             ]),
-            vec!["tabId"],
+            vec!["url"],
         ),
-        "browser_click" | "browser_hover" => (
-            properties(&[("tabId", uuid_schema()), ("reference", string_schema())]),
-            vec!["tabId", "reference"],
-        ),
-        "browser_fill" => (
+        "browser_observe" => (
             properties(&[
                 ("tabId", uuid_schema()),
-                ("reference", string_schema()),
-                ("value", string_schema()),
+                ("sinceObservationId", uuid_schema()),
+                ("includeScreenshot", bool_schema()),
             ]),
-            vec!["tabId", "reference", "value"],
+            vec![],
         ),
-        "browser_press" => (
-            properties(&[("tabId", uuid_schema()), ("key", string_schema())]),
-            vec!["tabId", "key"],
-        ),
-        "browser_scroll" => (
+        "browser_act" => (
             properties(&[
                 ("tabId", uuid_schema()),
-                ("deltaX", number_schema()),
-                ("deltaY", number_schema()),
+                ("observationId", uuid_schema()),
+                ("documentGeneration", integer_schema()),
+                ("controlEpoch", integer_schema()),
+                (
+                    "actions",
+                    json!({
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": browser_action_schema(),
+                    }),
+                ),
+                (
+                    "postconditions",
+                    json!({
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "condition": wait_condition_schema(),
+                                "timeoutMs": {"type": "integer", "minimum": 0}
+                            },
+                            "required": ["condition"],
+                            "additionalProperties": false
+                        }
+                    }),
+                ),
             ]),
-            vec!["tabId", "deltaX", "deltaY"],
-        ),
-        "browser_drag" => (
-            properties(&[
-                ("tabId", uuid_schema()),
-                ("fromReference", string_schema()),
-                ("toReference", string_schema()),
-            ]),
-            vec!["tabId", "fromReference", "toReference"],
+            vec![
+                "tabId",
+                "observationId",
+                "documentGeneration",
+                "controlEpoch",
+                "actions",
+            ],
         ),
         "browser_wait" => (
             properties(&[
                 ("tabId", uuid_schema()),
-                ("condition", string_schema()),
+                ("condition", wait_condition_schema()),
                 ("timeoutMs", integer_schema()),
             ]),
-            vec!["tabId", "condition", "timeoutMs"],
+            vec!["condition"],
         ),
-        "browser_evaluate" => (
+        "browser_extract" => (
             properties(&[("tabId", uuid_schema()), ("expression", string_schema())]),
-            vec!["tabId", "expression"],
+            vec!["expression"],
         ),
         "browser_screenshot" => (
             properties(&[("tabId", uuid_schema()), ("fullPage", bool_schema())]),
-            vec!["tabId", "fullPage"],
-        ),
-        "browser_console_get" => (
-            properties(&[("tabId", uuid_schema()), ("entryId", string_schema())]),
-            vec!["tabId", "entryId"],
-        ),
-        "browser_network_get" => (
-            properties(&[("tabId", uuid_schema()), ("requestId", string_schema())]),
-            vec!["tabId", "requestId"],
-        ),
-        "browser_resize" => (
-            properties(&[
-                ("tabId", uuid_schema()),
-                ("width", integer_schema()),
-                ("height", integer_schema()),
-            ]),
-            vec!["tabId", "width", "height"],
-        ),
-        "browser_emulate" => (
-            properties(&[("tabId", uuid_schema()), ("device", string_schema())]),
-            vec!["tabId", "device"],
-        ),
-        "browser_storage" => (
-            properties(&[
-                ("tabId", uuid_schema()),
-                ("command", string_schema()),
-                ("value", json!({})),
-            ]),
-            vec!["tabId", "command"],
-        ),
-        "browser_handle_dialog" => (
-            properties(&[
-                ("tabId", uuid_schema()),
-                ("accept", bool_schema()),
-                ("promptText", string_schema()),
-            ]),
-            vec!["tabId", "accept"],
-        ),
-        "browser_upload" => (
-            properties(&[
-                ("tabId", uuid_schema()),
-                ("reference", string_schema()),
-                (
-                    "paths",
-                    json!({"type": "array", "items": {"type": "string"}}),
-                ),
-            ]),
-            vec!["tabId", "reference", "paths"],
+            vec![],
         ),
         _ => (Map::new(), vec![]),
     };
@@ -778,15 +1083,63 @@ fn input_schema(name: &str) -> Map<String, Value> {
     .clone()
 }
 
+fn browser_action_schema() -> Value {
+    json!({
+        "oneOf": [
+            action_schema("click", json!({"reference": {"type": "string"}}), &["reference"]),
+            action_schema(
+                "fill",
+                json!({"reference": {"type": "string"}, "value": {"type": "string"}}),
+                &["reference", "value"],
+            ),
+            action_schema("press", json!({"key": {"type": "string"}}), &["key"]),
+            action_schema(
+                "scroll",
+                json!({"deltaX": {"type": "number"}, "deltaY": {"type": "number"}}),
+                &["deltaX", "deltaY"],
+            ),
+            action_schema("navigate", json!({"url": {"type": "string"}}), &["url"]),
+            action_schema("back", json!({}), &[]),
+            action_schema("forward", json!({}), &[]),
+            action_schema("reload", json!({}), &[]),
+            action_schema(
+                "wait",
+                json!({
+                    "condition": wait_condition_schema(),
+                    "timeoutMs": {"type": "integer", "minimum": 0}
+                }),
+                &["condition"],
+            ),
+            action_schema(
+                "extract",
+                json!({"expression": {"type": "string"}}),
+                &["expression"],
+            ),
+        ]
+    })
+}
+
+fn action_schema(kind: &str, properties: Value, required: &[&str]) -> Value {
+    let mut properties = properties.as_object().cloned().unwrap_or_default();
+    properties.insert("type".into(), json!({"const": kind}));
+    let mut required = required
+        .iter()
+        .map(|name| Value::String((*name).into()))
+        .collect::<Vec<_>>();
+    required.insert(0, Value::String("type".into()));
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
 fn properties(entries: &[(&str, Value)]) -> Map<String, Value> {
     entries
         .iter()
         .map(|(name, schema)| ((*name).into(), schema.clone()))
         .collect()
-}
-
-fn tab_properties() -> Map<String, Value> {
-    properties(&[("tabId", uuid_schema())])
 }
 
 fn uuid_schema() -> Value {
@@ -797,12 +1150,15 @@ fn string_schema() -> Value {
     json!({"type": "string"})
 }
 
-fn bool_schema() -> Value {
-    json!({"type": "boolean"})
+fn wait_condition_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Use text:<literal visible text> (preferred), or a JavaScript expression that returns a boolean. Example: text:Selected: Spring Hill"
+    })
 }
 
-fn number_schema() -> Value {
-    json!({"type": "number"})
+fn bool_schema() -> Value {
+    json!({"type": "boolean"})
 }
 
 fn integer_schema() -> Value {
@@ -825,38 +1181,109 @@ mod tests {
     }
 
     #[test]
-    fn all_tools_round_trip_to_typed_operations() {
-        let tab_id = Uuid::new_v4();
-        let cases = [
-            ("browser_status", json!({})),
-            ("browser_open_tab", json!({"url": "https://example.com"})),
-            ("browser_select_tab", json!({"tabId": tab_id})),
-            (
-                "browser_snapshot",
-                json!({"tabId": tab_id, "includeScreenshot": true}),
-            ),
-            (
-                "browser_fill",
-                json!({"tabId": tab_id, "reference": "e1", "value": "hello"}),
-            ),
-            (
-                "browser_scroll",
-                json!({"tabId": tab_id, "deltaX": 0, "deltaY": 100}),
-            ),
-            (
-                "browser_upload",
-                json!({"tabId": tab_id, "reference": "e2", "paths": ["/tmp/a"]}),
-            ),
-        ];
-        for (name, arguments) in cases {
-            let operation = operation_from_call(name, arguments.as_object().cloned())
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert_eq!(operation.tool_name(), name);
-        }
-        assert_eq!(TOOL_SPECS.len(), 31);
+    fn normal_agent_surface_is_six_compact_tools() {
+        assert_eq!(TOOL_SPECS.len(), 6);
+        assert_eq!(
+            TOOL_SPECS.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+            vec![
+                "browser_open",
+                "browser_observe",
+                "browser_act",
+                "browser_wait",
+                "browser_extract",
+                "browser_screenshot",
+            ]
+        );
         assert!(TOOL_SPECS
             .iter()
             .all(|tool| input_schema(tool.name).contains_key("type")));
+        let act = input_schema("browser_act");
+        let open = input_schema("browser_open");
+        assert_eq!(open["required"], json!(["url"]));
+        assert_eq!(act["properties"]["actions"]["maxItems"], 20);
+        assert_eq!(
+            input_schema("browser_wait")["properties"]["condition"]["description"],
+            "Use text:<literal visible text> (preferred), or a JavaScript expression that returns a boolean. Example: text:Selected: Spring Hill"
+        );
+        assert!(act["required"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("observationId".into())));
+    }
+
+    #[tokio::test]
+    async fn batch_requires_a_fresh_observation_and_returns_another() {
+        let root = std::env::temp_dir().join(format!("maxx-gateway-test-{}", Uuid::new_v4()));
+        let sessions = Arc::new(BrowserSessionRegistry::default());
+        let artifacts = Arc::new(BrowserArtifactStore::new(root.clone()).expect("artifacts"));
+        let engine = Arc::new(FakeBrowserEngine::default());
+        let broker = Arc::new(BrowserBroker::new(engine.clone(), artifacts.clone()));
+        let (ui_reveals, _) = broadcast::channel(4);
+        let server = BrowserMcpServer {
+            sessions: sessions.clone(),
+            broker,
+            artifacts,
+            ui_reveals,
+        };
+        let credential = sessions.issue(scope());
+        let mut session = sessions
+            .authenticate_any(&format!("Bearer {}", credential.bearer_token))
+            .expect("authenticate");
+        let opened = execute_core_tool(
+            &server,
+            &mut session,
+            "browser_open",
+            json!({"url": "https://example.com"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .await
+        .expect("open and observe");
+        let tab_id = opened.tab_id.expect("tab id");
+        let observation_id = opened.observation_id.expect("observation id");
+        let act = json!({
+            "tabId": tab_id,
+            "observationId": observation_id,
+            "documentGeneration": 0,
+            "controlEpoch": 0,
+            "actions": [{"type": "click", "reference": "e1"}],
+            "postconditions": [{"condition": "true", "timeoutMs": 1}],
+        });
+        let acted = execute_core_tool(
+            &server,
+            &mut session,
+            "browser_act",
+            act.as_object().unwrap().clone(),
+        )
+        .await
+        .expect("guarded batch");
+        assert_ne!(acted.observation_id, Some(observation_id));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "browser_open_tab",
+                "browser_snapshot",
+                "browser_click",
+                "browser_wait",
+                "browser_snapshot",
+            ]
+        );
+
+        let stale = execute_core_tool(
+            &server,
+            &mut session,
+            "browser_act",
+            act.as_object().unwrap().clone(),
+        )
+        .await
+        .expect_err("old observation must be rejected");
+        assert_eq!(stale.code, "browser.stale-observation");
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -972,8 +1399,10 @@ mod tests {
             .expect("tools list");
         assert_eq!(listed.status(), StatusCode::OK);
         let body = listed.text().await.expect("tools body");
-        assert!(body.contains("browser_snapshot"), "{body}");
-        assert!(body.contains("browser_network_get"), "{body}");
+        assert!(body.contains("browser_observe"), "{body}");
+        assert!(body.contains("browser_act"), "{body}");
+        assert!(!body.contains("browser_exec"), "{body}");
+        assert!(!body.contains("browser_network_get"), "{body}");
 
         drop(runtime);
         std::fs::remove_dir_all(root).expect("cleanup");

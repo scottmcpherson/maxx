@@ -2,19 +2,54 @@
   "name": "maxx",
   "private": true,
   "version": "0.1.0",
+  "description": "A native desktop workspace for multi-provider AI agents with a shared Chromium browser.",
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev:desktop": "tsc -p electron/tsconfig.json && electron . --dev",
+    "build": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json",
+    "build:desktop": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json && cargo build --release --manifest-path src-tauri/Cargo.toml && electron-builder --mac dir",
+    "test:app": "electron . --app-smoke",
+    "test:browser": "electron . --browser-smoke",
+    "test:browser:hermes": "electron . --hermes-browser-smoke",
+    "electron:compile": "tsc -p electron/tsconfig.json",
     "preview": "vite preview",
-    "test": "vitest run",
-    "tauri": "tauri"
+    "test": "vitest run"
+  },
+  "build": {
+    "appId": "com.maxx.app",
+    "productName": "Maxx",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "src-tauri/target/release/maxx",
+        "to": "bin/maxx-runtime"
+      },
+      {
+        "from": "src-tauri/icons/tray.png",
+        "to": "assets/tray.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dir",
+      "icon": "src-tauri/icons/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Maxx uses the microphone only while you dictate a message."
+      }
+    }
   },
   "dependencies": {
     "@streamdown/code": "^1.1.1",
-    "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
@@ -23,10 +58,12 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^26.2.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.0",
     "vite": "^8.1.5",

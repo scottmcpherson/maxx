@@ -13,8 +13,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+use tokio::time::{Duration, Instant};
 use uuid::Uuid;
+
+const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const HERMES_MAXX_BROWSER_POLICY: &str = "Maxx Browser is the only browser-control surface available in this session. Use the maxx_browser MCP tools for every browser action. Reuse the assigned tab, observe before acting, require an observed state change after each interaction, and never launch or attach to Chrome from terminal tools.";
 
 pub struct AcpEngine {
     provider: ChatProvider,
@@ -114,6 +118,7 @@ struct AcpSession {
     provider: ChatProvider,
     state: Mutex<SessionState>,
     next_id: AtomicI64,
+    activity: watch::Sender<u64>,
 }
 
 #[async_trait]
@@ -140,10 +145,12 @@ impl ProviderEngine for AcpEngine {
             let session = sessions
                 .entry(key)
                 .or_insert_with(|| {
+                    let (activity, _) = watch::channel(0);
                     Arc::new(AcpSession {
                         provider: self.provider,
                         state: Mutex::new(SessionState::default()),
                         next_id: AtomicI64::new(1),
+                        activity,
                     })
                 })
                 .clone();
@@ -274,6 +281,18 @@ impl ProviderEngine for AcpEngine {
         ))
     }
 
+    async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
+        let key = (provider_instance_id, thread_id);
+        let session = self.sessions.lock().await.remove(&key);
+        self.session_by_turn
+            .lock()
+            .await
+            .retain(|_, route| *route != key);
+        if let Some(session) = session {
+            retire_session(&session).await;
+        }
+    }
+
     async fn shutdown(&self) {
         let sessions: Vec<Arc<AcpSession>> =
             self.sessions.lock().await.drain().map(|(_, s)| s).collect();
@@ -293,6 +312,9 @@ async fn retire_session(session: &Arc<AcpSession>) {
         state.interactions.clear();
         state.session_id = None;
         state.current_model = None;
+        state.normalizer = NormalizerState::default();
+        state.supports_load_session = false;
+        state.supports_http_mcp = false;
         (
             state.process.take(),
             state.current_turn.take().map(|(_, sink)| sink),
@@ -339,11 +361,17 @@ async fn begin(
     let needs_process = session.state.lock().await.process.is_none();
     if needs_process {
         let configuration = super::launch::launch_configuration(&request.profile)?;
+        let mut environment = configuration.environment;
+        configure_acp_environment(
+            session.provider,
+            request.browser_access.is_some(),
+            &mut environment,
+        );
         let process = JsonLineProcess::spawn(&LaunchSpec {
             executable: configuration.executable.to_string_lossy().to_string(),
             arguments,
             working_directory: Some(request.working_directory.clone()),
-            environment: configuration.environment,
+            environment,
         })?;
         session.state.lock().await.process = Some(process.clone());
         spawn_reader(session.clone(), process);
@@ -555,6 +583,25 @@ async fn begin(
     Ok(())
 }
 
+fn configure_acp_environment(
+    provider: ChatProvider,
+    has_maxx_browser: bool,
+    environment: &mut HashMap<String, String>,
+) {
+    if provider != ChatProvider::Hermes || !has_maxx_browser {
+        return;
+    }
+    environment.insert(
+        "HERMES_ACP_DISABLED_TOOLSETS".into(),
+        "browser,computer_use".into(),
+    );
+    environment.insert("HERMES_ACP_SKIP_CONFIGURED_MCP".into(), "1".into());
+    environment.insert(
+        "HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT".into(),
+        HERMES_MAXX_BROWSER_POLICY.into(),
+    );
+}
+
 fn browser_mcp_servers(
     browser_access: Option<&crate::browser_runtime::BrowserProviderAccess>,
     supports_http_mcp: bool,
@@ -617,14 +664,18 @@ fn spawn_reader(session: Arc<AcpSession>, process: Arc<JsonLineProcess>) {
             if closed {
                 let (sink, pending) = {
                     let mut state = session.state.lock().await;
-                    if let Some(current) = &state.process {
-                        if !Arc::ptr_eq(current, &process) {
-                            return;
-                        }
+                    let Some(current) = &state.process else {
+                        return;
+                    };
+                    if !Arc::ptr_eq(current, &process) {
+                        return;
                     }
                     state.process = None;
                     state.session_id = None;
                     state.current_model = None;
+                    state.normalizer = NormalizerState::default();
+                    state.supports_load_session = false;
+                    state.supports_http_mcp = false;
                     let pending: Vec<_> = state.pending.drain().collect();
                     (state.current_turn.take().map(|(_, s)| s), pending)
                 };
@@ -654,6 +705,9 @@ async fn receive(session: &Arc<AcpSession>, line: &[u8]) {
     let Some(object) = value.as_object() else {
         return;
     };
+    session
+        .activity
+        .send_modify(|version| *version = version.wrapping_add(1));
 
     // Responses to our requests resolve in-loop, preserving delivery order.
     let is_response = !object.contains_key("method")
@@ -825,6 +879,7 @@ async fn rpc_request(
 ) -> Result<Value, String> {
     let id = session.next_id.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = oneshot::channel();
+    let activity = session.activity.subscribe();
     let process = {
         let mut state = session.state.lock().await;
         let process = state
@@ -837,13 +892,100 @@ async fn rpc_request(
     process
         .send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
         .await?;
-    match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err("ACP request dropped".into()),
-        Err(_) => {
-            session.state.lock().await.pending.remove(&id.to_string());
-            Err("ACP request timed out".into())
+    let timeout_policy = if method == "session/prompt" {
+        RpcTimeoutPolicy::Inactivity
+    } else {
+        RpcTimeoutPolicy::Absolute
+    };
+    match wait_for_rpc_response(rx, activity, ACP_REQUEST_TIMEOUT, timeout_policy).await {
+        RpcWaitOutcome::Response(result) => result,
+        RpcWaitOutcome::Dropped => Err("ACP request dropped".into()),
+        RpcWaitOutcome::TimedOut => {
+            reset_timed_out_session(session, &id.to_string(), method).await;
+            if timeout_policy == RpcTimeoutPolicy::Inactivity {
+                Err(format!(
+                    "{} became unresponsive: no ACP activity for 10 minutes",
+                    session.provider.display_name()
+                ))
+            } else {
+                Err(format!("ACP {method} request timed out"))
+            }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RpcTimeoutPolicy {
+    Absolute,
+    Inactivity,
+}
+
+enum RpcWaitOutcome {
+    Response(Result<Value, String>),
+    Dropped,
+    TimedOut,
+}
+
+async fn wait_for_rpc_response(
+    mut response: oneshot::Receiver<Result<Value, String>>,
+    mut activity: watch::Receiver<u64>,
+    timeout: Duration,
+    policy: RpcTimeoutPolicy,
+) -> RpcWaitOutcome {
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut activity_open = true;
+
+    loop {
+        tokio::select! {
+            result = &mut response => {
+                return match result {
+                    Ok(result) => RpcWaitOutcome::Response(result),
+                    Err(_) => RpcWaitOutcome::Dropped,
+                };
+            }
+            changed = activity.changed(), if policy == RpcTimeoutPolicy::Inactivity && activity_open => {
+                if changed.is_ok() {
+                    deadline.as_mut().reset(Instant::now() + timeout);
+                } else {
+                    activity_open = false;
+                }
+            }
+            _ = &mut deadline => return RpcWaitOutcome::TimedOut,
+        }
+    }
+}
+
+async fn reset_timed_out_session(session: &Arc<AcpSession>, request_id: &str, method: &str) {
+    let (process, session_id, pending) = {
+        let mut state = session.state.lock().await;
+        state.pending.remove(request_id);
+        let pending: Vec<_> = state.pending.drain().map(|(_, sender)| sender).collect();
+        let process = state.process.take();
+        let session_id = state.session_id.take();
+        state.interactions.clear();
+        state.current_model = None;
+        state.normalizer = NormalizerState::default();
+        state.supports_load_session = false;
+        state.supports_http_mcp = false;
+        (process, session_id, pending)
+    };
+
+    for sender in pending {
+        let _ = sender.send(Err(format!("ACP session reset after {method} timed out")));
+    }
+
+    if let Some(process) = process {
+        if let Some(session_id) = session_id {
+            let _ = process
+                .send(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/cancel",
+                    "params": {"sessionId": session_id}
+                }))
+                .await;
+        }
+        process.shutdown().await;
     }
 }
 
@@ -868,6 +1010,47 @@ async fn force_cancel(session: &Arc<AcpSession>, turn_id: Uuid) {
 mod browser_mcp_tests {
     use super::*;
     use crate::browser_runtime::BrowserProviderAccess;
+
+    fn test_session() -> Arc<AcpSession> {
+        let (activity, _) = watch::channel(0);
+        Arc::new(AcpSession {
+            provider: ChatProvider::Hermes,
+            state: Mutex::new(SessionState::default()),
+            next_id: AtomicI64::new(1),
+            activity,
+        })
+    }
+
+    #[test]
+    fn hermes_with_maxx_browser_gets_an_exclusive_browser_surface() {
+        let mut environment = HashMap::from([("PATH".into(), "/bin".into())]);
+
+        configure_acp_environment(ChatProvider::Hermes, true, &mut environment);
+
+        assert_eq!(
+            environment
+                .get("HERMES_ACP_DISABLED_TOOLSETS")
+                .map(String::as_str),
+            Some("browser,computer_use")
+        );
+        assert_eq!(
+            environment
+                .get("HERMES_ACP_SKIP_CONFIGURED_MCP")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(environment["HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT"]
+            .contains("only browser-control surface"));
+        assert_eq!(environment.get("PATH").map(String::as_str), Some("/bin"));
+    }
+
+    #[test]
+    fn other_acp_sessions_keep_their_native_tool_surface() {
+        let mut environment = HashMap::new();
+        configure_acp_environment(ChatProvider::Hermes, false, &mut environment);
+        configure_acp_environment(ChatProvider::Cursor, true, &mut environment);
+        assert!(environment.is_empty());
+    }
 
     #[test]
     fn emits_http_when_advertised_and_stdio_otherwise() {
@@ -953,5 +1136,84 @@ mod browser_mcp_tests {
         assert!(hermes_arguments(&hermes)
             .unwrap_err()
             .contains("cannot run Maxx custom agents safely"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prompt_timeout_resets_when_acp_progress_arrives() {
+        let (response_tx, response_rx) = oneshot::channel();
+        let (activity_tx, activity_rx) = watch::channel(0);
+        let waiter = tokio::spawn(wait_for_rpc_response(
+            response_rx,
+            activity_rx,
+            ACP_REQUEST_TIMEOUT,
+            RpcTimeoutPolicy::Inactivity,
+        ));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(599)).await;
+        activity_tx.send_modify(|version| *version += 1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(599)).await;
+        response_tx
+            .send(Ok(json!({"stopReason": "end_turn"})))
+            .unwrap();
+
+        match waiter.await.unwrap() {
+            RpcWaitOutcome::Response(Ok(response)) => {
+                assert_eq!(response["stopReason"], "end_turn");
+            }
+            _ => panic!("active prompt should outlive the original absolute deadline"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_request_timeout_remains_absolute() {
+        let (_response_tx, response_rx) = oneshot::channel();
+        let (activity_tx, activity_rx) = watch::channel(0);
+        let waiter = tokio::spawn(wait_for_rpc_response(
+            response_rx,
+            activity_rx,
+            ACP_REQUEST_TIMEOUT,
+            RpcTimeoutPolicy::Absolute,
+        ));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(599)).await;
+        activity_tx.send_modify(|version| *version += 1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(waiter.await.unwrap(), RpcWaitOutcome::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn timed_out_session_drops_transport_state_and_pending_requests() {
+        let session = test_session();
+        let (pending_tx, pending_rx) = oneshot::channel();
+        {
+            let mut state = session.state.lock().await;
+            state.session_id = Some("stale-session".into());
+            state.current_model = Some("stale-model".into());
+            state.supports_load_session = true;
+            state.supports_http_mcp = true;
+            state.normalizer.session_id = Some("stale-session".into());
+            state.pending.insert("other-request".into(), pending_tx);
+        }
+
+        reset_timed_out_session(&session, "timed-out-request", "session/prompt").await;
+
+        let state = session.state.lock().await;
+        assert!(state.process.is_none());
+        assert!(state.session_id.is_none());
+        assert!(state.current_model.is_none());
+        assert!(state.normalizer.session_id.is_none());
+        assert!(!state.supports_load_session);
+        assert!(!state.supports_http_mcp);
+        assert!(state.pending.is_empty());
+        drop(state);
+        assert_eq!(
+            pending_rx.await.unwrap().unwrap_err(),
+            "ACP session reset after session/prompt timed out"
+        );
     }
 }

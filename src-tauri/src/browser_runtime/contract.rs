@@ -189,74 +189,6 @@ pub struct BrowserTabSummary {
     pub controller_session_id: Option<Uuid>,
 }
 
-/// A compressed visual frame for the shared Maxx browser surface. The pixels
-/// come from the same Chromium target that the semantic/debug tools control.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserRenderedFrame {
-    pub tab_id: BrowserTabId,
-    pub url: String,
-    pub title: String,
-    pub loading: bool,
-    pub can_go_back: bool,
-    pub can_go_forward: bool,
-    pub viewport_width: u32,
-    pub viewport_height: u32,
-    pub mime_type: String,
-    pub data_base64: String,
-}
-
-/// The stream-start handshake includes a first frame so the UI never depends
-/// on winning a race with the asynchronous event channel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserFrameSubscription {
-    pub stream_id: Uuid,
-    pub initial_frame: BrowserRenderedFrame,
-}
-
-/// Human input bypasses the agent queue after incrementing the tab's control
-/// epoch, which immediately invalidates any in-flight agent mutation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum BrowserHumanInput {
-    PointerMove {
-        x: f64,
-        y: f64,
-        buttons: u8,
-    },
-    PointerDown {
-        x: f64,
-        y: f64,
-        button: String,
-    },
-    PointerUp {
-        x: f64,
-        y: f64,
-        button: String,
-    },
-    Wheel {
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    },
-    Key {
-        key: String,
-        code: String,
-        modifiers: i64,
-        #[serde(default)]
-        text: String,
-    },
-    Text {
-        text: String,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "operation",
@@ -292,6 +224,8 @@ pub enum BrowserOperation {
         tab_id: BrowserTabId,
         #[serde(default)]
         include_screenshot: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        since_observation_id: Option<BrowserObservationId>,
     },
     Click {
         tab_id: BrowserTabId,
@@ -562,6 +496,7 @@ mod tests {
             BrowserOperation::Snapshot {
                 tab_id,
                 include_screenshot: true,
+                since_observation_id: None,
             },
             BrowserOperation::Click {
                 tab_id,

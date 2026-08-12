@@ -1,7 +1,5 @@
-// Update-check status pushed from `src-tauri/src/updater.rs`.
-//
-// The check runs in Rust — the webview holds no updater permissions — so this
-// module only models the result and how to word it.
+// Update-check status published by the Electron host. Distribution builds can
+// add a signed updater without exposing update authority to either renderer.
 
 export type UpdateStatus =
   | { state: "checking" }

@@ -3,6 +3,7 @@ import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
 import { buildTimeline } from "../contract/timeline";
+import { onAnnotationComposerContext } from "../browserAnnotations";
 import { bylineAnchors, buildRows, rendersRow, TimelineRow } from "../contract/timelineRows";
 import {
   AgentDefinition,
@@ -160,6 +161,11 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
   const images = useImageAttachments();
   const focusAfterNewThreadRef = useRef(selectedThreadID === null);
+
+  useEffect(() => onAnnotationComposerContext((context) => {
+    setDraft(draft.trim() ? `${draft.trimEnd()}\n\n${context}` : context);
+    requestAnimationFrame(() => draftRef.current?.focus());
+  }), [draft, setDraft]);
 
   useEffect(() => {
     const element = draftRef.current;

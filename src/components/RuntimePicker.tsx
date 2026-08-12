@@ -22,9 +22,9 @@ import {
   RuntimeSelection,
   SpeedLevel,
   filterRuntimeCatalog,
+  filterUnavailableProvidersForQuery,
   formatEffortLabel,
   formatTriggerLabel,
-  formatTriggerText,
   loadRecents,
   normalizeEffort,
   normalizeSpeed,
@@ -55,6 +55,11 @@ interface RuntimePickerProps {
   placement?: "top" | "bottom";
   /** Prefix the trigger with the provider name (settings-style contexts). */
   triggerShowsProvider?: boolean;
+  /** Optional picker state that delegates selection to a surrounding context. */
+  inheritLabel?: string;
+  inheritDescription?: string;
+  inherited?: boolean;
+  onUseInherited?: () => void;
   onChange: (next: RuntimePickerChange) => void;
 }
 
@@ -79,7 +84,7 @@ type RuntimeRailSelection = ChatProvider | "recents";
 
 const PROVIDER_RAIL_BASE_HEIGHT = 52;
 const PROVIDER_RAIL_ROW_HEIGHT = 33;
-const POPOVER_FIXED_CHROME_HEIGHT = 145;
+const POPOVER_FIXED_CHROME_HEIGHT = 110;
 
 function selectionDisplayText(
   selection: RuntimeSelection,
@@ -99,6 +104,10 @@ export function RuntimePicker({
   disabled = false,
   placement = "top",
   triggerShowsProvider = false,
+  inheritLabel,
+  inheritDescription,
+  inherited = false,
+  onUseInherited,
   onChange,
 }: RuntimePickerProps) {
   const committedSelection = useMemo<RuntimeSelection>(() => ({
@@ -178,28 +187,36 @@ export function RuntimePicker({
 
   const activeDraftModels = resolveModels(draft.provider, catalogEntries[draft.provider]?.models);
   const triggerModels = resolveModels(provider, catalogEntries[provider]?.models);
-  const triggerText = formatTriggerText(committedSelection, triggerModels);
   const providerTriggerLabel = triggerShowsProvider
     ? profiles.find((profile) => profile.provider === provider)?.displayName
       || providerDisplayName(provider)
     : null;
-  const triggerDisplayText = providerTriggerLabel
-    ? `${providerTriggerLabel} · ${selectionDisplayText(committedSelection, triggerModels)}`
-    : selectionDisplayText(committedSelection, triggerModels);
-  const draftText = formatTriggerText(draft, activeDraftModels);
-  const draftDisplayText = selectionDisplayText(draft, activeDraftModels);
+  const triggerDisplayText = inherited && inheritLabel
+    ? inheritLabel
+    : providerTriggerLabel
+      ? `${providerTriggerLabel} · ${selectionDisplayText(committedSelection, triggerModels)}`
+      : selectionDisplayText(committedSelection, triggerModels);
   const activeDraftModel = activeDraftModels.find((option) => option.model === draft.model);
   const draftEffortLevels = activeDraftModel?.effortLevels?.length
     ? activeDraftModel.effortLevels
     : null;
 
+  const enabledProviders = useMemo(
+    () => profileRows.filter((row) => row.enabled).map((row) => row.provider),
+    [profileRows],
+  );
   const filtered = useMemo(
     () => filterRuntimeCatalog(profileRows, draft.provider, query),
     [draft.provider, profileRows, query],
   );
+  // Size the results viewport from the unfiltered provider rail so searching
+  // only changes its contents, never the popover frame or anchor placement.
   const providerRailHeight = PROVIDER_RAIL_BASE_HEIGHT
-    + Math.max(filtered.providers.length, 1) * PROVIDER_RAIL_ROW_HEIGHT;
-  const desiredPopoverHeight = POPOVER_FIXED_CHROME_HEIGHT + providerRailHeight;
+    + Math.max(enabledProviders.length, 1) * PROVIDER_RAIL_ROW_HEIGHT;
+  const canInherit = !!inheritLabel && !!onUseInherited;
+  const desiredPopoverHeight = POPOVER_FIXED_CHROME_HEIGHT
+    + providerRailHeight
+    + (canInherit ? 50 : 0);
 
   const searchResults = useMemo<SearchResult[]>(() => {
     if (!query.trim()) return [];
@@ -209,7 +226,11 @@ export function RuntimePicker({
       providerLabel: activeProfile?.label ?? providerDisplayName(draft.provider),
       option,
     }));
-    return [...activeHits, ...filtered.modelHitsAcrossProviders];
+    const hits = [...activeHits, ...filtered.modelHitsAcrossProviders];
+    // Selection changes the active provider. Keep search results in catalog
+    // order so the selected row gains its checkmark without jumping position.
+    return profileRows.flatMap((row) =>
+      hits.filter((result) => result.provider === row.provider));
   }, [draft.provider, filtered.modelHitsAcrossProviders, filtered.models, profileRows, query]);
 
   const visibleRecents = useMemo(() => recents.filter((recent) => {
@@ -221,16 +242,17 @@ export function RuntimePicker({
     return entry.models?.some((option) => option.model === recent.model) ?? false;
   }), [catalogEntries, profileRows, recents]);
 
-  const enabledProviders = useMemo(
-    () => profileRows.filter((row) => row.enabled).map((row) => row.provider),
-    [profileRows],
-  );
   const queryLoading = !!query.trim() && enabledProviders.some((candidate) => {
     const status = catalogEntries[candidate]?.status ?? "idle";
     return status === "idle" || status === "loading";
   });
   const unavailableProviders = enabledProviders.filter((candidate) =>
     catalogEntries[candidate]?.status === "unavailable");
+  const searchUnavailableProviders = filterUnavailableProvidersForQuery(
+    profileRows,
+    unavailableProviders,
+    query,
+  );
 
   useEffect(() => {
     void prefetchCatalogs({
@@ -317,7 +339,7 @@ export function RuntimePicker({
     updateLayout();
     window.addEventListener("resize", updateLayout);
     return () => window.removeEventListener("resize", updateLayout);
-  }, [desiredPopoverHeight, open, placement, query]);
+  }, [desiredPopoverHeight, open, placement]);
 
   const restoreTriggerFocus = () => {
     requestAnimationFrame(() => triggerRef.current?.focus());
@@ -386,18 +408,19 @@ export function RuntimePicker({
     const nextOption = catalogEntries[nextProvider]?.models?.find(
       (option) => option.model === nextModel,
     );
-    setDraft((current) => ({
+    const nextDraft: DraftRuntimeSelection = {
       provider: nextProvider,
       model: nextModel,
       effort: providerChanged
         ? null
-        : normalizeEffort(nextProvider, current.effort, nextOption),
-      speed: providerChanged ? null : normalizeSpeed(nextProvider, current.speed),
+        : normalizeEffort(nextProvider, draft.effort, nextOption),
+      speed: providerChanged ? null : normalizeSpeed(nextProvider, draft.speed),
       source: "catalog",
-    }));
-    setQuery("");
+    };
+    setDraft(nextDraft);
     setRailSelection(nextProvider);
     void ensureModels(nextProvider);
+    commitSelection(nextDraft);
   };
 
   const chooseRecent = (recent: RuntimeRecentSelection) => {
@@ -408,7 +431,7 @@ export function RuntimePicker({
       if (entry?.status !== "live" && entry?.status !== "cached") return;
       if (!entry.models?.some((option) => option.model === recent.model)) return;
     }
-    setDraft({
+    const nextDraft: DraftRuntimeSelection = {
       provider: recent.provider,
       model: recent.model,
       effort: normalizeEffort(
@@ -418,33 +441,36 @@ export function RuntimePicker({
       ),
       speed: normalizeSpeed(recent.provider, recent.speed),
       source: recent.source ?? "catalog",
-    });
+    };
+    setDraft(nextDraft);
     setQuery("");
     void ensureModels(recent.provider);
+    commitSelection(nextDraft);
   };
 
   const setEffort = (value: EffortLevel | null) => {
-    setDraft((current) => ({ ...current, effort: value }));
+    const nextDraft = { ...draft, effort: value };
+    setDraft(nextDraft);
+    commitSelection(nextDraft);
   };
 
-  const applyDraft = () => {
-    const selectedModel = catalogEntries[draft.provider]?.models?.find(
-      (option) => option.model === draft.model,
+  const commitSelection = (selection: DraftRuntimeSelection) => {
+    const selectedModel = catalogEntries[selection.provider]?.models?.find(
+      (option) => option.model === selection.model,
     );
     const cleaned: RuntimePickerChange = {
-      provider: draft.provider,
-      model: draft.model || "Default",
-      effort: normalizeEffort(draft.provider, draft.effort, selectedModel),
-      speed: normalizeSpeed(draft.provider, draft.speed),
+      provider: selection.provider,
+      model: selection.model || "Default",
+      effort: normalizeEffort(selection.provider, selection.effort, selectedModel),
+      speed: normalizeSpeed(selection.provider, selection.speed),
     };
     onChange(cleaned);
     setRecents(pushRecent(
-      cleaned as RuntimeSelection,
+      cleaned,
       recentsContextKey,
       recents,
-      draft.source,
+      selection.source,
     ));
-    closeAndRestoreFocus();
   };
 
   const handlePopoverKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -469,12 +495,7 @@ export function RuntimePicker({
     navigable[nextIndex]?.focus();
   };
 
-  const hasChanges = selectionKey(draft) !== selectionKey(committedSelection);
-  const selectedProviderEnabled = profileRows.find((row) => row.provider === draft.provider)?.enabled ?? false;
   const selectedCatalogEntry = catalogEntries[draft.provider];
-  const selectedCatalogPending = draft.source === "catalog"
-    && selectedCatalogEntry?.status !== "live"
-    && selectedCatalogEntry?.status !== "cached";
   const showingRecents = !query.trim() && railSelection === "recents";
 
   return (
@@ -485,11 +506,11 @@ export function RuntimePicker({
         className="runtime-trigger"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Provider and model selection: ${triggerText}`}
+        aria-label={`Provider and model selection: ${triggerDisplayText}`}
         disabled={disabled}
         onClick={togglePicker}
       >
-        <ProviderIcon provider={provider} size={15} />
+        {inherited ? <Icons.shuffle size={15} /> : <ProviderIcon provider={provider} size={15} />}
         <span className="runtime-trigger-text">{triggerDisplayText}</span>
         <Icons.chevronDown size={12} />
       </button>
@@ -524,9 +545,36 @@ export function RuntimePicker({
               value={query}
               aria-label="Search models and providers"
               placeholder="Search models, providers…"
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
+
+          {canInherit && (
+            <div className="runtime-inherit-option">
+              <button
+                type="button"
+                className={`runtime-option ${inherited ? "selected" : ""}`}
+                aria-pressed={inherited}
+                data-runtime-navigable
+                onClick={() => {
+                  onUseInherited();
+                }}
+              >
+                <Icons.shuffle size={15} />
+                <span className="runtime-option-main">
+                  <span>{inheritLabel}</span>
+                  {inheritDescription && (
+                    <span className="runtime-option-desc">{inheritDescription}</span>
+                  )}
+                </span>
+                {inherited && <Icons.check size={14} />}
+              </button>
+            </div>
+          )}
 
           <div className="runtime-columns">
             <div className="runtime-col providers">
@@ -541,7 +589,7 @@ export function RuntimePicker({
                   disabled={visibleRecents.length === 0}
                   aria-pressed={showingRecents}
                   aria-label="Recent selections"
-                  data-tooltip={visibleRecents.length > 0 ? "Recent selections" : "No recent selections"}
+                  title={visibleRecents.length > 0 ? "Recent selections" : "No recent selections"}
                   data-runtime-navigable
                   onClick={() => {
                     setRailSelection("recents");
@@ -561,7 +609,7 @@ export function RuntimePicker({
                       disabled={!item.enabled}
                       aria-pressed={selected}
                       aria-label={`${item.label}${item.enabled ? "" : " (disabled)"}`}
-                      data-tooltip={`${item.label}${item.enabled ? "" : " — Disabled"}`}
+                      title={`${item.label}${item.enabled ? "" : " — Disabled"}`}
                       data-runtime-navigable
                       onClick={() => chooseProvider(item.provider)}
                     >
@@ -672,9 +720,14 @@ export function RuntimePicker({
                   </button>
                 </div>
               )}
-              {!!query.trim() && unavailableProviders.length > 0 && !queryLoading && (
+              {!!query.trim() && searchUnavailableProviders.length > 0 && !queryLoading && (
                 <div className="runtime-status error" role="status">
-                  Some provider catalogs could not be loaded; no substitute models are included.
+                  <span>
+                    {searchUnavailableProviders.map((item) => {
+                      const error = catalogEntries[item.provider]?.error;
+                      return `${item.label}: ${error || "Model discovery failed."}`;
+                    }).join(" ")}
+                  </span>
                 </div>
               )}
             </div>
@@ -721,36 +774,6 @@ export function RuntimePicker({
             </div>
           </div>
 
-          <div className="runtime-footer">
-            <span
-              key={`${draft.provider}:${draft.model}:${draft.effort ?? "auto"}:${draft.speed ?? "normal"}`}
-              className="runtime-footer-summary"
-              title={draftText}
-              aria-live="polite"
-            >
-              <ProviderIcon provider={draft.provider} size={14} />
-              <span>{draftDisplayText}</span>
-            </span>
-            <div className="runtime-footer-actions">
-              <button
-                type="button"
-                className="runtime-footer-button"
-                data-runtime-navigable
-                onClick={closeAndRestoreFocus}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="runtime-footer-button primary"
-                disabled={!hasChanges || !selectedProviderEnabled || selectedCatalogPending}
-                data-runtime-navigable
-                onClick={applyDraft}
-              >
-                Apply
-              </button>
-            </div>
-          </div>
         </div>
       )}
     </div>

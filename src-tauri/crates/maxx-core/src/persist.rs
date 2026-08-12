@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -198,6 +198,18 @@ pub struct ChatProject {
     pub folder_path: String,
     #[serde(default)]
     pub threads: Vec<ChatThread>,
+}
+
+/// Optional global runtime used for compact background text generation such
+/// as thread titles. `None` means the owning thread's runtime is used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleGenerationRuntime {
+    pub provider: ChatProvider,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub speed: Option<String>,
 }
 
 impl ChatProject {
@@ -395,6 +407,12 @@ pub struct WorkspaceDocument {
     pub provider_profiles: Vec<ProviderProfile>,
     #[serde(default)]
     pub agents: Vec<AgentDefinition>,
+    #[serde(
+        rename = "titleGenerationRuntime",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub title_generation_runtime: Option<TitleGenerationRuntime>,
     #[serde(rename = "concurrencyPolicy", default)]
     pub concurrency_policy: ProviderConcurrencyPolicy,
     #[serde(rename = "retentionPolicy", default)]
@@ -416,6 +434,7 @@ impl Default for WorkspaceDocument {
             projects: Vec::new(),
             provider_profiles: ProviderProfile::default_profiles(),
             agents: Vec::new(),
+            title_generation_runtime: None,
             concurrency_policy: ProviderConcurrencyPolicy::default(),
             retention_policy: RuntimeRetentionPolicy::default(),
             voice: crate::voice::VoiceSettings::default(),

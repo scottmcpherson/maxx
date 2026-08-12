@@ -114,6 +114,18 @@ impl ProviderEngine for ClaudeEngine {
         Err("The Claude request is no longer actionable.".into())
     }
 
+    async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
+        let key = (provider_instance_id, thread_id);
+        let session = self.sessions.lock().await.remove(&key);
+        self.session_by_turn
+            .lock()
+            .await
+            .retain(|_, route| *route != key);
+        if let Some(session) = session {
+            retire_session(&session).await;
+        }
+    }
+
     async fn shutdown(&self) {
         let sessions: Vec<Arc<ClaudeSession>> =
             self.sessions.lock().await.drain().map(|(_, s)| s).collect();

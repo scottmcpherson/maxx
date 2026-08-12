@@ -2,8 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Tauri expects a fixed dev port and ignores src-tauri changes.
+// Electron's development entry point expects this fixed renderer port.
 export default defineConfig({
+  base: "./",
   plugins: [react(), tailwindcss()],
   clearScreen: false,
   server: {

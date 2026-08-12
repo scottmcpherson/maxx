@@ -4,12 +4,12 @@
 
 use crate::engine::runtime::Runtime;
 use crate::engine::TurnRequest;
+use crate::events::{emit, EventSink};
 use maxx_core::contract::*;
 use maxx_core::persist::*;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::Emitter;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -20,6 +20,7 @@ pub struct AppState {
     pub persistence: WorkspacePersistence,
     pub runtime: Runtime,
     pub browser: Arc<BrowserRuntime>,
+    pub events: Arc<dyn EventSink>,
 }
 
 #[derive(Clone, Serialize)]
@@ -44,14 +45,14 @@ pub struct TurnFinishedEnvelope {
 }
 
 pub fn workspace_path() -> PathBuf {
-    // Shared with the Swift app during migration when present; otherwise the
-    // Tauri app's own Application Support directory.
+    // Persistent product data lives independently of the Electron UI shell.
     let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
     base.join("Maxx").join("workspace.json")
 }
 
-/// Store for imported agent avatar images, next to workspace.json. Served to
-/// the webview through the asset protocol (scoped in tauri.conf.json).
+/// Store for imported agent avatar images, next to workspace.json. The
+/// Electron media protocol serves only this directory and explicitly resolved
+/// message files.
 pub fn agent_images_dir() -> PathBuf {
     workspace_path().with_file_name("agent-images")
 }
@@ -62,7 +63,7 @@ pub fn chat_images_dir() -> PathBuf {
 }
 
 impl AppState {
-    pub fn load(browser: Arc<BrowserRuntime>) -> Self {
+    pub fn load(browser: Arc<BrowserRuntime>, events: Arc<dyn EventSink>) -> Self {
         let persistence = WorkspacePersistence::new(workspace_path());
         let mut document = match persistence.load() {
             Ok(result) => result.document,
@@ -81,6 +82,7 @@ impl AppState {
             persistence,
             runtime: Runtime::new(browser.clone()),
             browser,
+            events,
         }
     }
 
@@ -97,7 +99,6 @@ impl AppState {
     /// mentions) can stop when a turn was cancelled or failed.
     pub async fn run_turn(
         self: Arc<Self>,
-        app: tauri::AppHandle,
         project_id: Uuid,
         request: TurnRequest,
     ) -> Option<ProviderTurnTerminalState> {
@@ -156,9 +157,10 @@ impl AppState {
                     thread.updated_at = AppleDate::now();
                 }
             }
-            let _ = app.emit(
+            emit(
+                self.events.as_ref(),
                 "runtime://event",
-                RuntimeEventEnvelope {
+                &RuntimeEventEnvelope {
                     project_id,
                     thread_id,
                     event,
@@ -188,17 +190,21 @@ impl AppState {
         }
         self.runtime.finish_turn(turn_id).await;
         self.save().await;
-        let _ = app.emit(
+        emit(
+            self.events.as_ref(),
             "turn://finished",
-            TurnFinishedEnvelope {
+            &TurnFinishedEnvelope {
                 project_id,
                 thread_id,
                 turn_id,
                 terminal_state,
             },
         );
-        // Background-only: a user watching the thread already sees the result.
-        crate::notify::turn_finished(&app, &thread_title, terminal_state);
+        emit(
+            self.events.as_ref(),
+            "notification://turn-finished",
+            &serde_json::json!({"title": thread_title, "terminalState": terminal_state}),
+        );
         terminal_state
     }
 }

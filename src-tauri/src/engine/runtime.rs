@@ -8,6 +8,7 @@ use super::{
     pi::PiEngine, DraftReceiver, ProviderEngine, TurnRequest,
 };
 use maxx_core::contract::*;
+use maxx_core::normalize::ProviderEventDraft;
 use maxx_core::TurnStamper;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -158,6 +159,66 @@ impl Runtime {
                 turn_id: *turn_id,
             })
             .collect()
+    }
+
+    /// Run one isolated provider turn for background text generation.
+    /// Synthetic turns never enter the visible active-turn inventory and never
+    /// receive browser authority. Their provider-native session is released as
+    /// soon as a final response (or timeout) is observed.
+    pub async fn generate_text(&self, request: TurnRequest) -> Result<String, String> {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let engine = self
+            .engines
+            .get(&request.provider)
+            .cloned()
+            .ok_or_else(|| format!("No adapter for provider {}", request.provider.raw_value()))?;
+        let provider_instance_id = request.provider_instance_id;
+        let thread_id = request.thread_id;
+        let turn_id = request.turn_id;
+        let (draft_tx, mut draft_rx) = mpsc::channel(256);
+        engine.run_turn(request, draft_tx).await;
+
+        let collected = tokio::time::timeout(TIMEOUT, async {
+            let mut output = String::new();
+            while let Some(draft) = draft_rx.recv().await {
+                match draft {
+                    Ok(ProviderEventDraft::AssistantDelta(delta)) => output.push_str(&delta),
+                    Ok(ProviderEventDraft::Terminal(state)) => {
+                        return match state {
+                            ProviderTurnTerminalState::Completed if !output.trim().is_empty() => {
+                                Ok(output)
+                            }
+                            ProviderTurnTerminalState::Completed => {
+                                Err("Title generator returned no text.".into())
+                            }
+                            other => Err(format!("Title generator ended as {other:?}.")),
+                        };
+                    }
+                    Ok(ProviderEventDraft::Completed) => {
+                        return if output.trim().is_empty() {
+                            Err("Title generator returned no text.".into())
+                        } else {
+                            Ok(output)
+                        };
+                    }
+                    Err(error) => return Err(error),
+                    _ => {}
+                }
+            }
+            if output.trim().is_empty() {
+                Err("Title generator ended without a response.".into())
+            } else {
+                Ok(output)
+            }
+        })
+        .await;
+
+        if collected.is_err() {
+            engine.cancel(turn_id).await;
+        }
+        engine.release_thread(provider_instance_id, thread_id).await;
+        collected.unwrap_or_else(|_| Err("Title generation timed out.".into()))
     }
 
     pub async fn register_route(&self, request_id: Uuid, provider: ChatProvider) {

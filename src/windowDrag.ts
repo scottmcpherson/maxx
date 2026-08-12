@@ -1,4 +1,3 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
 const INTERACTIVE_SELECTOR =
@@ -10,11 +9,12 @@ export function beginWindowDrag(event: ReactMouseEvent<HTMLElement>) {
   const target = event.target;
   if (target instanceof Element && target.closest(INTERACTIVE_SELECTOR)) return;
 
-  const window = getCurrentWindow();
   if (event.detail === 2) {
-    void window.toggleMaximize();
+    void window.maxx.invoke("window_toggle_maximize");
     return;
   }
 
-  void window.startDragging();
+  // Electron starts native dragging through `-webkit-app-region: drag` on the
+  // title surfaces. The handler remains for double-click parity and to keep
+  // interactive descendants from stealing the gesture.
 }

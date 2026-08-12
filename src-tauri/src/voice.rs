@@ -30,13 +30,13 @@ use maxx_core::voice::{
     VoiceSettings, IDLE_TIMEOUT_SECS, NO_SPEECH_TIMEOUT_SECS,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::events::{emit as emit_event, EventSink};
 use crate::state::AppState;
 
 /// Audio chunks buffered while a socket is being (re)established. At the
@@ -85,8 +85,8 @@ pub enum VoiceEvent {
     },
 }
 
-fn emit(app: &AppHandle, event: VoiceEvent) {
-    let _ = app.emit("voice://event", event);
+fn voice_emit(events: &dyn EventSink, event: VoiceEvent) {
+    emit_event(events, "voice://event", &event);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +216,7 @@ impl VoiceState {
 
 /// Whether dictation can currently connect, and with which credential.
 /// Drives the Settings status row; never returns the token itself.
-#[tauri::command]
-pub async fn voice_status(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<VoiceCredentialStatus, String> {
+pub async fn voice_status(state: Arc<AppState>) -> Result<VoiceCredentialStatus, String> {
     let settings = state.workspace.lock().await.voice.clone();
     Ok(match resolve_bearer(&settings) {
         Ok(resolved) => resolved.status,
@@ -227,9 +224,8 @@ pub async fn voice_status(
     })
 }
 
-#[tauri::command]
 pub async fn update_voice_settings(
-    state: tauri::State<'_, Arc<AppState>>,
+    state: Arc<AppState>,
     settings: VoiceSettings,
 ) -> Result<VoiceSettings, String> {
     // Validate before storing so a bad endpoint is rejected at the point the
@@ -246,12 +242,7 @@ pub async fn update_voice_settings(
 /// Begin a dictation session. Returns its id immediately — the socket is still
 /// connecting. The frontend starts capturing at once and audio buffers until
 /// the socket is live, so the first word of an utterance is never clipped.
-#[tauri::command]
-pub async fn voice_start(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-    voice: tauri::State<'_, Arc<VoiceState>>,
-) -> Result<u64, String> {
+pub async fn voice_start(state: Arc<AppState>, voice: Arc<VoiceState>) -> Result<u64, String> {
     let settings = state.workspace.lock().await.voice.clone();
     if !settings.is_enabled {
         return Err("Voice input is turned off in Settings.".into());
@@ -269,9 +260,9 @@ pub async fn voice_start(
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(BACKLOG_MAX_CHUNKS);
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
 
-    let task_app = app.clone();
+    let task_events = state.events.clone();
     let task = tokio::spawn(async move {
-        run_session(task_app, id, settings, url, audio_rx, stop_rx).await;
+        run_session(task_events, id, settings, url, audio_rx, stop_rx).await;
     });
 
     *voice.active.lock().await = Some(ActiveSession {
@@ -288,9 +279,8 @@ pub async fn voice_start(
 /// Base64 rather than a raw IPC body: at ~32 kB/s the encoding overhead is
 /// irrelevant, and it keeps the command signature ordinary enough to carry the
 /// session id alongside the audio.
-#[tauri::command]
 pub async fn voice_send_audio(
-    voice: tauri::State<'_, Arc<VoiceState>>,
+    voice: Arc<VoiceState>,
     session: u64,
     chunk: String,
 ) -> Result<(), String> {
@@ -313,11 +303,7 @@ pub async fn voice_send_audio(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn voice_stop(
-    voice: tauri::State<'_, Arc<VoiceState>>,
-    session: u64,
-) -> Result<(), String> {
+pub async fn voice_stop(voice: Arc<VoiceState>, session: u64) -> Result<(), String> {
     let active = voice.active.lock().await;
     if let Some(current) = active.as_ref() {
         if current.id == session {
@@ -352,7 +338,7 @@ enum PumpOutcome {
 }
 
 async fn run_session(
-    app: AppHandle,
+    events: Arc<dyn EventSink>,
     id: u64,
     settings: VoiceSettings,
     url: String,
@@ -364,8 +350,8 @@ async fn run_session(
     let mut reconnects = 0;
 
     loop {
-        emit(
-            &app,
+        voice_emit(
+            events.as_ref(),
             VoiceEvent::State {
                 session: id,
                 state: VoiceSessionState::Connecting,
@@ -375,8 +361,8 @@ async fn run_session(
         let bearer = match resolve_bearer(&settings) {
             Ok(resolved) => resolved.bearer,
             Err(status) => {
-                emit(
-                    &app,
+                voice_emit(
+                    events.as_ref(),
                     VoiceEvent::Error {
                         session: id,
                         message: status.detail,
@@ -390,8 +376,8 @@ async fn run_session(
         let socket = match connect(&url, &bearer).await {
             Ok(socket) => socket,
             Err(error) => {
-                emit(
-                    &app,
+                voice_emit(
+                    events.as_ref(),
                     VoiceEvent::Error {
                         session: id,
                         message: error,
@@ -402,8 +388,8 @@ async fn run_session(
             }
         };
 
-        emit(
-            &app,
+        voice_emit(
+            events.as_ref(),
             VoiceEvent::State {
                 session: id,
                 state: VoiceSessionState::Listening,
@@ -411,7 +397,7 @@ async fn run_session(
         );
 
         let outcome = pump(
-            &app,
+            events.as_ref(),
             id,
             socket,
             &mut audio_rx,
@@ -426,8 +412,8 @@ async fn run_session(
             PumpOutcome::Disconnected => {
                 reconnects += 1;
                 if reconnects > MAX_RECONNECTS {
-                    emit(
-                        &app,
+                    voice_emit(
+                        events.as_ref(),
                         VoiceEvent::Error {
                             session: id,
                             message: "Lost the transcription connection.".into(),
@@ -441,8 +427,8 @@ async fn run_session(
         }
     }
 
-    emit(
-        &app,
+    voice_emit(
+        events.as_ref(),
         VoiceEvent::State {
             session: id,
             state: VoiceSessionState::Stopped,
@@ -486,7 +472,7 @@ async fn connect(url: &str, bearer: &str) -> Result<Socket, String> {
 /// Drive one socket until the session ends or the connection drops.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
-    app: &AppHandle,
+    events: &dyn EventSink,
     id: u64,
     socket: Socket,
     audio_rx: &mut mpsc::Receiver<Vec<u8>>,
@@ -556,7 +542,7 @@ async fn pump(
                                 {
                                     *heard_speech = true;
                                     last_transcript = Instant::now();
-                                    emit(app, match transcript {
+                                    voice_emit(events, match transcript {
                                         Transcript::Interim(text) =>
                                             VoiceEvent::Interim { session: id, text },
                                         Transcript::Final(text) =>
@@ -569,7 +555,7 @@ async fn pump(
                                 if !trimmed.is_empty() {
                                     *heard_speech = true;
                                     last_transcript = Instant::now();
-                                    emit(app, VoiceEvent::Final {
+                                    voice_emit(events, VoiceEvent::Final {
                                         session: id,
                                         text: trimmed.to_string(),
                                     });
@@ -579,7 +565,7 @@ async fn pump(
                                 }
                             }
                             Ok(SttServerEvent::Error { message }) => {
-                                emit(app, VoiceEvent::Error {
+                                voice_emit(events, VoiceEvent::Error {
                                     session: id,
                                     message,
                                     hint: None,
@@ -596,7 +582,7 @@ async fn pump(
                         return if draining || is_benign_disconnect(&error) {
                             if draining { PumpOutcome::Finished } else { PumpOutcome::Disconnected }
                         } else {
-                            emit(app, VoiceEvent::Error {
+                            voice_emit(events, VoiceEvent::Error {
                                 session: id,
                                 message: format!("Transcription connection failed: {error}"),
                                 hint: None,
@@ -620,7 +606,7 @@ async fn pump(
                     return PumpOutcome::Finished;
                 }
                 if *heard_speech {
-                    emit(app, VoiceEvent::Error {
+                    voice_emit(events, VoiceEvent::Error {
                         session: id,
                         message: "Dictation stopped after two minutes of silence.".into(),
                         hint: None,
@@ -628,7 +614,7 @@ async fn pump(
                 } else {
                     // Silence here usually means the microphone never opened:
                     // macOS answers a denied grant with silence, not an error.
-                    emit(app, VoiceEvent::Error {
+                    voice_emit(events, VoiceEvent::Error {
                         session: id,
                         message: "No speech detected. Dictation stopped.".into(),
                         hint: Some(microphone_help().to_string()),

@@ -1,97 +1,66 @@
 # Browser Runtime Engine Decision
 
-Date: 2026-08-04  
+Date: 2026-08-12
 Status: accepted and implemented
 
 ## Decision
 
-Maxx owns a pinned Chrome Headless Shell child process and controls it over
-Chrome DevTools Protocol (CDP). The Maxx browser pane displays frames captured
-from that process and forwards human pointer, wheel, keyboard, and paste input
-through the same broker used by agents. Semantic DOM/accessibility operations,
-console and network diagnostics, storage, trace capture, uploads, downloads,
-and screenshots all target that same Chromium tab.
+Maxx uses Electron as its desktop shell and renders each browser tab directly
+in a sandboxed `WebContentsView`. The React application and remote webpages are
+separate web contents. A persistent Electron session owns cookies, cache, site
+storage, downloads, and imported Chrome state.
 
-Release builds bundle the browser payload. They do not discover or launch a
-user-installed browser. `script/prepare_browser_runtime.sh` pins Chrome for
-Testing `151.0.7922.71`, verifies a platform-specific SHA-256 digest, and stages
-the complete payload as a Tauri resource. Application setup resolves only that
-resource and fails closed if it is missing.
+Electron's DevTools Protocol connection is attached to the same visible
+`webContents`. Semantic snapshots, clicks, typing, scrolling, diagnostics,
+traces, and on-demand screenshots therefore operate on exactly the page the
+user sees. There is no headless browser, frame relay, synthetic UI transport,
+or duplicate browser profile.
+
+The provider-neutral broker remains in the Rust sidecar. It serializes agent
+operations, scopes tabs to threads, increments control epochs, and cancels an
+agent's pending control when real user input is observed. The Electron main
+process is the browser engine adapter and sends typed operation results back to
+Rust over a private JSONL stdio channel.
+
+## Why this replaces the previous design
+
+The earlier bundled Headless Shell design rendered captured frames in the UI.
+That created two avoidable failure modes: the displayed frame could lag the
+controlled page, and navigation success depended on an indirect capture/input
+transport. It also made ordinary sites appear broken while Chromium was still
+starting or waiting for a frame acknowledgement.
+
+T3 Code and Codex Desktop demonstrate the more robust product boundary:
+Chromium is the actual embedded view, while automation attaches to that same
+view. Maxx now uses that boundary directly.
 
 ## Candidate evaluation
 
-| Candidate | Same Chromium state for pixels and tools | Tauri/AppKit integration | Security boundary | Distribution cost | Decision |
-| --- | --- | --- | --- | --- | --- |
-| WKWebView child | Yes, but no supported full CDP surface | Already present | Remote child view can be isolated | Low | Rejected: cannot meet developer-tools contract |
-| CEF in-process child | Yes | Requires CEF-owned macOS application/message-loop integration inside Tauri's existing Tao/WRY lifecycle | Good if carefully isolated | Highest: framework, helpers, entitlements, focus and shutdown interop | Rejected at lifecycle gate |
-| Electron shell | Yes | Requires replacing the Tauri shell or embedding a second desktop shell | Electron isolation can work | High: duplicates window, IPC, updater, tray, signing, and permissions | Rejected at shell-replacement gate |
-| Managed, bundled Chromium/CDP | Yes | Ordinary child process; React remains the only Maxx webview | Strong: remote content is pixels and typed CDP data, never Maxx IPC | Moderate: one pinned browser payload | Accepted |
+| Candidate | Direct page | Full automation | Persistent session | Result |
+| --- | --- | --- | --- | --- |
+| WKWebView child | Yes | No supported CDP surface | Yes | Rejected |
+| Headless Chromium + frames | No | Yes | Yes | Removed |
+| CEF child | Yes | Yes | Yes | Rejected: two desktop lifecycle owners |
+| Electron `WebContentsView` | Yes | Yes, same target | Yes | Selected |
 
-## Evidence from existing implementations
+## Invariants
 
-T3 Code demonstrates the useful shape of the product, not the architecture
-Maxx must copy. Its Electron preview manager keeps `WebContents` per tab,
-attaches Electron's CDP debugger, captures screencast frames, injects
-Playwright's selector runtime, and increments a control epoch on human input.
-Its browser sessions use persistent, scope-derived Electron partitions.
-
-Maxx retains the strong ideas:
-
-- one authoritative tab and session registry;
-- semantic references before coordinates;
-- CDP as the developer-tools surface;
-- a serialized command stream and control epoch per tab;
-- persisted browser storage; and
-- explicit artifacts for heavy evidence.
-
-Maxx does not adopt Electron-specific `WebContents`, a renderer-to-guest IPC
-bridge, or extraction of Playwright's private bundled source. The broker and
-tool contract are provider- and engine-neutral Rust types, and browser pages
-never execute inside a privileged Maxx webview.
-
-## Why CEF was stopped before a product spike
-
-The macOS CEF sample and current Rust bindings require application-level CEF
-initialization and macOS message-loop behavior. Maxx already has an
-`NSApplication`, window loop, webview lifecycle, updater, tray, and shutdown
-path owned through Tauri/Tao/WRY. A CEF child therefore is not a narrow engine
-swap: it creates two owners for the most failure-sensitive desktop lifecycle.
-Rendering and CDP capability would not answer the hard integration question.
-The lifecycle gate fails before implementation, so carrying a rejected CEF
-branch would add risk without producing decision-changing evidence.
-
-## Why Electron was stopped before a shell migration
-
-T3 Code proves Electron can deliver the required browser behaviors. For Maxx,
-the remaining question is whether those behaviors justify replacing a working
-Tauri product shell. They do not. An Electron migration would need to replace
-or bridge every existing Tauri command, window/menu/tray path, updater,
-notification permission, voice/media path, bundle/signing path, and Rust state
-lifecycle. A nested Electron helper would retain both shells and their attack
-surface. The managed-process design gets the same Chromium/CDP substrate
-without either cost.
+1. The visible tab is the automation target; no shadow tab is allowed.
+2. Remote content never receives the Maxx preload bridge.
+3. Only HTTP(S) top-level navigation is accepted.
+4. Browser state is persistent, but tab ownership and control authorization
+   remain explicit in Rust.
+5. Heavy evidence is produced only by explicit bounded screenshot/trace calls.
+6. DOM annotations contain selector/accessibility metadata and page geometry,
+   never hidden credentials or arbitrary page script results.
+7. Chrome import happens only after a user action and keeps plaintext secrets
+   inside the Electron main process.
 
 ## Operational consequences
 
-- The browser starts lazily on the first tab.
-- Its profile and downloads live under Maxx application data, not the bundle.
-- The payload version changes only through an explicit script and checksum
-  update followed by the browser conformance suite and packaged-app tests.
-- Separate releases are built for Apple Silicon and Intel so each bundle
-  carries only its native payload.
-- Browser crashes are isolated from the Maxx UI process. The persistent profile
-  preserves cookies and site storage, while the v1 broker deliberately starts
-  with a fresh tab registry after an application restart.
-- The visual transport can move from demand-driven JPEG frames to CDP
-  screencast frames without changing provider tools, session scopes, or tab
-  ownership.
-
-## Revisit triggers
-
-Re-evaluate the engine only if one of these becomes true:
-
-1. Tauri ships a supported Chromium webview with full CDP on macOS.
-2. The frame transport cannot meet measured interaction latency after adopting
-   CDP screencast delivery.
-3. A required browser capability cannot be exposed by Chrome Headless Shell.
-4. Bundle size becomes more costly than replacing the application shell.
+- Electron carries the Chromium runtime, so a separate browser payload and
+  runtime preparation script no longer exist.
+- Browser crashes are isolated to their renderer process and surfaced as tab
+  lifecycle errors.
+- The packaged app carries one Rust sidecar at `Resources/bin/maxx-runtime`.
+- Apple Silicon and Intel builds use Electron's native architecture output.

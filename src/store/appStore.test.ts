@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { WorkspaceDocument } from "../contract/types";
 import { useAppStore } from "./appStore";
 
 function seedThreadPanels(threadID: string | null = "thread-a") {
   useAppStore.setState({
+    workspace: null,
     selectedProjectID: "project",
     selectedThreadID: threadID,
     browserOpen: true,
@@ -22,6 +24,47 @@ afterEach(() => {
     summaryPopoverOpen: false,
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
+  });
+});
+
+describe("generated thread titles", () => {
+  it("applies a backend title event without waiting for a workspace refresh", () => {
+    const workspace: WorkspaceDocument = {
+      schemaVersion: 6,
+      projects: [{
+        id: "project",
+        folderPath: "/tmp/project",
+        threads: [{
+          id: "thread-a",
+          title: "Explain why the sidebar title should be generated",
+          provider: "codex",
+          model: "Default",
+          messages: [],
+          runtimeEvents: [],
+          interactionRequests: [],
+          createdAt: 1,
+          updatedAt: 1,
+        }],
+      }],
+      providerProfiles: [],
+      agents: [],
+      voice: {
+        isEnabled: false,
+        useGrokSignIn: false,
+        language: "en",
+        apiBase: "https://api.x.ai",
+      },
+    };
+    useAppStore.setState({ workspace });
+
+    useAppStore.getState().applyThreadTitleUpdated({
+      projectID: "project",
+      threadID: "thread-a",
+      title: "Generate Short Chat Titles",
+    });
+
+    expect(useAppStore.getState().workspace?.projects[0]?.threads[0]?.title)
+      .toBe("Generate Short Chat Titles");
   });
 });
 

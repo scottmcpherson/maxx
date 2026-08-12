@@ -239,6 +239,18 @@ impl ProviderEngine for OpenCodeEngine {
         Err("The OpenCode request is no longer actionable.".into())
     }
 
+    async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
+        let key = (provider_instance_id, thread_id);
+        let instance = self.instances.lock().await.remove(&key);
+        self.instance_by_turn
+            .lock()
+            .await
+            .retain(|_, route| *route != key);
+        if let Some(instance) = instance {
+            retire_instance(&instance).await;
+        }
+    }
+
     async fn shutdown(&self) {
         let instances: Vec<Arc<OpenCodeInstance>> = self
             .instances
@@ -249,31 +261,35 @@ impl ProviderEngine for OpenCodeEngine {
             .collect();
         self.instance_by_turn.lock().await.clear();
         for instance in instances {
-            let (server, turns) = {
-                let mut state = instance.state.lock().await;
-                let turns: Vec<DraftSender> = state
-                    .active_by_session
-                    .drain()
-                    .map(|(_, t)| t.sink)
-                    .collect();
-                state.interactions.clear();
-                state.base_url = None;
-                state.events_running = false;
-                (state.owned_server.take(), turns)
-            };
-            for sink in turns {
-                yield_draft(
-                    &sink,
-                    ProviderEventDraft::Terminal(ProviderTurnTerminalState::Cancelled),
-                )
-                .await;
-            }
-            // A configured external server is never terminated; only the
-            // Maxx-owned scoped server process is.
-            if let Some(server) = server {
-                server.shutdown().await;
-            }
+            retire_instance(&instance).await;
         }
+    }
+}
+
+async fn retire_instance(instance: &Arc<OpenCodeInstance>) {
+    let (server, turns) = {
+        let mut state = instance.state.lock().await;
+        let turns: Vec<DraftSender> = state
+            .active_by_session
+            .drain()
+            .map(|(_, turn)| turn.sink)
+            .collect();
+        state.interactions.clear();
+        state.base_url = None;
+        state.events_running = false;
+        (state.owned_server.take(), turns)
+    };
+    for sink in turns {
+        yield_draft(
+            &sink,
+            ProviderEventDraft::Terminal(ProviderTurnTerminalState::Cancelled),
+        )
+        .await;
+    }
+    // A configured external server is never terminated; only the Maxx-owned
+    // scoped server process is.
+    if let Some(server) = server {
+        server.shutdown().await;
     }
 }
 

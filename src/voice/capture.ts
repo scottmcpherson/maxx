@@ -1,13 +1,13 @@
-// Microphone capture in the webview.
+// Microphone capture in the sandboxed app renderer.
 //
-// WebKit already owns an audio stack, so capture is `getUserMedia` here rather
+// Chromium already owns an audio stack, so capture is `getUserMedia` here rather
 // than CoreAudio in Rust. What crosses to Rust is the same thing that would
 // have crossed anyway: 16 kHz mono PCM16, in ~100 ms chunks.
 //
 // An AudioWorklet rather than the deprecated ScriptProcessorNode, and raw PCM
 // rather than MediaRecorder: MediaRecorder cannot emit partial results mid
 // utterance, which is the entire point of live transcription, and its codec
-// support in WKWebView is inconsistent.
+// browser codec support can vary across platforms.
 
 import { VOICE_SAMPLE_RATE } from "./types";
 

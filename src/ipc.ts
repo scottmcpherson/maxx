@@ -1,12 +1,12 @@
-// Thin typed wrapper over the Tauri command surface.
+// Thin typed wrapper over the Electron preload boundary. Remote web content
+// lives in separate sandboxed WebContentsViews and never receives this API.
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
+type UnlistenFn = () => void;
 import type {
   BrowserArtifactContent,
-  BrowserFrameSubscription,
-  BrowserHumanInput,
-  BrowserRenderedFrame,
+  BrowserAnnotation,
+  ChromeImportStatus,
+  BrowserNativeState,
   BrowserTabSummary,
   BrowserUiReveal,
 } from "./browser";
@@ -24,9 +24,19 @@ import {
   ProviderProfile,
   RuntimeEventEnvelope,
   RuntimeInteractionDecision,
+  ThreadTitleUpdatedEnvelope,
+  TitleGenerationRuntime,
   TurnFinishedEnvelope,
   WorkspaceDocument,
 } from "./contract/types";
+
+function invoke<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  return window.maxx.invoke<T>(method, params);
+}
+
+function listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
+  return Promise.resolve(window.maxx.listen<T>(event, handler));
+}
 
 export interface ResolvedMediaSource {
   path: string;
@@ -74,6 +84,8 @@ export const ipc = {
   ) => invoke<void>("update_thread", { projectId, threadId, ...updates }),
   updateProfiles: (profiles: ProviderProfile[]) =>
     invoke<ProviderProfile[]>("update_profiles", { profiles }),
+  updateTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) =>
+    invoke<TitleGenerationRuntime | null>("update_title_generation_runtime", { runtime }),
   updateAgents: (agents: AgentDefinition[]) =>
     invoke<AgentDefinition[]>("update_agents", { agents }),
   importAgentImage: (agentId: string, sourcePath: string) =>
@@ -112,8 +124,8 @@ export const ipc = {
   resolveMediaSource: (projectId: string, threadId: string, destination: string) =>
     invoke<ResolvedMediaSource>("resolve_media_source", { projectId, threadId, destination }),
 
-  // Shared browser surface. Rust owns the Chromium targets and the control
-  // broker; React renders compressed frames and forwards explicit human input.
+  // Shared browser surface. Electron renders each tab directly and Rust keeps
+  // the provider scope/control broker authoritative.
   browserUiTabs: (threadId: string) =>
     invoke<BrowserTabSummary[]>("browser_ui_tabs", { threadId }),
   browserUiOpenTab: (threadId: string, url: string | null) =>
@@ -125,15 +137,22 @@ export const ipc = {
   browserUiBack: (tabId: string) => invoke<void>("browser_ui_back", { tabId }),
   browserUiForward: (tabId: string) => invoke<void>("browser_ui_forward", { tabId }),
   browserUiReload: (tabId: string) => invoke<void>("browser_ui_reload", { tabId }),
-  browserUiStartFrameStream: (tabId: string) =>
-    invoke<BrowserFrameSubscription>("browser_ui_start_frame_stream", { tabId }),
-  browserUiStopFrameStream: (tabId: string, streamId: string) =>
-    invoke<void>("browser_ui_stop_frame_stream", { tabId, streamId }),
   browserUiArtifact: (threadId: string, artifactId: string) =>
     invoke<BrowserArtifactContent>("browser_ui_artifact", { threadId, artifactId }),
-  browserUiInput: (tabId: string, input: BrowserHumanInput) =>
-    invoke<number>("browser_ui_input", { tabId, input }),
+  browserViewBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
+    invoke<void>("browser_view_bounds", { bounds }),
+  browserViewVisible: (visible: boolean) => invoke<void>("browser_view_visible", { visible }),
+  browserAnnotationMode: (tabId: string, enabled: boolean) =>
+    invoke<void>("browser_annotation_mode", { tabId, enabled }),
+  browserChromeImportStatus: () => invoke<ChromeImportStatus>("browser_chrome_import_status"),
+  browserImportChrome: (profileId: string) =>
+    invoke<ChromeImportStatus>("browser_import_chrome", { profileId }),
+  browserFillSavedPassword: (tabId: string) =>
+    invoke<boolean>("browser_fill_saved_password", { tabId }),
 
+  openProjectDialog: () => invoke<string | null>("dialog_open_project"),
+  openImagesDialog: () => invoke<string[]>("dialog_open_images"),
+  openAgentImageDialog: () => invoke<string | null>("dialog_open_agent_image"),
   // Voice dictation. Rust owns the credential and the socket; the webview only
   // captures audio and renders what comes back.
   voiceStatus: () => invoke<VoiceCredentialStatus>("voice_status"),
@@ -151,30 +170,40 @@ export const ipc = {
 
   /**
    * Rebinds the key equivalents of the two remappable View items. AppKit owns
-   * them from then on, which is the only way they still fire while the browser
-   * pane's child webview holds first responder. `null` clears the accelerator.
+   * them from then on, so they still fire while Chromium holds focus. `null`
+   * clears the accelerator.
    */
   setShortcutAccelerators: (toggleSidebar: string | null, toggleBrowser: string | null) =>
     invoke<void>("set_shortcut_accelerators", { toggleSidebar, toggleBrowser }),
 
   /** Native menu / tray activations. Unknown ids are dropped, not thrown on. */
   onMenuAction: (handler: (id: MenuActionID) => void): Promise<UnlistenFn> =>
-    listen<MenuActionPayload>("menu://action", (event) => {
-      if (isMenuActionID(event.payload.id)) handler(event.payload.id);
+    listen<MenuActionPayload>("menu://action", (payload) => {
+      if (isMenuActionID(payload.id)) handler(payload.id);
     }),
   onUpdateStatus: (handler: (status: UpdateStatus) => void): Promise<UnlistenFn> =>
-    listen<UpdateStatus>("updater://status", (event) => handler(event.payload)),
+    listen<UpdateStatus>("updater://status", handler),
 
   onVoiceEvent: (handler: (event: VoiceEvent) => void): Promise<UnlistenFn> =>
-    listen<VoiceEvent>("voice://event", (event) => handler(event.payload)),
+    listen<VoiceEvent>("voice://event", handler),
 
   onBrowserReveal: (handler: (event: BrowserUiReveal) => void): Promise<UnlistenFn> =>
-    listen<BrowserUiReveal>("browser://reveal", (event) => handler(event.payload)),
-  onBrowserFrame: (handler: (frame: BrowserRenderedFrame) => void): Promise<UnlistenFn> =>
-    listen<BrowserRenderedFrame>("browser://frame", (event) => handler(event.payload)),
+    listen<BrowserUiReveal>("browser://reveal", handler),
+  onBrowserState: (handler: (state: BrowserNativeState) => void): Promise<UnlistenFn> =>
+    listen<BrowserNativeState>("browser://state", handler),
+  onBrowserAnnotation: (handler: (annotation: BrowserAnnotation) => void): Promise<UnlistenFn> =>
+    listen<BrowserAnnotation>("browser://annotation", handler),
+  onBrowserError: (handler: (error: { tabId: string; code: string; message: string }) => void): Promise<UnlistenFn> =>
+    listen("browser://error", handler),
 
   onRuntimeEvent: (handler: (envelope: RuntimeEventEnvelope) => void): Promise<UnlistenFn> =>
-    listen<RuntimeEventEnvelope>("runtime://event", (event) => handler(event.payload)),
+    listen<RuntimeEventEnvelope>("runtime://event", handler),
   onTurnFinished: (handler: (envelope: TurnFinishedEnvelope) => void): Promise<UnlistenFn> =>
-    listen<TurnFinishedEnvelope>("turn://finished", (event) => handler(event.payload)),
+    listen<TurnFinishedEnvelope>("turn://finished", handler),
+  onThreadTitleUpdated: (handler: (envelope: ThreadTitleUpdatedEnvelope) => void): Promise<UnlistenFn> =>
+    listen<ThreadTitleUpdatedEnvelope>("thread://title-updated", handler),
 };
+
+export function mediaURL(path: string): string {
+  return window.maxx.mediaURL(path);
+}

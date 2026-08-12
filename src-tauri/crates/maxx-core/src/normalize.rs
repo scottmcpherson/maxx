@@ -11,6 +11,25 @@ use uuid::Uuid;
 
 type Object = Map<String, Value>;
 
+#[derive(Debug, Clone, Default)]
+struct AcpToolState {
+    title: Option<String>,
+    kind: Option<String>,
+    input: Option<String>,
+    output: Option<String>,
+    command: Option<String>,
+    state: Option<RuntimeItemState>,
+    locations: Vec<String>,
+    diffs: Vec<AcpToolDiff>,
+    artifacts: Option<Vec<RuntimeArtifact>>,
+}
+
+#[derive(Debug, Clone)]
+struct AcpToolDiff {
+    path: String,
+    text: String,
+}
+
 /// Internal draft events emitted by adapters before canonical stamping.
 /// Port of `ProviderEventDraft`.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +64,7 @@ pub struct NormalizerState {
     /// `session/new` / `session/load` responses (`models.availableModels[].
     /// _meta.totalContextTokens`). Stamped onto prompt-response usage events.
     pub context_window: Option<i64>,
+    acp_tools: HashMap<String, AcpToolState>,
 }
 
 impl NormalizerState {
@@ -1047,87 +1067,12 @@ fn normalize_acp(
                 "available_commands_update" | "session_info_update" | "user_message_chunk" => {
                     Ok(Vec::new())
                 }
-                "tool_call" | "tool_call_update" => {
-                    let native_item_id = s(update, &["toolCallId"]);
-                    let name = s(update, &["title", "name"]).unwrap_or_else(|| "Tool".into());
-                    let state_value = runtime_state(s(update, &["status"]).as_deref());
-                    let tool_kind = s(update, &["kind"]).map(|k| k.to_lowercase());
-                    if matches!(
-                        tool_kind.as_deref(),
-                        Some("edit") | Some("delete") | Some("move")
-                    ) {
-                        let files: Vec<RuntimeFileChange> = update
-                            .get("locations")
-                            .and_then(Value::as_array)
-                            .map(|locations| {
-                                locations
-                                    .iter()
-                                    .filter_map(Value::as_object)
-                                    .filter_map(|location| {
-                                        let path = s(location, &["path"])?;
-                                        Some(RuntimeFileChange {
-                                            path,
-                                            change_type: tool_kind
-                                                .clone()
-                                                .unwrap_or_else(|| "edit".into()),
-                                            summary: Some(name.clone()),
-                                            diff: None,
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        return Ok(vec![payload_draft(
-                            RuntimeEventKind::file_change(),
-                            native_item_id,
-                            None,
-                            RuntimeEventPayload {
-                                title: Some(name),
-                                state: Some(state_value),
-                                files: Some(files),
-                                ..Default::default()
-                            },
-                            Some(reference),
-                        )]);
-                    }
-                    if tool_kind.as_deref() == Some("execute") {
-                        let input = update.get("rawInput").and_then(Value::as_object);
-                        let command = input
-                            .map(|i| s(i, &["command"]))
-                            .unwrap_or(None)
-                            .unwrap_or_else(|| name.clone());
-                        return Ok(vec![payload_draft(
-                            RuntimeEventKind::command(),
-                            native_item_id,
-                            None,
-                            RuntimeEventPayload {
-                                title: Some(name),
-                                state: Some(state_value),
-                                command: Some(command),
-                                output: json_string(update.get("rawOutput")),
-                                ..Default::default()
-                            },
-                            Some(reference),
-                        )]);
-                    }
-                    Ok(vec![payload_draft(
-                        RuntimeEventKind::tool(),
-                        native_item_id,
-                        None,
-                        RuntimeEventPayload {
-                            title: Some(name.clone()),
-                            state: Some(state_value),
-                            tool: Some(RuntimeToolCall {
-                                name,
-                                input: json_string(update.get("rawInput")),
-                                output: json_string(update.get("rawOutput")),
-                                state: state_value,
-                            }),
-                            ..Default::default()
-                        },
-                        Some(reference),
-                    )])
-                }
+                "tool_call" | "tool_call_update" => Ok(vec![normalize_acp_tool_update(
+                    update,
+                    update_type == "tool_call",
+                    state,
+                    reference,
+                )]),
                 "plan" => Ok(vec![payload_draft(
                     RuntimeEventKind::plan(),
                     None,
@@ -1284,6 +1229,269 @@ fn normalize_acp(
         )]);
     }
     Ok(unknown(object, &protocol_name, Some(method)))
+}
+
+fn normalize_acp_tool_update(
+    update: &Object,
+    is_start: bool,
+    state: &mut NormalizerState,
+    reference: ProviderNativeReference,
+) -> ProviderEventDraft {
+    let native_item_id = s(update, &["toolCallId"]);
+    let mut tool = if is_start {
+        AcpToolState::default()
+    } else {
+        native_item_id
+            .as_ref()
+            .and_then(|id| state.acp_tools.get(id))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    if let Some(title) = s(update, &["title", "name"]) {
+        tool.title = Some(title);
+    }
+    if let Some(kind) = s(update, &["kind"]) {
+        tool.kind = Some(kind.to_lowercase());
+    }
+    if let Some(status) = s(update, &["status"]) {
+        tool.state = Some(runtime_state(Some(&status)));
+    } else if is_start {
+        // ACP tool-call starts default to pending when status is omitted.
+        tool.state = Some(RuntimeItemState::Pending);
+    }
+
+    let content = acp_tool_content_text(update.get("content"));
+    if is_start {
+        if update.contains_key("rawInput") || update.contains_key("content") {
+            tool.input = json_string(update.get("rawInput")).or_else(|| content.clone());
+        }
+        if update.contains_key("rawOutput") {
+            tool.output = json_string(update.get("rawOutput"));
+        }
+    } else {
+        if update.contains_key("rawInput") {
+            tool.input = json_string(update.get("rawInput"));
+        }
+        if update.contains_key("rawOutput") || update.contains_key("content") {
+            // ACP content is the client-facing representation; rawOutput is a
+            // machine-readable fallback and is frequently omitted by Hermes.
+            tool.output = content
+                .clone()
+                .or_else(|| json_string(update.get("rawOutput")));
+        }
+    }
+    if let Some(input) = update.get("rawInput").and_then(Value::as_object) {
+        if let Some(command) = s(input, &["command"]) {
+            tool.command = Some(command);
+        }
+    }
+    if update.contains_key("locations") {
+        tool.locations = acp_tool_locations(update.get("locations"));
+    }
+    if update.contains_key("content") {
+        let diffs = acp_tool_diffs(update.get("content"));
+        if !diffs.is_empty() {
+            tool.diffs = diffs;
+        }
+    }
+    if update.contains_key("rawOutput") || update.contains_key("content") {
+        if let Some(artifacts) = acp_tool_result_artifacts(update) {
+            tool.artifacts = Some(artifacts);
+        }
+    }
+
+    if let Some(id) = &native_item_id {
+        state.acp_tools.insert(id.clone(), tool.clone());
+    }
+    acp_tool_draft(native_item_id, tool, reference)
+}
+
+fn acp_tool_draft(
+    native_item_id: Option<String>,
+    tool: AcpToolState,
+    reference: ProviderNativeReference,
+) -> ProviderEventDraft {
+    let name = tool.title.unwrap_or_else(|| "Tool".into());
+    let state_value = tool.state.unwrap_or(RuntimeItemState::Completed);
+    let tool_kind = tool.kind.as_deref();
+
+    if matches!(tool_kind, Some("edit") | Some("delete") | Some("move")) {
+        let change_type = tool_kind.unwrap_or("edit").to_string();
+        let mut files = tool
+            .diffs
+            .iter()
+            .map(|diff| RuntimeFileChange {
+                path: diff.path.clone(),
+                change_type: change_type.clone(),
+                summary: Some(name.clone()),
+                diff: Some(diff.text.clone()),
+            })
+            .collect::<Vec<_>>();
+        for path in &tool.locations {
+            if files.iter().any(|file| file.path == *path) {
+                continue;
+            }
+            files.push(RuntimeFileChange {
+                path: path.clone(),
+                change_type: change_type.clone(),
+                summary: Some(name.clone()),
+                diff: None,
+            });
+        }
+        let diff = (!tool.diffs.is_empty()).then(|| {
+            tool.diffs
+                .iter()
+                .map(|diff| diff.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        });
+        return payload_draft(
+            RuntimeEventKind::file_change(),
+            native_item_id,
+            None,
+            RuntimeEventPayload {
+                title: Some(name),
+                detail: tool.input,
+                state: Some(state_value),
+                output: tool.output,
+                files: (!files.is_empty()).then_some(files),
+                diff,
+                artifacts: tool.artifacts,
+                ..Default::default()
+            },
+            Some(reference),
+        );
+    }
+
+    if tool_kind == Some("execute") {
+        let command = tool.command.or(tool.input).unwrap_or_else(|| name.clone());
+        return payload_draft(
+            RuntimeEventKind::command(),
+            native_item_id,
+            None,
+            RuntimeEventPayload {
+                title: Some(name),
+                state: Some(state_value),
+                command: Some(command),
+                output: tool.output,
+                artifacts: tool.artifacts,
+                ..Default::default()
+            },
+            Some(reference),
+        );
+    }
+
+    payload_draft(
+        RuntimeEventKind::tool(),
+        native_item_id,
+        None,
+        RuntimeEventPayload {
+            title: Some(name.clone()),
+            state: Some(state_value),
+            tool: Some(RuntimeToolCall {
+                name,
+                input: tool.input,
+                output: tool.output,
+                state: state_value,
+            }),
+            artifacts: tool.artifacts,
+            ..Default::default()
+        },
+        Some(reference),
+    )
+}
+
+fn acp_tool_locations(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|location| s(location, &["path"]))
+        .collect()
+}
+
+fn acp_tool_diffs(value: Option<&Value>) -> Vec<AcpToolDiff> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|item| s(item, &["type"]).as_deref() == Some("diff"))
+        .filter_map(|item| {
+            let path = s(item, &["path"])?;
+            let new_text = s(item, &["newText"]).unwrap_or_default();
+            let text = if let Some(old_text) = s(item, &["oldText"]) {
+                format!("{path}\n\nBefore:\n{old_text}\n\nAfter:\n{new_text}")
+            } else {
+                format!("{path}\n\nCreated:\n{new_text}")
+            };
+            Some(AcpToolDiff { path, text })
+        })
+        .collect()
+}
+
+fn acp_tool_content_text(value: Option<&Value>) -> Option<String> {
+    let blocks = value?.as_array()?;
+    let text = blocks
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|item| match s(item, &["type"]).as_deref() {
+            Some("content") => {
+                let content = item.get("content")?;
+                let content_type = content.get("type").and_then(Value::as_str);
+                match content_type {
+                    Some("text") => content
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(String::from),
+                    Some("image") => Some("[Image content]".into()),
+                    Some("audio") => Some("[Audio content]".into()),
+                    _ => content_text(Some(content)).or_else(|| json_string(Some(content))),
+                }
+            }
+            Some("diff") => {
+                let path = s(item, &["path"])?;
+                let new_text = s(item, &["newText"]).unwrap_or_default();
+                Some(if let Some(old_text) = s(item, &["oldText"]) {
+                    format!("{path}\n\nBefore:\n{old_text}\n\nAfter:\n{new_text}")
+                } else {
+                    format!("{path}\n\nCreated:\n{new_text}")
+                })
+            }
+            Some("terminal") => s(item, &["terminalId"]).map(|id| format!("Terminal: {id}")),
+            _ => json_string(Some(&Value::Object(item.clone()))),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn acp_tool_result_artifacts(update: &Object) -> Option<Vec<RuntimeArtifact>> {
+    let mut seen = HashSet::new();
+    let mut artifacts = Vec::new();
+    if let Some(raw) = update.get("rawOutput").and_then(parsed_json_value) {
+        append_runtime_artifacts(&raw, &mut seen, &mut artifacts);
+    }
+    if let Some(blocks) = update.get("content").and_then(Value::as_array) {
+        for block in blocks.iter().filter_map(Value::as_object) {
+            let Some(content) = block.get("content") else {
+                continue;
+            };
+            append_runtime_artifacts(content, &mut seen, &mut artifacts);
+            if content.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(parsed) = content
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                {
+                    append_runtime_artifacts(&parsed, &mut seen, &mut artifacts);
+                }
+            }
+        }
+    }
+    (!artifacts.is_empty()).then_some(artifacts)
 }
 
 fn normalize_opencode(
@@ -1543,17 +1751,34 @@ fn normalize_opencode(
                 Some(reference),
             )])
         }
-        "session.diff" => Ok(vec![payload_draft(
-            RuntimeEventKind::diff(),
-            None,
-            None,
-            RuntimeEventPayload {
-                files: file_changes(properties.get("diff")),
-                diff: json_string(Some(&Value::Object(properties.clone()))),
-                ..Default::default()
-            },
-            Some(reference),
-        )]),
+        "session.diff" => {
+            let Some(diff) = properties.get("diff") else {
+                return Ok(Vec::new());
+            };
+            if match diff {
+                Value::Array(items) => items.is_empty(),
+                Value::Object(fields) => fields.is_empty(),
+                Value::String(text) => text.trim().is_empty(),
+                Value::Null => true,
+                _ => false,
+            } {
+                return Ok(Vec::new());
+            }
+            let Some(diff_text) = json_string(Some(diff)) else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![payload_draft(
+                RuntimeEventKind::diff(),
+                None,
+                None,
+                RuntimeEventPayload {
+                    files: file_changes(Some(diff)),
+                    diff: Some(diff_text),
+                    ..Default::default()
+                },
+                Some(reference),
+            )])
+        }
         "todo.updated" => Ok(vec![payload_draft(
             RuntimeEventKind::plan(),
             None,

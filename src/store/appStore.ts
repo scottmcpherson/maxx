@@ -34,6 +34,8 @@ import {
   ProviderProfile,
   RuntimeEventEnvelope,
   RuntimeInteractionDecision,
+  ThreadTitleUpdatedEnvelope,
+  TitleGenerationRuntime,
   TurnFinishedEnvelope,
   WorkspaceDocument,
 } from "../contract/types";
@@ -137,6 +139,7 @@ interface AppStoreState {
     decision: RuntimeInteractionDecision,
   ) => Promise<void>;
   saveProfiles: (profiles: ProviderProfile[]) => Promise<void>;
+  saveTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) => Promise<void>;
   saveAgents: (agents: AgentDefinition[]) => Promise<void>;
   saveVoiceSettings: (settings: VoiceSettings) => Promise<void>;
   startSideThread: (
@@ -177,6 +180,7 @@ interface AppStoreState {
   resetKeyboardShortcut: (command: KeyboardShortcutCommand) => void;
   setShowProviderDiagnostics: (visible: boolean) => void;
   applyRuntimeEvent: (envelope: RuntimeEventEnvelope) => void;
+  applyThreadTitleUpdated: (envelope: ThreadTitleUpdatedEnvelope) => void;
   applyTurnFinished: (envelope: TurnFinishedEnvelope) => void;
 }
 
@@ -227,6 +231,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       try {
         await ipc.onRuntimeEvent((envelope) => get().applyRuntimeEvent(envelope));
         await ipc.onTurnFinished((envelope) => get().applyTurnFinished(envelope));
+        await ipc.onThreadTitleUpdated((envelope) => get().applyThreadTitleUpdated(envelope));
         await ipc.onUpdateStatus((status) => get().setUpdateStatus(status));
         await ipc.onBrowserReveal((event) => get().revealBrowserTab(event));
       } catch (error) {
@@ -464,6 +469,15 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
+  saveTitleGenerationRuntime: async (runtime) => {
+    try {
+      await ipc.updateTitleGenerationRuntime(runtime);
+      await get().refresh();
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
   saveAgents: async (agents) => {
     try {
       await ipc.updateAgents(agents);
@@ -610,6 +624,27 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         ...state,
         workspace: reduced.workspace,
         activeTurnByThread: reduced.activeTurnByThread,
+      };
+    });
+  },
+
+  applyThreadTitleUpdated: (envelope) => {
+    set((state) => {
+      if (!state.workspace) return {};
+      return {
+        workspace: {
+          ...state.workspace,
+          projects: state.workspace.projects.map((project) =>
+            project.id !== envelope.projectID
+              ? project
+              : {
+                  ...project,
+                  threads: project.threads.map((thread) =>
+                    thread.id === envelope.threadID
+                      ? { ...thread, title: envelope.title }
+                      : thread),
+                }),
+        },
       };
     });
   },

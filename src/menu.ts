@@ -1,10 +1,10 @@
-// Native-menu contract. The menu itself is built in `src-tauri/src/menu.rs`;
-// custom items carry no behaviour there and arrive here as `menu://action`, so
+// Native-menu contract. The menu itself is built in `electron/main.ts`;
+// custom items arrive here as `menu://action`, so
 // the zustand store stays the single implementation of every command.
 //
 // The second job of this module is deduplication. An `NSMenuItem` key
-// equivalent is consumed by AppKit before the event ever reaches the
-// `WKWebView`, so in practice the in-app `keydown` handler never sees a
+// equivalent is consumed by AppKit before the event ever reaches Chromium, so
+// in practice the in-app `keydown` handler never sees a
 // combination the menu claims. Rather than depend on that silently, the
 // handler asks `isNativeMenuShortcut` first and defers — one owner per
 // combination, by construction rather than by platform behaviour.
@@ -14,7 +14,7 @@ import type {
   KeyboardShortcutModifier,
 } from "./keyboardShortcuts";
 
-/** Ids emitted by `MENU_EVENT`; mirrors `FORWARDED_IDS` in menu.rs. */
+/** Ids emitted by the Electron main process. */
 export const MENU_ACTION_IDS = [
   "settings",
   "new_thread",
@@ -81,7 +81,7 @@ const ACCELERATOR_MODIFIERS: Record<KeyboardShortcutModifier, string> = {
   meta: "Command",
 };
 
-/** Named keys muda's parser accepts, keyed by `KeyboardEvent.key`. */
+/** Named keys Electron accepts, keyed by `KeyboardEvent.key`. */
 const ACCELERATOR_NAMED_KEYS: Record<string, string> = {
   " ": "Space",
   ArrowDown: "ArrowDown",
@@ -100,7 +100,7 @@ const ACCELERATOR_NAMED_KEYS: Record<string, string> = {
   Tab: "Tab",
 };
 
-/** Single characters muda maps to a `Code`; anything else has no accelerator. */
+/** Single characters Electron maps to a key; anything else has no accelerator. */
 const ACCELERATOR_PUNCTUATION = new Set(["`", "\\", "[", "]", ",", "=", "-", ".", "'", ";", "/"]);
 
 function acceleratorKey(key: string): string | null {
@@ -115,14 +115,13 @@ function acceleratorKey(key: string): string | null {
 }
 
 /**
- * Renders a user binding as a muda accelerator string, or `null` when muda has
- * no `Code` for the key.
+ * Renders a user binding as an Electron accelerator string, or `null` when the
+ * key has no native accelerator form.
  *
  * This is what makes a remappable shortcut survive the browser pane: an
  * `NSMenuItem` key equivalent is matched by AppKit before the event reaches any
- * webview, so it fires even while the pane's child `WKWebView` — a sibling
- * `NSView` with its own first responder — owns the keyboard. A `keydown`
- * listener in the app's own webview never sees that event at all.
+ * renderer, so it fires even while the browser `WebContentsView` owns the
+ * keyboard. A `keydown` listener in the app renderer never sees that event.
  */
 export function menuAcceleratorFor(binding: KeyboardShortcutBinding): string | null {
   const key = acceleratorKey(binding.key);
@@ -130,7 +129,7 @@ export function menuAcceleratorFor(binding: KeyboardShortcutBinding): string | n
   const modifiers = (["control", "alt", "shift", "meta"] as const)
     .filter((modifier) => binding.modifiers.includes(modifier))
     .map((modifier) => ACCELERATOR_MODIFIERS[modifier]);
-  // muda needs at least one modifier for a menu key equivalent to be sane.
+  // Native menu shortcuts need at least one modifier to avoid stealing text.
   if (modifiers.length === 0) return null;
   return [...modifiers, key].join("+");
 }

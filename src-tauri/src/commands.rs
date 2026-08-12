@@ -10,24 +10,18 @@ use maxx_core::persist::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::State;
 use uuid::Uuid;
 
-type Shared<'a> = State<'a, Arc<AppState>>;
-
-#[tauri::command]
-pub async fn workspace_snapshot(state: Shared<'_>) -> Result<WorkspaceDocument, String> {
+pub async fn workspace_snapshot(state: Arc<AppState>) -> Result<WorkspaceDocument, String> {
     Ok(state.workspace.lock().await.clone())
 }
 
 /// Backend-authoritative inventory of in-flight provider turns for sidebar activity.
-#[tauri::command]
-pub async fn active_turns(state: Shared<'_>) -> Result<Vec<ActiveTurnInfo>, String> {
+pub async fn active_turns(state: Arc<AppState>) -> Result<Vec<ActiveTurnInfo>, String> {
     Ok(state.runtime.active_turns().await)
 }
 
-#[tauri::command]
-pub async fn add_project(state: Shared<'_>, folder_path: String) -> Result<ChatProject, String> {
+pub async fn add_project(state: Arc<AppState>, folder_path: String) -> Result<ChatProject, String> {
     let project = ChatProject {
         id: Uuid::new_v4(),
         folder_path,
@@ -38,8 +32,7 @@ pub async fn add_project(state: Shared<'_>, folder_path: String) -> Result<ChatP
     Ok(project)
 }
 
-#[tauri::command]
-pub async fn remove_project(state: Shared<'_>, project_id: Uuid) -> Result<(), String> {
+pub async fn remove_project(state: Arc<AppState>, project_id: Uuid) -> Result<(), String> {
     let removed_threads = {
         let mut workspace = state.workspace.lock().await;
         let removed = workspace
@@ -70,9 +63,8 @@ pub async fn remove_project(state: Shared<'_>, project_id: Uuid) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
 pub async fn add_thread(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     provider: ChatProvider,
     model: String,
@@ -92,9 +84,8 @@ pub async fn add_thread(
     Ok(thread)
 }
 
-#[tauri::command]
 pub async fn remove_thread(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
 ) -> Result<(), String> {
@@ -129,9 +120,8 @@ pub async fn remove_thread(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn update_thread(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
     title: Option<String>,
@@ -176,9 +166,8 @@ pub async fn update_thread(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn add_thread_with_runtime(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     provider: ChatProvider,
     model: String,
@@ -202,9 +191,8 @@ pub async fn add_thread_with_runtime(
     Ok(thread)
 }
 
-#[tauri::command]
 pub async fn list_provider_models(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     provider: ChatProvider,
     profile_id: Option<Uuid>,
     working_directory: Option<String>,
@@ -239,9 +227,8 @@ pub async fn list_provider_models(
     )
 }
 
-#[tauri::command]
 pub async fn update_profiles(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     profiles: Vec<ProviderProfile>,
 ) -> Result<Vec<ProviderProfile>, String> {
     {
@@ -251,6 +238,30 @@ pub async fn update_profiles(
     }
     state.save().await;
     Ok(state.workspace.lock().await.provider_profiles.clone())
+}
+
+pub async fn update_title_generation_runtime(
+    state: Arc<AppState>,
+    runtime: Option<TitleGenerationRuntime>,
+) -> Result<Option<TitleGenerationRuntime>, String> {
+    let runtime = runtime.map(|mut runtime| {
+        runtime.model = runtime.model.trim().to_string();
+        if runtime.model.is_empty() {
+            runtime.model = "Default".into();
+        }
+        runtime.effort = runtime.effort.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        runtime.speed = runtime.speed.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty() && !value.eq_ignore_ascii_case("normal")).then_some(value)
+        });
+        runtime
+    });
+    state.workspace.lock().await.title_generation_runtime = runtime.clone();
+    state.save().await;
+    Ok(runtime)
 }
 
 /// Display name of the provider that produced the thread's existing transcript,
@@ -311,10 +322,8 @@ fn agent_name_map(agents: &[AgentDefinition]) -> HashMap<Uuid, String> {
     agents.iter().map(|a| (a.id, a.name.clone())).collect()
 }
 
-#[tauri::command]
 pub async fn send_prompt(
-    app: tauri::AppHandle,
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
     prompt: String,
@@ -322,7 +331,8 @@ pub async fn send_prompt(
 ) -> Result<Uuid, String> {
     let attachments = crate::attachments::import_images(&image_paths)?;
     let turn_id = Uuid::new_v4();
-    let request = {
+    let title_message = prompt.clone();
+    let (request, title_job) = {
         let mut workspace = state.workspace.lock().await;
         let folder_path = workspace
             .projects
@@ -331,8 +341,14 @@ pub async fn send_prompt(
             .map(|p| p.folder_path.clone())
             .ok_or("Unknown project")?;
         let profiles = workspace.provider_profiles.clone();
+        let configured_title_runtime = workspace.title_generation_runtime.clone();
         let agent_names = agent_name_map(&workspace.agents);
         let thread = find_thread(&mut workspace, project_id, thread_id).ok_or("Unknown thread")?;
+        let is_first_user_message = !thread
+            .messages
+            .iter()
+            .any(|message| message.role == ChatRole::User);
+        let provisional_title = thread.title.clone();
 
         // Every engine takes `prompt` as plain text, so carrying the transcript
         // here covers all six providers with no adapter changes.
@@ -372,7 +388,7 @@ pub async fn send_prompt(
                 profile.id = instance_id;
                 profile
             });
-        TurnRequest {
+        let request = TurnRequest {
             turn_id,
             thread_id,
             provider_instance_id: instance_id,
@@ -393,7 +409,18 @@ pub async fn send_prompt(
             agent_id: None,
             browser_access: None,
             profile,
-        }
+        };
+        let title_job = is_first_user_message.then(|| crate::title::TitleGenerationJob {
+            expected_title: provisional_title,
+            message: title_message,
+            attachments: request.attachments.clone(),
+            candidates: crate::title::title_generation_candidates(
+                configured_title_runtime.as_ref(),
+                &request,
+                &profiles,
+            ),
+        });
+        (request, title_job)
     };
     state.save().await;
     // Inventory must include this turn before the command returns so a concurrent
@@ -402,14 +429,17 @@ pub async fn send_prompt(
         .runtime
         .track_turn(project_id, thread_id, turn_id, request.provider)
         .await;
-    let state_arc: Arc<AppState> = state.inner().clone();
-    tokio::spawn(state_arc.run_turn(app, project_id, request));
+    let state_arc = state.clone();
+    if let Some(job) = title_job {
+        let title_state = state_arc.clone();
+        tokio::spawn(title_state.run_title_generation(project_id, thread_id, job));
+    }
+    tokio::spawn(state_arc.run_turn(project_id, request));
     Ok(turn_id)
 }
 
-#[tauri::command]
 pub async fn update_agents(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     agents: Vec<AgentDefinition>,
 ) -> Result<Vec<AgentDefinition>, String> {
     {
@@ -426,7 +456,6 @@ pub async fn update_agents(
 /// stored absolute path. The caller persists it on the agent via
 /// `update_agents`; files no longer referenced are pruned there. Each import
 /// gets a fresh file name so a replaced image never fights the webview cache.
-#[tauri::command]
 pub async fn import_agent_image(agent_id: Uuid, source_path: String) -> Result<String, String> {
     let source = std::path::PathBuf::from(&source_path);
     let extension = source
@@ -605,7 +634,6 @@ fn resolve_agent_chain(
 /// earlier agents' replies; a cancelled or failed turn aborts the rest.
 async fn run_agent_chain(
     state: Arc<AppState>,
-    app: tauri::AppHandle,
     project_id: Uuid,
     thread_id: Uuid,
     first: TurnRequest,
@@ -614,7 +642,7 @@ async fn run_agent_chain(
     attachments: Vec<ChatImageAttachment>,
     folder_path: String,
 ) {
-    let mut terminal = state.clone().run_turn(app.clone(), project_id, first).await;
+    let mut terminal = state.clone().run_turn(project_id, first).await;
     for agent in rest {
         if terminal != Some(ProviderTurnTerminalState::Completed) {
             break;
@@ -644,10 +672,7 @@ async fn run_agent_chain(
             .runtime
             .track_turn(project_id, thread_id, turn_id, request.provider)
             .await;
-        terminal = state
-            .clone()
-            .run_turn(app.clone(), project_id, request)
-            .await;
+        terminal = state.clone().run_turn(project_id, request).await;
     }
 }
 
@@ -655,10 +680,8 @@ async fn run_agent_chain(
 /// run the first agent's turn; additional mentions respond in sequence. The
 /// mention message is recorded in the parent thread (it anchors the branch)
 /// and as the side thread's opening user message.
-#[tauri::command]
 pub async fn start_side_thread(
-    app: tauri::AppHandle,
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     parent_thread_id: Uuid,
     agent_ids: Vec<Uuid>,
@@ -742,10 +765,9 @@ pub async fn start_side_thread(
         .runtime
         .track_turn(project_id, thread_snapshot.id, turn_id, request.provider)
         .await;
-    let state_arc: Arc<AppState> = state.inner().clone();
+    let state_arc = state.clone();
     tokio::spawn(run_agent_chain(
         state_arc,
-        app,
         project_id,
         thread_snapshot.id,
         request,
@@ -760,10 +782,8 @@ pub async fn start_side_thread(
 /// Send a follow-up in an existing side thread, addressed to `agent_ids`
 /// (the mentioned agents in order, or the thread's current agent when
 /// unmentioned). Multiple agents respond in sequence.
-#[tauri::command]
 pub async fn send_agent_prompt(
-    app: tauri::AppHandle,
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
     agent_ids: Vec<Uuid>,
@@ -804,10 +824,9 @@ pub async fn send_agent_prompt(
         .runtime
         .track_turn(project_id, thread_id, turn_id, request.provider)
         .await;
-    let state_arc: Arc<AppState> = state.inner().clone();
+    let state_arc = state.clone();
     tokio::spawn(run_agent_chain(
         state_arc,
-        app,
         project_id,
         thread_id,
         request,
@@ -819,15 +838,13 @@ pub async fn send_agent_prompt(
     Ok(turn_id)
 }
 
-#[tauri::command]
-pub async fn cancel_turn(state: Shared<'_>, turn_id: Uuid) -> Result<(), String> {
+pub async fn cancel_turn(state: Arc<AppState>, turn_id: Uuid) -> Result<(), String> {
     state.runtime.cancel(turn_id).await;
     Ok(())
 }
 
-#[tauri::command]
 pub async fn resolve_request(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
     request_id: Uuid,
@@ -883,9 +900,8 @@ pub struct ProviderHealth {
     pub message: String,
 }
 
-#[tauri::command]
 pub async fn provider_health(
-    state: Shared<'_>,
+    state: Arc<AppState>,
     profile_id: Uuid,
 ) -> Result<ProviderHealth, String> {
     let profile = {

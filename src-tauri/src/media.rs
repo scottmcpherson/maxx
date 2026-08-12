@@ -4,7 +4,6 @@ use maxx_core::persist::WorkspaceDocument;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -16,10 +15,8 @@ pub struct ResolvedMediaSource {
     pub display_name: String,
 }
 
-#[tauri::command]
 pub async fn resolve_media_source(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
+    state: Arc<AppState>,
     project_id: Uuid,
     thread_id: Uuid,
     destination: String,
@@ -35,9 +32,6 @@ pub async fn resolve_media_source(
         )?
     };
 
-    app.asset_protocol_scope()
-        .allow_file(&resolved.path)
-        .map_err(|error| format!("Could not authorize media: {error}"))?;
     Ok(resolved)
 }
 

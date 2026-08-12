@@ -71,6 +71,32 @@ describe("buildTimeline", () => {
     expect(card.event.payload.state).toBe("completed");
   });
 
+  it("keeps one card when a sparse update supplies the item kind later", () => {
+    const items = buildTimeline([
+      event({
+        kind: EventKind.tool,
+        itemID: "tool-1",
+        payload: { title: "Run browser action", state: "pending" },
+      }),
+      event({
+        kind: EventKind.command,
+        itemID: "tool-1",
+        payload: {
+          title: "Run browser action",
+          command: '{"ref":"button-1"}',
+          output: "Clicked button-1",
+          state: "completed",
+        },
+      }),
+    ]);
+    const cards = items.filter((item) => item.type === "card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      kind: EventKind.command,
+      event: { payload: { output: "Clicked button-1", state: "completed" } },
+    });
+  });
+
   it("keeps interactions addressable by requestID and renders exactly one terminal", () => {
     const items = buildTimeline([
       event({

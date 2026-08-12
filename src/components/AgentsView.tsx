@@ -1,4 +1,3 @@
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { AgentDefinition, providerDisplayName } from "../contract/types";
 import { ipc } from "../ipc";
@@ -159,12 +158,8 @@ export function AgentsView() {
   // path only persists with the agent on save (orphans are pruned then).
   const pickImage = async () => {
     if (!draft) return;
-    const picked = await openFileDialog({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
-    });
-    if (typeof picked !== "string") return;
+    const picked = await ipc.openAgentImageDialog();
+    if (!picked) return;
     try {
       const stored = await ipc.importAgentImage(draft.id, picked);
       setDraft((current) => (current ? { ...current, imagePath: stored } : current));

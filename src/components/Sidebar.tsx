@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ipc } from "../ipc";
 import { projectName } from "../contract/types";
 import type { ChatThread } from "../contract/types";
 import {
@@ -161,8 +161,8 @@ export function Sidebar() {
   }, [threadMenu]);
 
   const pickFolder = async () => {
-    const folder = await open({ directory: true, multiple: false, title: "Open project folder" });
-    if (typeof folder === "string" && folder) await addProject(folder);
+    const folder = await ipc.openProjectDialog();
+    if (folder) await addProject(folder);
   };
 
   const toggleProject = (projectID: string) => {

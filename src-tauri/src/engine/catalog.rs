@@ -924,15 +924,31 @@ pub fn parse_hermes_session_models(
     let models = result
         .get("models")
         .ok_or("Hermes session/new reported no models")?;
-    let current = models.get("currentModelId").and_then(|v| v.as_str());
     let available = models
         .get("availableModels")
         .and_then(|v| v.as_array())
         .ok_or("Hermes session/new missing models.availableModels")?;
+    let routable_custom_aliases: std::collections::HashSet<&str> = available
+        .iter()
+        .filter_map(|entry| entry.get("modelId").and_then(|v| v.as_str()))
+        .filter_map(|model| model.strip_prefix("custom:"))
+        .collect();
+    let reported_current = models.get("currentModelId").and_then(|v| v.as_str());
+    let current = reported_current
+        .and_then(|model| {
+            available
+                .iter()
+                .filter_map(|entry| entry.get("modelId").and_then(|v| v.as_str()))
+                .find(|candidate| candidate.strip_prefix("custom:") == Some(model))
+        })
+        .or(reported_current);
     let parsed: Vec<ProviderModelOption> = available
         .iter()
         .filter_map(|entry| {
             let model = entry.get("modelId").and_then(|v| v.as_str())?.to_string();
+            if routable_custom_aliases.contains(model.as_str()) {
+                return None;
+            }
             let display_name = entry
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -1130,6 +1146,34 @@ mod tests {
         assert_eq!(models[0].display_name, "grok-build-0.1");
         assert!(!models[0].is_default);
         assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn hermes_parser_prefers_routable_named_custom_provider_choice() {
+        let result = serde_json::json!({
+            "sessionId": "abc",
+            "models": {
+                "currentModelId": "xai-oauth:grok-4.5",
+                "availableModels": [
+                    {
+                        "modelId": "ollama-spark:qwen3.6-35b-a3b:bf16",
+                        "name": "Ollama on DGX Spark · qwen3.6-35b-a3b:bf16",
+                        "description": "Provider: Ollama on DGX Spark"
+                    },
+                    {
+                        "modelId": "custom:ollama-spark:qwen3.6-35b-a3b:bf16",
+                        "name": "qwen3.6-35b-a3b:bf16",
+                        "description": "Provider: Ollama on DGX Spark"
+                    }
+                ]
+            }
+        });
+
+        let models = parse_hermes_session_models(&result).unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "custom:ollama-spark:qwen3.6-35b-a3b:bf16");
+        assert_eq!(models[0].display_name, "qwen3.6-35b-a3b:bf16");
     }
 
     #[test]

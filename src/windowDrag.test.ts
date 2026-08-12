@@ -2,12 +2,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const windowCommands = vi.hoisted(() => ({
-  startDragging: vi.fn(),
-  toggleMaximize: vi.fn(),
-}));
-
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => windowCommands,
+  invoke: vi.fn(),
 }));
 
 import { beginWindowDrag } from "./windowDrag";
@@ -26,30 +21,28 @@ function mouseEvent(
 describe("beginWindowDrag", () => {
   beforeAll(() => {
     vi.stubGlobal("Element", class Element {});
+    vi.stubGlobal("window", { maxx: { invoke: windowCommands.invoke } });
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("starts dragging on a primary-button press", () => {
+  it("leaves primary-button dragging to the Electron drag region", () => {
     beginWindowDrag(mouseEvent());
 
-    expect(windowCommands.startDragging).toHaveBeenCalledOnce();
-    expect(windowCommands.toggleMaximize).not.toHaveBeenCalled();
+    expect(windowCommands.invoke).not.toHaveBeenCalled();
   });
 
   it("toggles the maximized state on a double-click", () => {
     beginWindowDrag(mouseEvent({ detail: 2 }));
 
-    expect(windowCommands.toggleMaximize).toHaveBeenCalledOnce();
-    expect(windowCommands.startDragging).not.toHaveBeenCalled();
+    expect(windowCommands.invoke).toHaveBeenCalledWith("window_toggle_maximize");
   });
 
   it("ignores non-primary mouse buttons", () => {
     beginWindowDrag(mouseEvent({ button: 1 }));
 
-    expect(windowCommands.startDragging).not.toHaveBeenCalled();
-    expect(windowCommands.toggleMaximize).not.toHaveBeenCalled();
+    expect(windowCommands.invoke).not.toHaveBeenCalled();
   });
 });

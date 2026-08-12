@@ -394,6 +394,138 @@ fn grok_acp_fixture_captures_session_streaming_permission_and_terminal() {
 }
 
 #[test]
+fn hermes_acp_content_updates_preserve_tool_identity_and_expandable_body() {
+    let mut state = NormalizerState::default();
+    let drafts = run_fixture(
+        "hermes/acp-content-tool-complete",
+        ChatProvider::Hermes,
+        &mut state,
+    );
+
+    let tools = drafts
+        .iter()
+        .filter_map(|draft| match draft {
+            ProviderEventDraft::Payload {
+                kind,
+                item_id,
+                payload,
+                ..
+            } if kind.is(RuntimeEventKind::TOOL) => Some((item_id, payload)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].0, tools[1].0);
+    let started = tools[0].1.tool.as_ref().expect("started tool");
+    assert_eq!(started.name, "navigate: https://example.com");
+    assert_eq!(started.state, RuntimeItemState::Pending);
+    assert!(started.input.as_deref().unwrap().contains("example.com"));
+    let completed = tools[1].1.tool.as_ref().expect("completed tool");
+    assert_eq!(completed.name, "navigate: https://example.com");
+    assert_eq!(completed.state, RuntimeItemState::Completed);
+    assert!(completed.input.as_deref().unwrap().contains("example.com"));
+    assert_eq!(completed.output.as_deref(), Some("Example Domain"));
+
+    let commands = drafts
+        .iter()
+        .filter_map(|draft| match draft {
+            ProviderEventDraft::Payload {
+                kind,
+                item_id,
+                payload,
+                ..
+            } if kind.is(RuntimeEventKind::COMMAND) => Some((item_id, payload)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].0, commands[1].0);
+    assert_eq!(commands[0].1.title.as_deref(), Some("browser_click"));
+    assert_eq!(commands[0].1.state, Some(RuntimeItemState::Pending));
+    assert!(commands[0]
+        .1
+        .command
+        .as_deref()
+        .unwrap()
+        .contains("button-1"));
+    assert_eq!(commands[1].1.title.as_deref(), Some("browser_click"));
+    assert_eq!(commands[1].1.state, Some(RuntimeItemState::Completed));
+    assert!(commands[1]
+        .1
+        .command
+        .as_deref()
+        .unwrap()
+        .contains("button-1"));
+    assert_eq!(commands[1].1.output.as_deref(), Some("Clicked button-1"));
+}
+
+#[test]
+fn hermes_acp_screenshot_keeps_artifact_reference_without_inline_pixels() {
+    let artifact_id = Uuid::new_v4();
+    let tab_id = Uuid::new_v4();
+    let result = serde_json::json!({
+        "artifacts": [{
+            "id": artifact_id,
+            "uri": format!("maxx-browser://artifact/{artifact_id}"),
+            "mimeType": "image/png",
+            "byteLength": 24576,
+            "title": "Browser screenshot"
+        }],
+        "tabId": tab_id,
+        "value": {"title": "Browser screenshot"}
+    })
+    .to_string();
+    let start = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": "hermes-session", "update": {
+            "sessionUpdate": "tool_call", "toolCallId": "screenshot-1",
+            "title": "browser_screenshot", "kind": "other",
+            "content": [{"type": "content", "content": {"type": "text", "text": "{}"}}]
+        }}
+    });
+    let completed = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": "hermes-session", "update": {
+            "sessionUpdate": "tool_call_update", "toolCallId": "screenshot-1",
+            "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": result}},
+                {"type": "content", "content": {"type": "image", "data": "very-large-base64-pixels", "mimeType": "image/png"}}
+            ]
+        }}
+    });
+    let mut state = NormalizerState::default();
+    normalize(
+        &serde_json::to_vec(&start).expect("start"),
+        ChatProvider::Hermes,
+        &mut state,
+    )
+    .expect("normalized start");
+    let drafts = normalize(
+        &serde_json::to_vec(&completed).expect("completed"),
+        ChatProvider::Hermes,
+        &mut state,
+    )
+    .expect("normalized completion");
+    let ProviderEventDraft::Payload { payload, .. } = &drafts[0] else {
+        panic!("expected tool payload");
+    };
+    let artifacts = payload.artifacts.as_ref().expect("artifact reference");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, artifact_id);
+    assert_eq!(artifacts[0].byte_length, 24576);
+    let output = payload
+        .tool
+        .as_ref()
+        .and_then(|tool| tool.output.as_deref())
+        .expect("tool output");
+    assert!(output.contains("maxx-browser://artifact/"));
+    assert!(!output.contains("very-large-base64-pixels"));
+}
+
+#[test]
 fn grok_acp_prompt_response_reports_context_not_cumulative_billing() {
     let mut state = NormalizerState::default();
     let drafts = run_fixture(
@@ -613,6 +745,44 @@ fn opencode_does_not_repeat_aggregate_after_streaming_deltas() {
     )
     .unwrap();
     assert_eq!(assistant_text(&aggregate_only), "Complete only");
+}
+
+#[test]
+fn opencode_suppresses_empty_session_diffs_and_excludes_session_metadata() {
+    let mut state = NormalizerState::default();
+    let empty = normalize(
+        br#"{"type":"session.diff","properties":{"sessionID":"opencode-session-1","diff":[]}}"#,
+        ChatProvider::Opencode,
+        &mut state,
+    )
+    .unwrap();
+    assert!(
+        empty.is_empty(),
+        "empty session diffs are bookkeeping noise"
+    );
+
+    let populated = normalize(
+        br#"{"type":"session.diff","properties":{"sessionID":"opencode-session-1","diff":[{"path":"src/main.rs","type":"update","diff":"@@ -1 +1 @@"}]}}"#,
+        ChatProvider::Opencode,
+        &mut state,
+    )
+    .unwrap();
+    let [ProviderEventDraft::Payload { kind, payload, .. }] = populated.as_slice() else {
+        panic!("expected one diff payload");
+    };
+    assert!(kind.is(RuntimeEventKind::DIFF));
+    assert_eq!(
+        payload
+            .files
+            .as_ref()
+            .and_then(|files| files.first())
+            .map(|file| file.path.as_str()),
+        Some("src/main.rs")
+    );
+    let diff = payload.diff.as_deref().expect("renderable diff");
+    assert!(diff.contains("@@ -1 +1 @@"));
+    assert!(!diff.contains("sessionID"));
+    assert!(!diff.contains("opencode-session-1"));
 }
 
 #[test]

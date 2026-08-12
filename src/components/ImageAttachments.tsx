@@ -1,18 +1,13 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useState } from "react";
-import { ipc } from "../ipc";
+import { ipc, mediaURL } from "../ipc";
 import { Icons } from "./Icons";
-
-const IMAGE_FILTER = [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }];
 
 export function useImageAttachments() {
   const [paths, setPaths] = useState<string[]>([]);
 
   const choose = useCallback(async () => {
-    const selected = await open({ multiple: true, directory: false, filters: IMAGE_FILTER });
-    if (!selected) return;
-    const additions = Array.isArray(selected) ? selected : [selected];
+    const additions = await ipc.openImagesDialog();
+    if (additions.length === 0) return;
     await ipc.authorizeImagePreviews(additions);
     setPaths((current) => [...new Set([...current, ...additions])]);
   }, []);
@@ -54,7 +49,7 @@ export function PendingImageStrip({ paths, onRemove }: { paths: string[]; onRemo
         const name = path.split(/[\\/]/).pop() || "Image";
         return (
           <div className="pending-image" key={path} title={name}>
-            <img src={convertFileSrc(path)} alt={name} />
+            <img src={mediaURL(path)} alt={name} />
             <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(path)}>
               <Icons.close size={12} />
             </button>

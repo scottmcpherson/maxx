@@ -31,6 +31,7 @@ export function SettingsPanel() {
   const workspace = useAppStore((state) => state.workspace);
   const selectedProjectID = useAppStore((state) => state.selectedProjectID);
   const saveProfiles = useAppStore((state) => state.saveProfiles);
+  const saveTitleGenerationRuntime = useAppStore((state) => state.saveTitleGenerationRuntime);
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
   const keyboardShortcuts = useAppStore((state) => state.keyboardShortcuts);
   const setKeyboardShortcut = useAppStore((state) => state.setKeyboardShortcut);
@@ -109,6 +110,8 @@ export function SettingsPanel() {
   const modelCatalogWorkingDirectory = workspace?.projects.find(
     (project) => project.id === selectedProjectID,
   )?.folderPath ?? workspace?.projects[0]?.folderPath;
+  const titleGenerationRuntime = workspace?.titleGenerationRuntime ?? null;
+  const titleRuntimePickerValue = titleGenerationRuntime ?? defaultRuntime;
 
   const sectionBody = () => {
     switch (section) {
@@ -124,11 +127,11 @@ export function SettingsPanel() {
 
             <section
               className="settings-card default-runtime-settings"
-              aria-label="Default new chat runtime"
+              aria-label="Default model"
             >
               <div className="settings-row">
                 <span className="settings-row-copy">
-                  <strong>Default harness</strong>
+                  <strong>Default model</strong>
                   <small>
                     Choose the provider, model, and effort used when you start a new chat.
                     You can still change it in the composer before sending.
@@ -145,6 +148,32 @@ export function SettingsPanel() {
                     placement="bottom"
                     triggerShowsProvider
                     onChange={setDefaultRuntime}
+                  />
+                </div>
+              </div>
+              <div className="settings-row">
+                <span className="settings-row-copy">
+                  <strong>Title generation</strong>
+                  <small>
+                    Choose a global harness for short chat titles. If it is unset or unavailable,
+                    Maxx uses the harness and model selected for the chat.
+                  </small>
+                </span>
+                <div className="runtime-picker-field settings-runtime-picker">
+                  <RuntimePicker
+                    provider={titleRuntimePickerValue.provider}
+                    model={titleRuntimePickerValue.model}
+                    effort={titleRuntimePickerValue.effort}
+                    speed={titleRuntimePickerValue.speed}
+                    profiles={workspace?.providerProfiles ?? []}
+                    workingDirectory={modelCatalogWorkingDirectory}
+                    placement="bottom"
+                    triggerShowsProvider
+                    inherited={!titleGenerationRuntime}
+                    inheritLabel="Use chat harness"
+                    inheritDescription="Use the provider and model selected for each chat."
+                    onUseInherited={() => void saveTitleGenerationRuntime(null)}
+                    onChange={(next) => void saveTitleGenerationRuntime(next)}
                   />
                 </div>
               </div>

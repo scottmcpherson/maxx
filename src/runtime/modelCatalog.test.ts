@@ -3,6 +3,7 @@ import {
   MAX_RECENTS,
   encodeLaunchHints,
   filterRuntimeCatalog,
+  filterUnavailableProvidersForQuery,
   formatTriggerText,
   loadRecents,
   normalizeEffort,
@@ -242,6 +243,13 @@ describe("filterRuntimeCatalog", () => {
       row.provider === "claude" ? { ...row, enabled: false } : row,
     );
     expect(filterRuntimeCatalog(disabledCatalog, "claude", "").models).toEqual([]);
+  });
+
+  it("reports unavailable catalogs only when the query names that provider", () => {
+    expect(filterUnavailableProvidersForQuery(catalog, ["cursor"], "qwen")).toEqual([]);
+    expect(filterUnavailableProvidersForQuery(catalog, ["cursor"], "cursor")).toEqual([
+      expect.objectContaining({ provider: "cursor", label: "Cursor" }),
+    ]);
   });
 });
 

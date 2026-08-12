@@ -1,6 +1,5 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-import { ipc } from "../ipc";
+import { ipc, mediaURL } from "../ipc";
 import { MessageMedia as MessageMediaValue, MessageMediaKind } from "../media";
 
 interface RenderSource {
@@ -37,7 +36,7 @@ export function MessageMedia({
       .then((resolved) => {
         if (cancelled) return;
         setSource({
-          url: convertFileSrc(resolved.path),
+          url: mediaURL(resolved.path),
           kind: resolved.kind,
           displayName: resolved.displayName,
         });
