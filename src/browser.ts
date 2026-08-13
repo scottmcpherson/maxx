@@ -115,6 +115,25 @@ export interface BrowserTabSummary {
   crashed?: boolean;
 }
 
+export type BrowserTabDropEdge = "before" | "after";
+
+export function reorderBrowserTabs(
+  tabs: BrowserTabSummary[],
+  draggedTabId: string,
+  targetTabId: string,
+  edge: BrowserTabDropEdge,
+): BrowserTabSummary[] {
+  if (draggedTabId === targetTabId) return tabs;
+  const draggedIndex = tabs.findIndex((tab) => tab.id === draggedTabId);
+  if (draggedIndex < 0 || !tabs.some((tab) => tab.id === targetTabId)) return tabs;
+
+  const next = tabs.slice();
+  const [dragged] = next.splice(draggedIndex, 1);
+  const targetIndex = next.findIndex((tab) => tab.id === targetTabId);
+  next.splice(edge === "before" ? targetIndex : targetIndex + 1, 0, dragged);
+  return next;
+}
+
 export interface BrowserUiReveal {
   threadId: string;
   tabId: string;

@@ -132,6 +132,8 @@ export const ipc = {
     invoke<string>("browser_ui_open_tab", { threadId, url }),
   browserUiSelectTab: (tabId: string) => invoke<void>("browser_ui_select_tab", { tabId }),
   browserUiCloseTab: (tabId: string) => invoke<void>("browser_ui_close_tab", { tabId }),
+  browserUiReorderTabs: (threadId: string, tabIds: string[]) =>
+    invoke<void>("browser_ui_reorder_tabs", { threadId, tabIds }),
   browserUiNavigate: (tabId: string, url: string) =>
     invoke<void>("browser_ui_navigate", { tabId, url }),
   browserUiBack: (tabId: string) => invoke<void>("browser_ui_back", { tabId }),

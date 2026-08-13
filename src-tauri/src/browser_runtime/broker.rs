@@ -5,7 +5,7 @@ use super::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -216,6 +216,42 @@ impl BrowserBroker {
     pub async fn tab_summaries(&self) -> Vec<BrowserTabSummary> {
         let state = self.state.lock().await;
         ordered_summaries(&state)
+    }
+
+    pub async fn reorder_tabs(&self, tab_ids: &[BrowserTabId]) -> Result<(), BrowserRuntimeError> {
+        let mut state = self.state.lock().await;
+        let unique = tab_ids.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != tab_ids.len() {
+            return Err(BrowserRuntimeError::new(
+                "browser.invalid-tab-order",
+                "browser tab order contains a duplicate tab",
+            ));
+        }
+        if let Some(tab_id) = tab_ids
+            .iter()
+            .find(|tab_id| !state.tabs.contains_key(tab_id))
+        {
+            return Err(BrowserRuntimeError::new(
+                "browser.tab-not-found",
+                format!("browser tab {tab_id} does not exist"),
+            ));
+        }
+
+        // Reuse the subset's existing order slots so tabs belonging to other
+        // threads retain their relative positions in the global broker order.
+        let mut orders = tab_ids
+            .iter()
+            .map(|tab_id| state.tabs[tab_id].order)
+            .collect::<Vec<_>>();
+        orders.sort_unstable();
+        for (tab_id, order) in tab_ids.iter().zip(orders) {
+            state
+                .tabs
+                .get_mut(tab_id)
+                .expect("tab order validated")
+                .order = order;
+        }
+        Ok(())
     }
 
     pub async fn timeline(&self) -> Vec<BrowserActionRecord> {
@@ -892,6 +928,56 @@ mod tests {
                 .find(|tab| tab.id == second)
                 .expect("second")
                 .selected
+        );
+    }
+
+    #[tokio::test]
+    async fn reorders_tabs_without_moving_other_tab_order_slots() {
+        let broker = BrowserBroker::new(Arc::new(FakeBrowserEngine::default()), artifacts());
+        let first = Uuid::new_v4();
+        let unrelated = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        insert_test_tab(&broker, first).await;
+        insert_test_tab(&broker, unrelated).await;
+        insert_test_tab(&broker, second).await;
+
+        broker
+            .reorder_tabs(&[second, first])
+            .await
+            .expect("reorder");
+
+        assert_eq!(
+            broker
+                .tab_summaries()
+                .await
+                .into_iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            vec![second, unrelated, first],
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_tab_orders_without_mutating_state() {
+        let broker = BrowserBroker::new(Arc::new(FakeBrowserEngine::default()), artifacts());
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        insert_test_tab(&broker, first).await;
+        insert_test_tab(&broker, second).await;
+
+        let error = broker
+            .reorder_tabs(&[first, first])
+            .await
+            .expect_err("duplicate order");
+        assert_eq!(error.code, "browser.invalid-tab-order");
+        assert_eq!(
+            broker
+                .tab_summaries()
+                .await
+                .into_iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            vec![first, second],
         );
     }
 

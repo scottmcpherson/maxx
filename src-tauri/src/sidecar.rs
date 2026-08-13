@@ -11,6 +11,7 @@ use maxx_core::contract::{ChatProvider, RuntimeInteractionDecision};
 use maxx_core::persist::{AgentDefinition, ProviderProfile, TitleGenerationRuntime};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -270,6 +271,24 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 },
             )
             .await
+        }
+        "browser_ui_reorder_tabs" => {
+            let thread_id: Uuid = required(&params, "threadId")?;
+            let tab_ids: Vec<Uuid> = required(&params, "tabIds")?;
+            let assigned = state.browser.sessions.tabs_for_thread(thread_id);
+            let requested = tab_ids.iter().copied().collect::<HashSet<_>>();
+            if requested.len() != tab_ids.len() || requested != assigned {
+                return Err(
+                    "browser tab order must contain every tab in the thread exactly once".into(),
+                );
+            }
+            state
+                .browser
+                .broker
+                .reorder_tabs(&tab_ids)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Value::Null)
         }
         "browser_ui_navigate" => {
             browser_operation(

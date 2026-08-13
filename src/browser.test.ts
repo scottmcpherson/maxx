@@ -9,6 +9,7 @@ import {
   maximumBrowserWidth,
   normalizeAddressInput,
   persistBrowserWidth,
+  reorderBrowserTabs,
   shouldShowBrowserContent,
 } from "./browser";
 
@@ -123,5 +124,32 @@ describe("width", () => {
     expect(loadBrowserWidth(storage)).toBe(DEFAULT_BROWSER_WIDTH);
     persistBrowserWidth(430, storage);
     expect(loadBrowserWidth(storage)).toBe(430);
+  });
+});
+
+describe("reorderBrowserTabs", () => {
+  const tab = (id: string) => ({
+    id,
+    url: "about:blank",
+    title: id,
+    loading: false,
+    selected: id === "b",
+    controlEpoch: 0,
+  });
+  const tabs = [tab("a"), tab("b"), tab("c"), tab("d")];
+
+  it("moves a tab before the hovered tab", () => {
+    expect(reorderBrowserTabs(tabs, "d", "b", "before").map(({ id }) => id))
+      .toEqual(["a", "d", "b", "c"]);
+  });
+
+  it("moves a tab after the hovered tab", () => {
+    expect(reorderBrowserTabs(tabs, "a", "c", "after").map(({ id }) => id))
+      .toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("keeps the current order for an invalid or self-targeted drag", () => {
+    expect(reorderBrowserTabs(tabs, "b", "b", "before")).toBe(tabs);
+    expect(reorderBrowserTabs(tabs, "missing", "b", "before")).toBe(tabs);
   });
 });

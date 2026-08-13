@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   DEFAULT_BROWSER_TITLE,
   normalizeAddressInput,
+  reorderBrowserTabs,
   type BrowserAnnotation,
   type BrowserNativeState,
+  type BrowserTabDropEdge,
   type BrowserTabSummary,
   type ChromeImportStatus,
 } from "../browser";
@@ -33,7 +35,6 @@ export function BrowserPane({
   showContent: boolean;
   animating: boolean;
 }) {
-  const setBrowserOpen = useAppStore((state) => state.setBrowserOpen);
   const pendingBrowserReveal = useAppStore((state) => state.pendingBrowserReveal);
   const consumeBrowserReveal = useAppStore((state) => state.consumeBrowserReveal);
   const [tabs, setTabs] = useState<BrowserTabSummary[]>([]);
@@ -51,10 +52,47 @@ export function BrowserPane({
   const pendingNavigationRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const tabStripRef = useRef<HTMLDivElement | null>(null);
+  const tabRefs = useRef(new Map<string, HTMLDivElement>());
+  const tabPointerDragRef = useRef<{ tabID: string; pointerID: number; startX: number; dragging: boolean } | null>(null);
+  const dropTargetRef = useRef<{ tabID: string; edge: BrowserTabDropEdge } | null>(null);
+  const suppressTabClickRef = useRef(false);
+  const [draggedTabID, setDraggedTabID] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ tabID: string; edge: BrowserTabDropEdge } | null>(null);
+  const [tabOverflow, setTabOverflow] = useState({ left: false, right: false });
+
+  const updateTabOverflow = useCallback(() => {
+    const strip = tabStripRef.current;
+    if (!strip) return;
+    const left = strip.scrollLeft > 1;
+    const right = strip.scrollLeft < strip.scrollWidth - strip.clientWidth - 1;
+    setTabOverflow((current) => current.left === left && current.right === right ? current : { left, right });
+  }, []);
 
   useEffect(() => {
     selectedRef.current = selectedTabID;
   }, [selectedTabID]);
+
+  useEffect(() => {
+    if (!selectedTabID) return;
+    const frame = requestAnimationFrame(() => {
+      tabRefs.current.get(selectedTabID)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      updateTabOverflow();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selectedTabID, tabs.length, updateTabOverflow]);
+
+  useEffect(() => {
+    const strip = tabStripRef.current;
+    if (!strip) return;
+    const observer = new ResizeObserver(updateTabOverflow);
+    observer.observe(strip);
+    const frame = requestAnimationFrame(updateTabOverflow);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [tabs.length, updateTabOverflow]);
 
   useEffect(() => {
     pendingNavigationRef.current = pendingNavigation;
@@ -198,6 +236,72 @@ export function BrowserPane({
     }
   };
 
+  const setTabDropTarget = (target: { tabID: string; edge: BrowserTabDropEdge } | null) => {
+    dropTargetRef.current = target;
+    setDropTarget(target);
+  };
+
+  const persistTabOrder = async (
+    draggedTabID: string,
+    targetTabID: string,
+    edge: BrowserTabDropEdge,
+  ) => {
+    const next = reorderBrowserTabs(tabs, draggedTabID, targetTabID, edge);
+    if (next === tabs) return;
+    setTabs(next);
+    setSurfaceError(null);
+    try {
+      await ipc.browserUiReorderTabs(threadID, next.map((tab) => tab.id));
+    } catch (error) {
+      setSurfaceError(String(error));
+      await refreshTabs().catch(() => undefined);
+    }
+  };
+
+  const moveTabPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = tabPointerDragRef.current;
+    if (!drag || drag.pointerID !== event.pointerId) return;
+    if (!drag.dragging) {
+      if (Math.abs(event.clientX - drag.startX) < 4) return;
+      drag.dragging = true;
+      setDraggedTabID(drag.tabID);
+    }
+
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".browser-tab");
+    const targetTabID = target?.dataset.tabId;
+    if (!target || !targetTabID || targetTabID === drag.tabID) {
+      setTabDropTarget(null);
+    } else {
+      const bounds = target.getBoundingClientRect();
+      setTabDropTarget({
+        tabID: targetTabID,
+        edge: event.clientX < bounds.left + bounds.width / 2 ? "before" : "after",
+      });
+    }
+
+    const strip = tabStripRef.current;
+    if (!strip) return;
+    const stripBounds = strip.getBoundingClientRect();
+    if (event.clientX < stripBounds.left + 36) strip.scrollLeft -= 18;
+    else if (event.clientX > stripBounds.right - 36) strip.scrollLeft += 18;
+  };
+
+  const endTabPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = tabPointerDragRef.current;
+    if (!drag || drag.pointerID !== event.pointerId) return;
+    tabPointerDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const target = dropTargetRef.current;
+    if (drag.dragging) {
+      suppressTabClickRef.current = true;
+      if (target) void persistTabOrder(drag.tabID, target.tabID, target.edge);
+    }
+    setDraggedTabID(null);
+    setTabDropTarget(null);
+  };
+
   const navigate = async (url: string) => {
     const tabID = selectedRef.current;
     if (!tabID) return;
@@ -245,27 +349,69 @@ export function BrowserPane({
   return (
     <aside className={`browser-pane${showContent ? "" : " is-obscured"}`} aria-label="Browser">
       <div className="browser-tabbar" onMouseDown={beginWindowDrag}>
-        <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
-          {tabs.map((tab) => (
-            <button key={tab.id} type="button" role="tab" aria-selected={tab.id === selectedTabID}
-              className={`browser-tab${tab.id === selectedTabID ? " is-selected" : ""}`}
-              title={tab.title || tab.url || DEFAULT_BROWSER_TITLE} onClick={() => void selectTab(tab.id)}>
-              <Icons.globe size={12} />
-              <span className="browser-tab-title">{tab.title || DEFAULT_BROWSER_TITLE}</span>
-              {tab.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
-              <span className="browser-tab-close" role="button" aria-label={`Close ${tab.title || "browser tab"}`}
-                onClick={(event) => { event.stopPropagation(); void closeTab(tab.id); }}>
-                <Icons.close size={9} />
-              </span>
-            </button>
-          ))}
+        <div className={`browser-tabs-viewport${tabOverflow.left ? " has-overflow-left" : ""}${tabOverflow.right ? " has-overflow-right" : ""}`}>
+          <div ref={tabStripRef} className="browser-tabs" role="tablist" aria-label="Browser tabs"
+            onScroll={updateTabOverflow}
+            onWheel={(event) => {
+              if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
+              if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+              event.preventDefault();
+              event.currentTarget.scrollLeft += event.deltaY;
+            }}>
+            {tabs.map((tab) => (
+              <div key={tab.id} ref={(element) => {
+                if (element) tabRefs.current.set(tab.id, element);
+                else tabRefs.current.delete(tab.id);
+              }} role="tab" tabIndex={tab.id === selectedTabID ? 0 : -1} aria-selected={tab.id === selectedTabID}
+                data-tab-id={tab.id}
+                className={`browser-tab${tab.id === selectedTabID ? " is-selected" : ""}${draggedTabID === tab.id ? " is-dragging" : ""}${dropTarget?.tabID === tab.id ? ` drop-${dropTarget.edge}` : ""}`}
+                title={tab.title || tab.url || DEFAULT_BROWSER_TITLE}
+                onClick={() => {
+                  if (suppressTabClickRef.current) {
+                    suppressTabClickRef.current = false;
+                    return;
+                  }
+                  void selectTab(tab.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  void selectTab(tab.id);
+                }}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  tabPointerDragRef.current = {
+                    tabID: tab.id,
+                    pointerID: event.pointerId,
+                    startX: event.clientX,
+                    dragging: false,
+                  };
+                }}
+                onPointerMove={moveTabPointer}
+                onPointerUp={endTabPointer}
+                onPointerCancel={(event) => {
+                  const drag = tabPointerDragRef.current;
+                  if (!drag || drag.pointerID !== event.pointerId) return;
+                  tabPointerDragRef.current = null;
+                  setDraggedTabID(null);
+                  setTabDropTarget(null);
+                }}>
+                <Icons.globe size={12} />
+                <span className="browser-tab-title">{tab.title || DEFAULT_BROWSER_TITLE}</span>
+                {tab.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
+                <button className="browser-tab-close" type="button" title="Close tab"
+                  aria-label={`Close ${tab.title || "browser tab"}`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => { event.stopPropagation(); void closeTab(tab.id); }}>
+                  <Icons.close size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
-        <button className="icon-button" type="button" title="New tab" aria-label="New tab" onClick={() => void openTab()}><Icons.plus size={13} /></button>
-        <span className="browser-tabbar-spacer" />
-        <button className={`icon-button${annotationMode ? " is-active" : ""}`} type="button" title="Annotate webpage"
-          aria-label="Annotate webpage" aria-pressed={annotationMode} disabled={!selectedTabID}
-          onClick={() => setAnnotationMode((value) => !value)}><Icons.plus size={13} /></button>
-        <button className="icon-button" type="button" title="Close browser" aria-label="Close browser" onClick={() => setBrowserOpen(false)}><Icons.close size={12} /></button>
+        <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
+          onClick={() => void openTab()}><Icons.plus size={13} /></button>
       </div>
 
       <form className="browser-navbar" onSubmit={submitAddress}>
