@@ -355,6 +355,8 @@ export interface ProviderProfile {
   environment: Record<string, string>;
   colorHex: string;
   isEnabled: boolean;
+  /** Model IDs intentionally omitted from provider/model pickers. */
+  hiddenModels: string[];
 }
 
 export interface TitleGenerationRuntime {

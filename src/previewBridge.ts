@@ -20,6 +20,7 @@ const profiles: ProviderProfile[] = [
     environment: {},
     colorHex: "#3b82f6",
     isEnabled: true,
+    hiddenModels: [],
   },
   {
     id: "claude-default",
@@ -28,6 +29,7 @@ const profiles: ProviderProfile[] = [
     environment: {},
     colorHex: "#d97757",
     isEnabled: true,
+    hiddenModels: [],
   },
   {
     id: "hermes-default",
@@ -37,6 +39,7 @@ const profiles: ProviderProfile[] = [
     environment: {},
     colorHex: "#8b5cf6",
     isEnabled: true,
+    hiddenModels: [],
   },
 ];
 

@@ -27,6 +27,7 @@ function profile(
     environment: {},
     colorHex: "#888888",
     isEnabled,
+    hiddenModels: [],
   };
 }
 

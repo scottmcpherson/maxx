@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ipc } from "../ipc";
 import { providerDisplayName } from "../contract/types";
 import type { ProviderHealth, ProviderProfile } from "../contract/types";
+import {
+  disableUnavailableProfiles,
+  providerCanBeEnabled,
+} from "../providerSettings";
 import {
   DEFAULT_KEYBOARD_SHORTCUTS,
   KEYBOARD_SHORTCUTS,
@@ -23,7 +27,7 @@ import { DEFAULT_VOICE_SETTINGS, VOICE_LANGUAGES } from "../voice/types";
 import type { VoiceCredentialStatus, VoiceSettings } from "../voice/types";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
-import { ProviderIcon } from "./ProviderIcon";
+import { ProviderSettingsRow } from "./ProviderSettingsRow";
 import { RuntimePicker } from "./RuntimePicker";
 
 type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connections" | "experimental";
@@ -45,6 +49,17 @@ export function SettingsPanel() {
   const [drafts, setDrafts] = useState<ProviderProfile[]>([]);
   const [health, setHealth] = useState<Record<string, ProviderHealth>>({});
   const [query, setQuery] = useState("");
+  const [expandedProfileID, setExpandedProfileID] = useState<string | null>(null);
+  const [pendingProfileIDs, setPendingProfileIDs] = useState<Set<string>>(() => new Set());
+  const providerHealthContext = useMemo(() => JSON.stringify(
+    (workspace?.providerProfiles ?? []).map((profile) => ({
+      id: profile.id,
+      executablePath: profile.executablePath ?? "",
+      homeDirectory: profile.homeDirectory ?? "",
+      environment: Object.entries(profile.environment).sort(([left], [right]) =>
+        left.localeCompare(right)),
+    })),
+  ), [workspace?.providerProfiles]);
 
   useEffect(() => {
     setDrafts(workspace?.providerProfiles.map((profile) => ({ ...profile })) ?? []);
@@ -63,32 +78,83 @@ export function SettingsPanel() {
     setQuery("");
   };
 
-  // The enable switch is the only control, and it persists immediately.
-  const toggleEnabled = (id: string, isEnabled: boolean) => {
-    const next = drafts.map((profile) => profile.id === id ? { ...profile, isEnabled } : profile);
-    setDrafts(next);
-    void saveProfiles(next);
-  };
-
-  const probe = async (id: string) => {
+  const probe = async (id: string): Promise<ProviderHealth> => {
     try {
       const result = await ipc.providerHealth(id);
       setHealth((current) => ({ ...current, [id]: result }));
+      return result;
     } catch (error) {
+      const result: ProviderHealth = {
+        profileID: id,
+        state: "missing",
+        message: String(error),
+      };
       setHealth((current) => ({
         ...current,
-        [id]: { profileID: id, state: "missing", message: String(error) },
+        [id]: result,
       }));
+      return result;
     }
   };
 
-  // Probe every profile once so rows can show the installed CLI version.
+  // Probe every profile, including disabled ones. Existing workspaces may have
+  // inherited the old all-enabled default, so unavailable profiles are
+  // disabled in one atomic save instead of remaining broken picker entries.
   useEffect(() => {
-    for (const profile of workspace?.providerProfiles ?? []) {
-      void probe(profile.id);
+    const profiles = workspace?.providerProfiles ?? [];
+    if (!profiles.length) return;
+    let cancelled = false;
+    void Promise.all(profiles.map(async (profile) => {
+      try {
+        return await ipc.providerHealth(profile.id);
+      } catch (error) {
+        return {
+          profileID: profile.id,
+          state: "missing",
+          message: String(error),
+        } satisfies ProviderHealth;
+      }
+    })).then((results) => {
+      if (cancelled) return;
+      setHealth(Object.fromEntries(results.map((result) => [result.profileID, result])));
+      const next = disableUnavailableProfiles(profiles, results);
+      if (next.some((profile, index) => profile !== profiles[index])) {
+        setDrafts(next);
+        void saveProfiles(next);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [providerHealthContext, saveProfiles]);
+
+  const setPending = (id: string, pending: boolean) => {
+    setPendingProfileIDs((current) => {
+      const next = new Set(current);
+      if (pending) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const persistProfile = async (updated: ProviderProfile) => {
+    const next = drafts.map((profile) => profile.id === updated.id ? updated : profile);
+    setDrafts(next);
+    await saveProfiles(next);
+  };
+
+  const toggleEnabled = async (profile: ProviderProfile, isEnabled: boolean) => {
+    if (!isEnabled) {
+      await persistProfile({ ...profile, isEnabled: false });
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace]);
+    setPending(profile.id, true);
+    const result = await probe(profile.id);
+    if (providerCanBeEnabled(result)) {
+      await persistProfile({ ...profile, isEnabled: true });
+    } else {
+      setExpandedProfileID(profile.id);
+    }
+    setPending(profile.id, false);
+  };
 
   /** Row subtitle: CLI version once probed, else provider name / not-found. */
   const subtitle = (profile: ProviderProfile): string => {
@@ -184,25 +250,24 @@ export function SettingsPanel() {
               {visibleProfiles.map((profile) => {
                 const result = health[profile.id];
                 return (
-                  <div key={profile.id} className="provider-settings-row">
-                    <div className="provider-settings-summary">
-                      <ProviderIcon provider={profile.provider} size={20} />
-                      <span className="provider-settings-name">
-                        <strong>{profile.displayName}</strong>
-                        <small>{subtitle(profile)}</small>
-                      </span>
-                      {result && <span className={`health-badge health-${result.state}`}>{result.state}</span>}
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={profile.isEnabled}
-                          aria-label={`Enable ${profile.displayName}`}
-                          onChange={(event) => toggleEnabled(profile.id, event.target.checked)}
-                        />
-                        <span />
-                      </label>
-                    </div>
-                  </div>
+                  <ProviderSettingsRow
+                    key={profile.id}
+                    profile={profile}
+                    health={result}
+                    subtitle={subtitle(profile)}
+                    expanded={expandedProfileID === profile.id}
+                    pending={pendingProfileIDs.has(profile.id)}
+                    workingDirectory={modelCatalogWorkingDirectory}
+                    onToggleExpanded={() => setExpandedProfileID((current) =>
+                      current === profile.id ? null : profile.id)}
+                    onToggleEnabled={(enabled) => void toggleEnabled(profile, enabled)}
+                    onSaveProfile={persistProfile}
+                    onRecheck={async () => {
+                      setPending(profile.id, true);
+                      await probe(profile.id);
+                      setPending(profile.id, false);
+                    }}
+                  />
                 );
               })}
               {visibleProfiles.length === 0 && <p className="settings-empty">No providers match “{query}”.</p>}

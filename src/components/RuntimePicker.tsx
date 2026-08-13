@@ -39,6 +39,7 @@ import {
   readCachedCatalog,
   useModelCatalogStore,
 } from "../store/modelCatalogStore";
+import { visibleProviderModels } from "../providerSettings";
 import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
 
@@ -183,12 +184,15 @@ export function RuntimePicker({
         label: profile?.displayName || providerDisplayName(candidate),
         enabled: profile?.isEnabled ?? true,
         color: profile?.colorHex ?? "#8b8b8b",
-        models: resolveModels(candidate, catalogEntries[candidate]?.models),
+        models: visibleProviderModels(
+          profile,
+          resolveModels(candidate, catalogEntries[candidate]?.models),
+        ),
       };
     });
   }, [catalogEntries, profiles]);
 
-  const activeDraftModels = resolveModels(draft.provider, catalogEntries[draft.provider]?.models);
+  const activeDraftModels = profileRows.find((row) => row.provider === draft.provider)?.models ?? [];
   const triggerModels = resolveModels(provider, catalogEntries[provider]?.models);
   const providerTriggerLabel = triggerShowsProvider
     ? profiles.find((profile) => profile.provider === provider)?.displayName
@@ -242,7 +246,7 @@ export function RuntimePicker({
     if (recent.source === "custom") return true;
     const entry = catalogEntries[recent.provider];
     if (entry?.status !== "live" && entry?.status !== "cached") return false;
-    return entry.models?.some((option) => option.model === recent.model) ?? false;
+    return row.models.some((option) => option.model === recent.model);
   }), [catalogEntries, profileRows, recents]);
 
   const queryLoading = !!query.trim() && enabledProviders.some((candidate) => {
@@ -393,8 +397,7 @@ export function RuntimePicker({
   const chooseProvider = (nextProvider: ChatProvider) => {
     const row = profileRows.find((candidate) => candidate.provider === nextProvider);
     if (!row?.enabled) return;
-    const models = resolveModels(nextProvider, catalogEntries[nextProvider]?.models);
-    const nextModel = preferredModel(models);
+    const nextModel = preferredModel(row.models);
     setDraft({
       provider: nextProvider,
       model: nextModel,

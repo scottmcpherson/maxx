@@ -215,7 +215,7 @@ pub async fn list_provider_models(
     profile_id: Option<Uuid>,
     working_directory: Option<String>,
 ) -> Result<crate::engine::catalog::ProviderModelCatalog, String> {
-    let profile = {
+    let mut profile = {
         let workspace = state.workspace.lock().await;
         let profile = if let Some(id) = profile_id {
             workspace
@@ -239,6 +239,10 @@ pub async fn list_provider_models(
         };
         profile.unwrap_or_else(|| ProviderProfile::default_for(provider))
     };
+    // Settings can inspect models before enabling a profile. Discovery itself
+    // is read-only, so bypass only the enablement gate and preserve every
+    // other profile-specific launch setting.
+    profile.is_enabled = true;
     Ok(
         crate::engine::catalog::resolve_models_for_profile(&profile, working_directory.as_deref())
             .await,
@@ -1096,7 +1100,7 @@ pub async fn provider_health(
     state: Arc<AppState>,
     profile_id: Uuid,
 ) -> Result<ProviderHealth, String> {
-    let profile = {
+    let mut profile = {
         let workspace = state.workspace.lock().await;
         workspace
             .provider_profiles
@@ -1105,15 +1109,10 @@ pub async fn provider_health(
             .cloned()
             .ok_or("Unknown profile")?
     };
-    if !profile.is_enabled {
-        return Ok(ProviderHealth {
-            profile_id,
-            state: "disabled".into(),
-            executable_path: None,
-            version: None,
-            message: "This profile is disabled.".into(),
-        });
-    }
+    // Health checks answer whether a profile *can* be enabled. Probe disabled
+    // profiles with an otherwise identical launch configuration so Settings
+    // can reject an unavailable enable attempt before persisting it.
+    profile.is_enabled = true;
     let configuration = match crate::engine::launch::launch_configuration(&profile) {
         Ok(configuration) => configuration,
         Err(message) => {

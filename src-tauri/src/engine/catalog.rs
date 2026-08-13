@@ -1385,6 +1385,7 @@ vendor plain 100K 10K no no
             environment: Default::default(),
             color_hex: "#000".into(),
             is_enabled: true,
+            hidden_models: Vec::new(),
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1407,6 +1408,7 @@ vendor plain 100K 10K no no
             environment: Default::default(),
             color_hex: "#000".into(),
             is_enabled: true,
+            hidden_models: Vec::new(),
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

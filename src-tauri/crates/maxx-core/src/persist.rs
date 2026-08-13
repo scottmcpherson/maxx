@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -309,6 +309,8 @@ pub struct ProviderProfile {
     pub color_hex: String,
     #[serde(rename = "isEnabled", default = "default_true")]
     pub is_enabled: bool,
+    #[serde(rename = "hiddenModels", default)]
+    pub hidden_models: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -327,6 +329,7 @@ impl ProviderProfile {
             environment: HashMap::new(),
             color_hex: provider.default_profile_color_hex().to_string(),
             is_enabled: true,
+            hidden_models: Vec::new(),
         }
     }
 
@@ -596,6 +599,22 @@ impl WorkspacePersistence {
 /// recover profiles referenced by threads (disabled placeholders), order
 /// runtime events canonically, sort profiles.
 pub fn normalize(document: &mut WorkspaceDocument) {
+    for profile in &mut document.provider_profiles {
+        profile.hidden_models = profile
+            .hidden_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned)
+            .collect();
+        profile.hidden_models.sort();
+        profile.hidden_models.dedup();
+        profile.executable_path = profile
+            .executable_path
+            .take()
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty());
+    }
     let mut known_ids: std::collections::HashSet<Uuid> =
         document.provider_profiles.iter().map(|p| p.id).collect();
     for provider in ChatProvider::ALL {
@@ -623,6 +642,7 @@ pub fn normalize(document: &mut WorkspaceDocument) {
                     environment: HashMap::new(),
                     color_hex: thread.provider.default_profile_color_hex().to_string(),
                     is_enabled: false,
+                    hidden_models: Vec::new(),
                 });
             }
         }
@@ -720,4 +740,42 @@ pub fn close_interrupted_turns(projects: &mut [ChatProject]) -> usize {
         }
     }
     recovered_count
+}
+
+#[cfg(test)]
+mod provider_profile_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_cleans_executable_path_and_hidden_models() {
+        let mut document = WorkspaceDocument::default();
+        let profile = document
+            .provider_profiles
+            .iter_mut()
+            .find(|profile| profile.provider == ChatProvider::Codex)
+            .unwrap();
+        profile.executable_path = Some("  /opt/custom/codex  ".into());
+        profile.hidden_models = vec![
+            " gpt-5.4 ".into(),
+            "".into(),
+            "gpt-5.3".into(),
+            "gpt-5.4".into(),
+        ];
+
+        normalize(&mut document);
+
+        let profile = document
+            .provider_profiles
+            .iter()
+            .find(|profile| profile.provider == ChatProvider::Codex)
+            .unwrap();
+        assert_eq!(profile.executable_path.as_deref(), Some("/opt/custom/codex"));
+        assert_eq!(profile.hidden_models, ["gpt-5.3", "gpt-5.4"]);
+    }
+
+    #[test]
+    fn empty_hidden_models_are_explicit_in_json_contract() {
+        let json = serde_json::to_value(ProviderProfile::default_for(ChatProvider::Codex)).unwrap();
+        assert_eq!(json.get("hiddenModels").unwrap(), &serde_json::json!([]));
+    }
 }

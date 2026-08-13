@@ -43,6 +43,7 @@ function profile(provider: ChatProvider, overrides: Partial<ProviderProfile> = {
     environment: {},
     colorHex: "#888888",
     isEnabled: true,
+    hiddenModels: [],
     ...overrides,
   };
 }
