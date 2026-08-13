@@ -56,12 +56,31 @@ import {
 import type { UnseenThreadMap } from "./unseenThreads";
 import type { RuntimeSelection } from "../runtime/modelCatalog";
 import type { BrowserUiReveal } from "../browser";
+import type { BrowserAnnotation } from "../browser";
+import { annotationKey, MAX_BROWSER_ANNOTATIONS } from "../browserAnnotations";
+import type { HostStatus } from "../host/types";
+import type { RemoteSession } from "../host/session";
+import {
+  attachRemote,
+  detachRemote,
+  emptyCatalog,
+  findHostedProject,
+  isLocalHost,
+  LOCAL_HOST_ID,
+  mergedWorkspace,
+  replaceWorkspace,
+  routeHostId,
+} from "../host/session";
+import { uploadImagesForHost } from "../host/mediaUpload";
 
 let listenersStarted = false;
 const initialDefaultRuntime = loadDefaultRuntime();
 
 interface AppStoreState {
   workspace: WorkspaceDocument | null;
+  selectedHostID: string;
+  remoteSessions: RemoteSession[];
+  hostStatus: HostStatus | null;
   selectedProjectID: string | null;
   selectedThreadID: string | null;
   activeTurnByThread: Record<string, string>;
@@ -86,6 +105,8 @@ interface AppStoreState {
   /** Browser pane visibility for the selected thread. */
   browserOpen: boolean;
   pendingBrowserReveal: BrowserUiReveal | null;
+  /** Draft DOM selections collected from the browser, scoped to each chat composer. */
+  browserAnnotationsByThread: Record<string, BrowserAnnotation[]>;
   /** Latest result of an update check; `null` once dismissed. */
   updateStatus: UpdateStatus | null;
   /** Persisted runtime used to seed each new-chat composer. */
@@ -99,10 +120,17 @@ interface AppStoreState {
 
   bootstrap: () => Promise<void>;
   refresh: () => Promise<void>;
-  selectThread: (projectID: string, threadID: string) => void;
-  addProject: (folderPath: string) => Promise<void>;
-  removeProject: (projectID: string) => Promise<void>;
-  startNewThread: (projectID?: string) => void;
+  refreshHost: (hostID: string) => Promise<void>;
+  selectThread: (projectID: string, threadID: string, hostID?: string) => void;
+  addProject: (folderPath: string, hostID?: string) => Promise<void>;
+  removeProject: (projectID: string, hostID?: string) => Promise<void>;
+  startNewThread: (projectID?: string, hostID?: string) => void;
+  connectHost: (address: string, code: string) => Promise<void>;
+  disconnectHost: (hostID: string) => Promise<void>;
+  markHostDisconnected: (hostID: string) => void;
+  startHostListen: (bindAddress?: string) => Promise<void>;
+  stopHostListen: () => Promise<void>;
+  refreshHostStatus: () => Promise<void>;
   addThread: (
     projectID: string,
     provider: ChatProvider,
@@ -130,7 +158,7 @@ interface AppStoreState {
     effort?: string | null,
     speed?: string | null,
   ) => Promise<boolean>;
-  sendPrompt: (prompt: string, imagePaths: string[]) => Promise<void>;
+  sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
   cancelActiveTurn: (threadID: string) => Promise<void>;
   resolveRequest: (
     projectID: string,
@@ -148,7 +176,8 @@ interface AppStoreState {
     agentIDs: string[],
     prompt: string,
     imagePaths: string[],
-  ) => Promise<void>;
+    annotations?: BrowserAnnotation[],
+  ) => Promise<boolean>;
   sendAgentPrompt: (
     projectID: string,
     threadID: string,
@@ -172,6 +201,10 @@ interface AppStoreState {
   toggleBrowser: () => void;
   revealBrowserTab: (reveal: BrowserUiReveal) => void;
   consumeBrowserReveal: (tabID: string) => void;
+  applyBrowserAnnotation: (threadID: string, annotation: BrowserAnnotation, selected: boolean) => void;
+  replaceBrowserAnnotations: (threadID: string, annotations: BrowserAnnotation[]) => void;
+  removeBrowserAnnotation: (threadID: string, annotationID: string) => void;
+  clearBrowserAnnotations: (threadID: string) => void;
   setUpdateStatus: (status: UpdateStatus | null) => void;
   checkForUpdates: () => Promise<void>;
   setDefaultRuntime: (selection: RuntimeSelection) => void;
@@ -179,9 +212,9 @@ interface AppStoreState {
   setKeyboardShortcut: (command: KeyboardShortcutCommand, binding: KeyboardShortcutBinding) => void;
   resetKeyboardShortcut: (command: KeyboardShortcutCommand) => void;
   setShowProviderDiagnostics: (visible: boolean) => void;
-  applyRuntimeEvent: (envelope: RuntimeEventEnvelope) => void;
-  applyThreadTitleUpdated: (envelope: ThreadTitleUpdatedEnvelope) => void;
-  applyTurnFinished: (envelope: TurnFinishedEnvelope) => void;
+  applyRuntimeEvent: (envelope: RuntimeEventEnvelope, hostID?: string) => void;
+  applyThreadTitleUpdated: (envelope: ThreadTitleUpdatedEnvelope, hostID?: string) => void;
+  applyTurnFinished: (envelope: TurnFinishedEnvelope, hostID?: string) => void;
 }
 
 /** Persist the unseen map only when the instance actually changed. */
@@ -191,17 +224,70 @@ function persistIfChanged(previous: UnseenThreadMap, next: UnseenThreadMap): Uns
 }
 
 /** Successful inventory fetch replaces activity; fetch failure leaves state alone. */
-async function loadActiveTurns(): Promise<Record<string, string> | null> {
+async function loadActiveTurns(hostID?: string | null): Promise<Record<string, string> | null> {
   try {
-    const inventory = await ipc.activeTurns();
+    const inventory = await ipc.activeTurns(hostID);
     return hydrateActiveTurns(inventory);
   } catch {
     return null;
   }
 }
 
+async function loadAllActiveTurns(
+  remotes: RemoteSession[],
+): Promise<Record<string, string> | null> {
+  const local = await loadActiveTurns();
+  if (remotes.length === 0) return local;
+  const remoteMaps = await Promise.all(remotes.map((session) => loadActiveTurns(session.host.id)));
+  const merged: Record<string, string> = { ...(local ?? {}) };
+  for (const map of remoteMaps) {
+    if (map) Object.assign(merged, map);
+  }
+  return Object.keys(merged).length > 0 || local !== null ? merged : null;
+}
+
+function catalogFromState(state: {
+  workspace: WorkspaceDocument | null;
+  remoteSessions: RemoteSession[];
+  hostStatus: HostStatus | null;
+}) {
+  const local = state.workspace ?? {
+    schemaVersion: 6,
+    projects: [],
+    providerProfiles: [],
+    agents: [],
+    voice: {
+      isEnabled: false,
+      useGrokSignIn: false,
+      language: "en",
+      apiBase: "https://api.x.ai",
+    },
+  };
+  let catalog = emptyCatalog(local, state.hostStatus?.name ?? "This Mac");
+  for (const session of state.remoteSessions) {
+    catalog = attachRemote(catalog, session.host, session.workspace);
+  }
+  return catalog;
+}
+
+function hostForProject(
+  remotes: RemoteSession[],
+  workspace: WorkspaceDocument | null,
+  projectID: string,
+  fallback: string,
+): string {
+  if (workspace?.projects.some((project) => project.id === projectID)) return LOCAL_HOST_ID;
+  const remote = remotes.find((session) =>
+    session.workspace.projects.some((project) => project.id === projectID),
+  );
+  return remote?.host.id ?? fallback;
+}
+
 export const useAppStore = create<AppStoreState>((set, get) => ({
   workspace: null,
+  selectedHostID: LOCAL_HOST_ID,
+  remoteSessions: [],
+  hostStatus: null,
   selectedProjectID: null,
   selectedThreadID: null,
   activeTurnByThread: {},
@@ -217,6 +303,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   summaryPopoverOpen: false,
   browserOpen: false,
   pendingBrowserReveal: null,
+  browserAnnotationsByThread: {},
   updateStatus: null,
   defaultRuntime: { ...initialDefaultRuntime },
   newThreadRuntime: { ...initialDefaultRuntime },
@@ -225,6 +312,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   error: null,
 
   bootstrap: async () => {
+    await get().refreshHostStatus();
     await get().refresh();
     if (!listenersStarted) {
       listenersStarted = true;
@@ -234,6 +322,20 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         await ipc.onThreadTitleUpdated((envelope) => get().applyThreadTitleUpdated(envelope));
         await ipc.onUpdateStatus((status) => get().setUpdateStatus(status));
         await ipc.onBrowserReveal((event) => get().revealBrowserTab(event));
+        await ipc.onHostEvent((message) => {
+          if (message.event === "runtime://event") {
+            get().applyRuntimeEvent(message.payload as RuntimeEventEnvelope, message.hostId);
+          } else if (message.event === "turn://finished") {
+            get().applyTurnFinished(message.payload as TurnFinishedEnvelope, message.hostId);
+          } else if (message.event === "thread://title-updated") {
+            get().applyThreadTitleUpdated(message.payload as ThreadTitleUpdatedEnvelope, message.hostId);
+          } else if (message.event === "host://disconnected") {
+            get().markHostDisconnected(message.hostId);
+            void get().refreshHostStatus();
+          } else if (message.event === "host://connected" || message.event === "host://status-changed") {
+            void get().refreshHostStatus();
+          }
+        });
       } catch (error) {
         listenersStarted = false;
         set({ error: String(error) });
@@ -260,13 +362,29 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   refresh: async () => {
     try {
       const workspace = await ipc.workspaceSnapshot();
-      const activeTurnByThread = await loadActiveTurns();
+      const remotes = await Promise.all(
+        get().remoteSessions.map(async (session) => {
+          try {
+            return {
+              host: session.host,
+              workspace: await ipc.workspaceSnapshot(session.host.id),
+            };
+          } catch {
+            return session;
+          }
+        }),
+      );
+      const activeTurnByThread = await loadAllActiveTurns(remotes);
       set((state) => ({
         workspace,
+        remoteSessions: remotes,
         ...(activeTurnByThread !== null ? { activeTurnByThread } : {}),
         unseenThreadIDs: persistIfChanged(
           state.unseenThreadIDs,
-          pruneUnseenThreads(state.unseenThreadIDs, workspace),
+          pruneUnseenThreads(
+            state.unseenThreadIDs,
+            mergedWorkspace(catalogFromState({ workspace, remoteSessions: remotes, hostStatus: state.hostStatus })),
+          ),
         ),
         error: null,
       }));
@@ -282,8 +400,121 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
-  selectThread: (projectID, threadID) =>
+  refreshHost: async (hostID) => {
+    if (isLocalHost(hostID)) {
+      await get().refresh();
+      return;
+    }
+    try {
+      const workspace = await ipc.workspaceSnapshot(hostID);
+      set((state) => ({
+        remoteSessions: state.remoteSessions.map((session) =>
+          session.host.id === hostID ? { ...session, workspace } : session,
+        ),
+        error: null,
+      }));
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
+  refreshHostStatus: async () => {
+    try {
+      const hostStatus = await ipc.hostStatus();
+      const sessions = await Promise.all(
+        hostStatus.remotes.filter((host) => host.connected).map(async (host) => {
+          try {
+            return {
+              host: { id: host.id, name: host.name, kind: "remote" as const, address: host.address },
+              workspace: await ipc.workspaceSnapshot(host.id),
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      set((state) => {
+        let catalog = emptyCatalog(
+          state.workspace ?? catalogFromState(state).local,
+          hostStatus.name,
+        );
+        for (const session of sessions) {
+          if (session) catalog = attachRemote(catalog, session.host, session.workspace);
+        }
+        return { hostStatus, remoteSessions: catalog.remotes };
+      });
+    } catch {
+      // Older runtimes without host commands still boot a local workspace.
+    }
+  },
+
+  connectHost: async (address, code) => {
+    try {
+      const host = await ipc.hostConnect(address, code);
+      const workspace = await ipc.workspaceSnapshot(host.id);
+      set((state) => ({
+        remoteSessions: attachRemote(
+          catalogFromState(state),
+          { ...host, kind: "remote" },
+          workspace,
+        ).remotes,
+        error: null,
+      }));
+      await get().refreshHostStatus();
+      await get().refresh();
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
+  disconnectHost: async (hostID) => {
+    const localBefore = get().workspace;
+    try {
+      await ipc.hostDisconnect(hostID);
+    } catch (error) {
+      set({ error: String(error) });
+      return;
+    }
     set((state) => ({
+      remoteSessions: detachRemote(catalogFromState(state), hostID).remotes,
+      selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
+      selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
+      selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
+      workspace: localBefore,
+    }));
+    await get().refreshHostStatus();
+  },
+
+  markHostDisconnected: (hostID) => set((state) => ({
+    remoteSessions: detachRemote(catalogFromState(state), hostID).remotes,
+    selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
+    selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
+    selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
+  })),
+
+  startHostListen: async (bindAddress) => {
+    try {
+      await ipc.hostListen(bindAddress);
+      await get().refreshHostStatus();
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
+  stopHostListen: async () => {
+    try {
+      await ipc.hostUnlisten();
+      await get().refreshHostStatus();
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
+  selectThread: (projectID, threadID, hostID) =>
+    set((state) => ({
+      selectedHostID: routeHostId(
+        hostID ?? hostForProject(state.remoteSessions, state.workspace, projectID, state.selectedHostID),
+      ),
       selectedProjectID: projectID,
       selectedThreadID: threadID,
       settingsOpen: false,
@@ -303,11 +534,22 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       ),
     })),
 
-  startNewThread: (projectID) => {
-    const workspace = get().workspace;
+  startNewThread: (projectID, hostID) => {
+    const state = get();
+    const resolvedHostID = routeHostId(
+      hostID ?? (projectID
+        ? hostForProject(state.remoteSessions, state.workspace, projectID, state.selectedHostID)
+        : state.selectedHostID),
+    );
+    const catalog = catalogFromState(state);
     const resolvedProjectID =
-      projectID ?? get().selectedProjectID ?? workspace?.projects[0]?.id ?? null;
+      projectID
+      ?? (resolvedHostID === LOCAL_HOST_ID ? state.selectedProjectID : null)
+      ?? findHostedProject(catalog, resolvedHostID, state.selectedProjectID ?? "")?.id
+      ?? state.workspace?.projects[0]?.id
+      ?? null;
     set({
+      selectedHostID: resolvedHostID,
       selectedProjectID: resolvedProjectID,
       selectedThreadID: null,
       newThreadRuntime: { ...get().defaultRuntime },
@@ -320,11 +562,13 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     });
   },
 
-  addProject: async (folderPath) => {
+  addProject: async (folderPath, hostID) => {
     try {
-      const project = await ipc.addProject(folderPath);
+      const targetHost = routeHostId(hostID ?? get().selectedHostID);
+      const project = await ipc.addProject(folderPath, targetHost);
       await get().refresh();
       set({
+        selectedHostID: targetHost,
         selectedProjectID: project.id,
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
@@ -337,8 +581,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
-  removeProject: async (projectID) => {
-    await ipc.removeProject(projectID);
+  removeProject: async (projectID, hostID) => {
+    const targetHost = routeHostId(
+      hostID ?? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID),
+    );
+    await ipc.removeProject(projectID, targetHost);
     await get().refresh();
     if (get().selectedProjectID === projectID) {
       set({
@@ -354,12 +601,14 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   addThread: async (projectID, provider, model, title = "New thread", effort = null, speed = null) => {
     try {
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       const thread =
         effort || speed
-          ? await ipc.addThreadWithRuntime(projectID, provider, model, title, effort, speed)
-          : await ipc.addThread(projectID, provider, model, title);
+          ? await ipc.addThreadWithRuntime(projectID, provider, model, title, effort, speed, hostID)
+          : await ipc.addThread(projectID, provider, model, title, hostID);
       await get().refresh();
       set({
+        selectedHostID: hostID,
         selectedProjectID: projectID,
         selectedThreadID: thread.id,
         openSideThreadID: null,
@@ -374,7 +623,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
 
   removeThread: async (projectID, threadID) => {
-    await ipc.removeThread(projectID, threadID);
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+    await ipc.removeThread(projectID, threadID, hostID);
     await get().refresh();
     if (get().selectedThreadID === threadID) {
       set({
@@ -391,7 +641,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     const trimmedTitle = title.trim();
     if (!trimmedTitle) return false;
     try {
-      await ipc.updateThread(projectID, threadID, { title: trimmedTitle });
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      await ipc.updateThread(projectID, threadID, { title: trimmedTitle }, hostID);
       await get().refresh();
       return true;
     } catch (error) {
@@ -402,13 +653,14 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   updateThreadRuntime: async (projectID, threadID, provider, model, effort = null, speed = null) => {
     try {
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       await ipc.updateThread(projectID, threadID, {
         provider,
         model,
         effort: effort ?? "",
         speed: speed ?? "",
         updateRuntimeKnobs: true,
-      });
+      }, hostID);
       await get().refresh();
     } catch (error) {
       set({ error: String(error) });
@@ -421,7 +673,16 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     const thread = await get().addThread(projectID, provider, model, title, effort, speed);
     if (!thread) return false;
     try {
-      const turnID = await ipc.sendPrompt(projectID, thread.id, prompt.trim(), imagePaths);
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const turnID = await ipc.sendPrompt(
+        projectID,
+        thread.id,
+        prompt.trim(),
+        prepared.imagePaths,
+        hostID,
+        prepared.attachmentIds,
+      );
       set((state) => ({
         activeTurnByThread: setActiveTurn(state.activeTurnByThread, thread.id, turnID),
       }));
@@ -432,28 +693,46 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     return true;
   },
 
-  sendPrompt: async (prompt, imagePaths) => {
-    const { selectedProjectID, selectedThreadID } = get();
-    if (!selectedProjectID || !selectedThreadID || (!prompt.trim() && imagePaths.length === 0)) return;
+  sendPrompt: async (prompt, imagePaths, annotations = []) => {
+    const { selectedProjectID, selectedThreadID, selectedHostID, remoteSessions, workspace } = get();
+    if (!selectedProjectID || !selectedThreadID || (!prompt.trim() && imagePaths.length === 0 && annotations.length === 0)) return false;
     try {
-      const turnID = await ipc.sendPrompt(selectedProjectID, selectedThreadID, prompt, imagePaths);
+      const hostID = hostForProject(remoteSessions, workspace, selectedProjectID, selectedHostID);
+      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const turnID = await ipc.sendPrompt(
+        selectedProjectID,
+        selectedThreadID,
+        prompt,
+        prepared.imagePaths,
+        hostID,
+        prepared.attachmentIds,
+        annotations,
+      );
       set((state) => ({
         activeTurnByThread: setActiveTurn(state.activeTurnByThread, selectedThreadID, turnID),
       }));
       await get().refresh();
+      return true;
     } catch (error) {
       set({ error: String(error) });
+      return false;
     }
   },
 
   cancelActiveTurn: async (threadID) => {
     const turnID = get().activeTurnByThread[threadID];
-    if (turnID) await ipc.cancelTurn(turnID);
+    if (!turnID) return;
+    const { selectedProjectID, selectedHostID, remoteSessions, workspace } = get();
+    const hostID = selectedProjectID
+      ? hostForProject(remoteSessions, workspace, selectedProjectID, selectedHostID)
+      : selectedHostID;
+    await ipc.cancelTurn(turnID, hostID);
   },
 
   resolveRequest: async (projectID, threadID, requestID, decision) => {
     try {
-      await ipc.resolveRequest(projectID, threadID, requestID, decision);
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      await ipc.resolveRequest(projectID, threadID, requestID, decision, hostID);
       await get().refresh();
     } catch (error) {
       set({ error: String(error) });
@@ -496,10 +775,21 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
-  startSideThread: async (projectID, parentThreadID, agentIDs, prompt, imagePaths) => {
-    if ((!prompt.trim() && imagePaths.length === 0) || agentIDs.length === 0) return;
+  startSideThread: async (projectID, parentThreadID, agentIDs, prompt, imagePaths, annotations = []) => {
+    if ((!prompt.trim() && imagePaths.length === 0 && annotations.length === 0) || agentIDs.length === 0) return false;
     try {
-      const thread = await ipc.startSideThread(projectID, parentThreadID, agentIDs, prompt.trim(), imagePaths);
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const thread = await ipc.startSideThread(
+        projectID,
+        parentThreadID,
+        agentIDs,
+        prompt.trim(),
+        prepared.imagePaths,
+        hostID,
+        prepared.attachmentIds,
+        annotations,
+      );
       set((state) => ({
         openSideThreadID: thread.id,
         activeTurnByThread: thread.lastTurnID
@@ -507,15 +797,27 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
           : state.activeTurnByThread,
       }));
       await get().refresh();
+      return true;
     } catch (error) {
       set({ error: String(error) });
+      return false;
     }
   },
 
   sendAgentPrompt: async (projectID, threadID, agentIDs, prompt, imagePaths) => {
     if ((!prompt.trim() && imagePaths.length === 0) || agentIDs.length === 0) return;
     try {
-      const turnID = await ipc.sendAgentPrompt(projectID, threadID, agentIDs, prompt.trim(), imagePaths);
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const turnID = await ipc.sendAgentPrompt(
+        projectID,
+        threadID,
+        agentIDs,
+        prompt.trim(),
+        prepared.imagePaths,
+        hostID,
+        prepared.attachmentIds,
+      );
       set((state) => ({
         activeTurnByThread: setActiveTurn(state.activeTurnByThread, threadID, turnID),
       }));
@@ -566,6 +868,30 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   consumeBrowserReveal: (tabID) => set((state) => (
     state.pendingBrowserReveal?.tabId === tabID ? { pendingBrowserReveal: null } : {}
   )),
+  applyBrowserAnnotation: (threadID, annotation, selected) => set((state) => {
+    const current = state.browserAnnotationsByThread[threadID] ?? [];
+    const key = annotationKey(annotation);
+    const withoutTarget = current.filter((candidate) => annotationKey(candidate) !== key);
+    const next = selected ? [...withoutTarget, annotation].slice(-MAX_BROWSER_ANNOTATIONS) : withoutTarget;
+    if (next.length === current.length && next.every((candidate, index) => candidate === current[index])) return {};
+    return { browserAnnotationsByThread: { ...state.browserAnnotationsByThread, [threadID]: next } };
+  }),
+  replaceBrowserAnnotations: (threadID, annotations) => set((state) => ({
+    browserAnnotationsByThread: {
+      ...state.browserAnnotationsByThread,
+      [threadID]: annotations.slice(-MAX_BROWSER_ANNOTATIONS),
+    },
+  })),
+  removeBrowserAnnotation: (threadID, annotationID) => set((state) => {
+    const current = state.browserAnnotationsByThread[threadID] ?? [];
+    const next = current.filter((annotation) => annotation.id !== annotationID);
+    if (next.length === current.length) return {};
+    return { browserAnnotationsByThread: { ...state.browserAnnotationsByThread, [threadID]: next } };
+  }),
+  clearBrowserAnnotations: (threadID) => set((state) => {
+    if (!(state.browserAnnotationsByThread[threadID]?.length)) return {};
+    return { browserAnnotationsByThread: { ...state.browserAnnotationsByThread, [threadID]: [] } };
+  }),
   setUpdateStatus: (status) => set({ updateStatus: status }),
   // The menu item pushes its own `updater://status` events; this is the same
   // check driven from the UI, so the result is stored directly.
@@ -614,45 +940,66 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     set({ showProviderDiagnostics: visible });
   },
 
-  applyRuntimeEvent: (envelope) => {
+  applyRuntimeEvent: (envelope, hostID) => {
     set((state) => {
+      if (hostID && !isLocalHost(hostID)) {
+        const session = state.remoteSessions.find((item) => item.host.id === hostID);
+        if (!session) return {};
+        const reduced = reduceRuntimeEvent(
+          { workspace: session.workspace, activeTurnByThread: state.activeTurnByThread },
+          envelope,
+        );
+        return {
+          remoteSessions: replaceWorkspace(catalogFromState(state), hostID, reduced.workspace!).remotes,
+          activeTurnByThread: reduced.activeTurnByThread,
+        };
+      }
       const reduced = reduceRuntimeEvent(
         { workspace: state.workspace, activeTurnByThread: state.activeTurnByThread },
         envelope,
       );
       return {
-        ...state,
         workspace: reduced.workspace,
         activeTurnByThread: reduced.activeTurnByThread,
       };
     });
   },
 
-  applyThreadTitleUpdated: (envelope) => {
+  applyThreadTitleUpdated: (envelope, hostID) => {
     set((state) => {
+      const applyTitle = (workspace: WorkspaceDocument): WorkspaceDocument => ({
+        ...workspace,
+        projects: workspace.projects.map((project) =>
+          project.id !== envelope.projectID
+            ? project
+            : {
+                ...project,
+                threads: project.threads.map((thread) =>
+                  thread.id === envelope.threadID
+                    ? { ...thread, title: envelope.title }
+                    : thread),
+              }),
+      });
+      if (hostID && !isLocalHost(hostID)) {
+        const session = state.remoteSessions.find((item) => item.host.id === hostID);
+        if (!session) return {};
+        return {
+          remoteSessions: replaceWorkspace(catalogFromState(state), hostID, applyTitle(session.workspace)).remotes,
+        };
+      }
       if (!state.workspace) return {};
-      return {
-        workspace: {
-          ...state.workspace,
-          projects: state.workspace.projects.map((project) =>
-            project.id !== envelope.projectID
-              ? project
-              : {
-                  ...project,
-                  threads: project.threads.map((thread) =>
-                    thread.id === envelope.threadID
-                      ? { ...thread, title: envelope.title }
-                      : thread),
-                }),
-        },
-      };
+      return { workspace: applyTitle(state.workspace) };
     });
   },
 
-  applyTurnFinished: (envelope) => {
+  applyTurnFinished: (envelope, hostID) => {
     set((state) => {
+      const catalog = catalogFromState(state);
+      const workspace = hostID && !isLocalHost(hostID)
+        ? catalog.remotes.find((session) => session.host.id === hostID)?.workspace ?? null
+        : state.workspace;
       const unseenTarget = unseenTargetForFinishedTurn(
-        state.workspace,
+        workspace,
         envelope,
         state.selectedThreadID,
       );

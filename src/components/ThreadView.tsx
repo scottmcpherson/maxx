@@ -3,12 +3,12 @@ import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
 import { buildTimeline } from "../contract/timeline";
-import { onAnnotationComposerContext } from "../browserAnnotations";
 import { bylineAnchors, buildRows, rendersRow, TimelineRow } from "../contract/timelineRows";
 import {
   AgentDefinition,
   ChatProject,
   ChatThread,
+  ProviderProfile,
   projectName,
   RuntimeInteractionDecision,
 } from "../contract/types";
@@ -31,22 +31,26 @@ import { MentionTextarea } from "./MentionTextarea";
 import { MessageMedia } from "./MessageMedia";
 import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
 import { RuntimePicker } from "./RuntimePicker";
+import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
 import { SideThreadPanel } from "./SideThreadPanel";
 import { SideThreadResizer } from "./SideThreadResizer";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
+const EMPTY_BROWSER_ANNOTATIONS = [] as const;
 
 function Markdown({
   text,
   isAnimating,
   projectID,
   threadID,
+  hostID,
 }: {
   text: string;
   isAnimating: boolean;
   projectID?: string;
   threadID?: string;
+  hostID?: string;
 }) {
   const segments = useMemo(() => parseMessageContent(text), [text]);
   return (
@@ -62,7 +66,7 @@ function Markdown({
           {segment.text}
         </Streamdown>
       ) : projectID && threadID ? (
-        <MessageMedia key={segment.id} media={segment.media} projectID={projectID} threadID={threadID} />
+        <MessageMedia key={segment.id} media={segment.media} projectID={projectID} threadID={threadID} hostID={hostID} />
       ) : null)}
     </div>
   );
@@ -76,8 +80,16 @@ export { buildRows };
  * to fit around. It is the *layout* verdict only; whether the slot is already
  * taken (an open side thread) is decided here.
  */
-export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
+export function ThreadView({
+  summaryFits,
+  browserExpanded = false,
+}: {
+  summaryFits: boolean;
+  browserExpanded?: boolean;
+}) {
   const workspace = useAppStore((state) => state.workspace);
+  const remoteSessions = useAppStore((state) => state.remoteSessions);
+  const selectedHostID = useAppStore((state) => state.selectedHostID);
   const selectedProjectID = useAppStore((state) => state.selectedProjectID);
   const selectedThreadID = useAppStore((state) => state.selectedThreadID);
   const activeTurns = useAppStore((state) => state.activeTurnByThread);
@@ -97,10 +109,18 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
   const error = useAppStore((state) => state.error);
+  const browserAnnotations = useAppStore((state) => selectedThreadID
+    ? state.browserAnnotationsByThread[selectedThreadID] ?? EMPTY_BROWSER_ANNOTATIONS
+    : EMPTY_BROWSER_ANNOTATIONS);
+  const clearBrowserAnnotations = useAppStore((state) => state.clearBrowserAnnotations);
 
+  const projectWorkspace = useMemo(() => {
+    if (!selectedHostID || selectedHostID === "local") return workspace;
+    return remoteSessions.find((session) => session.host.id === selectedHostID)?.workspace ?? workspace;
+  }, [remoteSessions, selectedHostID, workspace]);
   const project = useMemo(
-    () => workspace?.projects.find((candidate) => candidate.id === selectedProjectID),
-    [selectedProjectID, workspace],
+    () => projectWorkspace?.projects.find((candidate) => candidate.id === selectedProjectID),
+    [projectWorkspace, selectedProjectID],
   );
   const thread = useMemo(
     () => project?.threads.find((candidate) => candidate.id === selectedThreadID),
@@ -116,7 +136,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
   );
   const rows = useMemo(() => buildRows(thread, timeline), [thread, timeline]);
 
-  const agents = useMemo(() => workspace?.agents ?? [], [workspace]);
+  const agents = useMemo(() => projectWorkspace?.agents ?? workspace?.agents ?? [], [projectWorkspace, workspace]);
   const agentsByID = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
@@ -160,12 +180,8 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
   const images = useImageAttachments();
+  const [submitting, setSubmitting] = useState(false);
   const focusAfterNewThreadRef = useRef(selectedThreadID === null);
-
-  useEffect(() => onAnnotationComposerContext((context) => {
-    setDraft(draft.trim() ? `${draft.trimEnd()}\n\n${context}` : context);
-    requestAnimationFrame(() => draftRef.current?.focus());
-  }), [draft, setDraft]);
 
   useEffect(() => {
     const element = draftRef.current;
@@ -195,7 +211,9 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
     return (
       <NewAgentView
         projects={workspace.projects}
+        remotes={remoteSessions}
         initialProjectID={selectedProjectID}
+        initialHostID={selectedHostID}
         sidebarOpen={sidebarOpen}
       />
     );
@@ -212,20 +230,22 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
     const record = thread.interactionRequests.find((request) => request.id === requestID);
     return record && record.status !== "pending" ? record.status : null;
   };
-  const submit = () => {
-    if ((!draft.trim() && images.paths.length === 0) || isRunning) return;
+  const submit = async () => {
+    if ((!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0) || isRunning || submitting) return;
     // A mention routes the message to those agents in a side thread; the main
     // thread's provider never sees it. Multiple mentions respond in sequence.
     const mentioned = mentionedAgents(draft, agents);
-    if (mentioned.length > 0) {
-      void startSideThread(project.id, thread.id, mentioned.map((agent) => agent.id), draft.trim(), images.paths);
-    } else {
-      void sendPrompt(draft.trim(), images.paths);
-    }
+    setSubmitting(true);
+    const sent = await (mentioned.length > 0
+      ? startSideThread(project.id, thread.id, mentioned.map((agent) => agent.id), draft.trim(), images.paths, [...browserAnnotations])
+      : sendPrompt(draft.trim(), images.paths, [...browserAnnotations]));
+    setSubmitting(false);
+    if (!sent) return;
     // Sending is a turn boundary: anything still being transcribed has already
     // gone with the message, so the microphone closes with it.
     dictation.clear();
     images.clear();
+    clearBrowserAnnotations(thread.id);
     mentionMenu.dismiss();
     requestAnimationFrame(() => draftRef.current?.focus());
   };
@@ -243,7 +263,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
   const contextUsed = usage?.contextTokens;
 
   return (
-    <div className="workspace-stage">
+    <div className="workspace-stage" aria-hidden={browserExpanded} inert={browserExpanded}>
       <main className="thread-view">
         <header className={`thread-header ${sidebarOpen ? "" : "sidebar-closed"}`} onMouseDown={beginWindowDrag}>
           <div className="thread-header-side collapsed-titlebar-controls">
@@ -262,6 +282,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
           </button>
           <div className="thread-header-side end">
             <SummaryToggle project={project} thread={thread} fits={summarySlotFree} />
+            {(!selectedHostID || selectedHostID === "local") && (
             <button
               className={`icon-button${browserOpen ? " is-active" : ""}`}
               title={`${browserOpen ? "Hide" : "Show"} right sidebar (${formatKeyboardShortcut(toggleBrowserShortcut)})`}
@@ -271,6 +292,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
             >
               <Icons.panel size={14} />
             </button>
+            )}
           </div>
         </header>
 
@@ -278,6 +300,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
           key={thread.id}
           projectID={project.id}
           threadID={thread.id}
+          hostID={selectedHostID}
           rows={rows}
           terminalTurnIDs={terminalTurnIDs}
           activeTurnID={activeTurns[thread.id]}
@@ -301,6 +324,13 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
           <DictationStatus dictation={dictation} />
           <div className="composer">
             <MentionMenu menu={mentionMenu} />
+            <BrowserAnnotationPills
+              annotations={[...browserAnnotations]}
+              onClear={() => {
+                clearBrowserAnnotations(thread.id);
+                requestAnimationFrame(() => draftRef.current?.focus());
+              }}
+            />
             <PendingImageStrip paths={images.paths} onRemove={images.remove} />
             <MentionTextarea
               ref={draftRef}
@@ -328,7 +358,7 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
                 }
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  submit();
+                  void submit();
                 }
               }}
             />
@@ -340,7 +370,8 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
                 model={thread.model}
                 effort={thread.effort}
                 speed={thread.speed}
-                profiles={workspace.providerProfiles}
+                profiles={projectWorkspace?.providerProfiles ?? workspace.providerProfiles}
+                hostId={selectedHostID}
                 workingDirectory={project?.folderPath}
                 disabled={isRunning}
                 onChange={(next) => {
@@ -370,7 +401,8 @@ export function ThreadView({ summaryFits }: { summaryFits: boolean }) {
                     <Icons.stop size={14} />
                   </button>
                 ) : (
-                  <button className="send-button" title="Send message" disabled={!draft.trim() && images.paths.length === 0} onClick={submit}>
+                  <button className="send-button" title={submitting ? "Sending message" : "Send message"}
+                    disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)} onClick={() => void submit()}>
                     <Icons.arrowUp size={16} />
                   </button>
                 )}
@@ -426,6 +458,7 @@ function formatTokens(count: number): string {
 export function ThreadTimeline({
   projectID,
   threadID,
+  hostID,
   rows,
   terminalTurnIDs,
   activeTurnID,
@@ -441,6 +474,7 @@ export function ThreadTimeline({
 }: {
   projectID: string;
   threadID: string;
+  hostID?: string;
   rows: TimelineRow[];
   terminalTurnIDs: Set<string>;
   activeTurnID: string | undefined;
@@ -500,13 +534,15 @@ export function ThreadTimeline({
                     {row.attachments.map((attachment) => (
                       <MessageMedia
                         key={attachment.id}
-                        media={{ kind: "image", destination: attachment.path, altText: attachment.displayName }}
+                        media={{ kind: "image", destination: `attachment:${attachment.id}`, altText: attachment.displayName }}
                         projectID={projectID}
                         threadID={threadID}
+                        hostID={hostID}
                       />
                     ))}
                   </div>
                 )}
+                <BrowserAnnotationPills annotations={row.annotations} readonly />
                 {row.text && <div className="user-bubble"><MentionText text={row.text} agents={mentionAgents} /></div>}
                 {anchored.length > 0 && onOpenSideThread && (
                   <div className="reply-chip-row">
@@ -546,6 +582,7 @@ export function ThreadTimeline({
                     isAnimating={activeTurnID === item.turnID}
                     projectID={projectID}
                     threadID={threadID}
+                    hostID={hostID}
                   />
                 </div>
               );
@@ -757,11 +794,15 @@ function ScrollToBottomButton() {
 
 function NewAgentView({
   projects,
+  remotes,
   initialProjectID,
+  initialHostID,
   sidebarOpen,
 }: {
   projects: ChatProject[];
+  remotes: { host: { id: string; name: string }; workspace: { projects: ChatProject[]; providerProfiles?: ProviderProfile[] } }[];
   initialProjectID: string | null;
+  initialHostID: string;
   sidebarOpen: boolean;
 }) {
   const profiles = useAppStore((state) => state.workspace?.providerProfiles ?? []);
@@ -769,7 +810,22 @@ function NewAgentView({
   const runtime = useAppStore((state) => state.newThreadRuntime);
   const setRuntime = useAppStore((state) => state.setNewThreadRuntime);
   const error = useAppStore((state) => state.error);
-  const [projectID, setProjectID] = useState(initialProjectID ?? projects[0]?.id ?? "");
+  const hosted = [
+    ...projects.map((project) => ({ project, hostId: "local", hostName: "This Mac" })),
+    ...remotes.flatMap((session) =>
+      session.workspace.projects.map((project) => ({
+        project,
+        hostId: session.host.id,
+        hostName: session.host.name,
+      })),
+    ),
+  ];
+  const [projectID, setProjectID] = useState(
+    initialProjectID
+      ?? hosted.find((item) => item.hostId === initialHostID)?.project.id
+      ?? hosted[0]?.project.id
+      ?? "",
+  );
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
   const dictation = useDictation({
@@ -814,7 +870,7 @@ function NewAgentView({
         className={`new-agent-titlebar ${sidebarOpen ? "" : "sidebar-closed"}`}
         onMouseDown={beginWindowDrag}
       />
-      {projects.length === 0 ? (
+      {hosted.length === 0 ? (
         <div className="empty-workspace-copy">
           <div className="empty-logo">M</div>
           <h1>Open a project to start</h1>
@@ -824,10 +880,14 @@ function NewAgentView({
         <div className="new-agent-center">
           <div className="new-agent-context-row">
             <select aria-label="Project" value={projectID} onChange={(event) => setProjectID(event.target.value)}>
-              {projects.map((project) => <option key={project.id} value={project.id}>{projectName(project)}</option>)}
+              {hosted.map((item) => (
+                <option key={`${item.hostId}:${item.project.id}`} value={item.project.id}>
+                  {item.hostName} — {projectName(item.project)}
+                </option>
+              ))}
             </select>
             <span>›</span>
-            <span>This Mac</span>
+            <span>{hosted.find((item) => item.project.id === projectID)?.hostName ?? "This Mac"}</span>
           </div>
           <DictationStatus dictation={dictation} />
           <div className="new-agent-composer">
@@ -858,8 +918,14 @@ function NewAgentView({
                   model={runtime.model}
                   effort={runtime.effort}
                   speed={runtime.speed}
-                  profiles={profiles}
-                  workingDirectory={projects.find((p) => p.id === projectID)?.folderPath}
+                  profiles={
+                    hosted.find((item) => item.project.id === projectID)?.hostId === "local"
+                      ? profiles
+                      : remotes.find((session) => session.host.id === hosted.find((item) => item.project.id === projectID)?.hostId)
+                          ?.workspace.providerProfiles ?? profiles
+                  }
+                  hostId={hosted.find((item) => item.project.id === projectID)?.hostId}
+                  workingDirectory={hosted.find((item) => item.project.id === projectID)?.project.folderPath}
                   placement="bottom"
                   onChange={setRuntime}
                 />

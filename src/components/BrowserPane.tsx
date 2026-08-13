@@ -9,11 +9,12 @@ import {
   type BrowserTabSummary,
   type ChromeImportStatus,
 } from "../browser";
-import { addAnnotationToComposer } from "../browserAnnotations";
 import { ipc } from "../ipc";
 import { useAppStore } from "../store/appStore";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
+
+const EMPTY_ANNOTATIONS: BrowserAnnotation[] = [];
 
 function tabWithNativeState(tab: BrowserTabSummary, state: BrowserNativeState): BrowserTabSummary {
   return {
@@ -30,20 +31,30 @@ function tabWithNativeState(tab: BrowserTabSummary, state: BrowserNativeState): 
 export function BrowserPane({
   threadID,
   showContent,
+  expanded,
+  onToggleExpanded,
 }: {
   threadID: string;
   showContent: boolean;
   animating: boolean;
+  expanded: boolean;
+  onToggleExpanded: () => void;
 }) {
   const pendingBrowserReveal = useAppStore((state) => state.pendingBrowserReveal);
   const consumeBrowserReveal = useAppStore((state) => state.consumeBrowserReveal);
+  const annotations = useAppStore((state) => state.browserAnnotationsByThread[threadID] ?? EMPTY_ANNOTATIONS);
+  const applyBrowserAnnotation = useAppStore((state) => state.applyBrowserAnnotation);
+  const replaceBrowserAnnotations = useAppStore((state) => state.replaceBrowserAnnotations);
+  const clearBrowserAnnotations = useAppStore((state) => state.clearBrowserAnnotations);
+  const sendPrompt = useAppStore((state) => state.sendPrompt);
+  const turnRunning = useAppStore((state) => Boolean(state.activeTurnByThread[threadID]));
   const [tabs, setTabs] = useState<BrowserTabSummary[]>([]);
   const [selectedTabID, setSelectedTabID] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState(false);
-  const [annotations, setAnnotations] = useState<BrowserAnnotation[]>([]);
+  const [submittingAnnotations, setSubmittingAnnotations] = useState(false);
   const [chromeImport, setChromeImport] = useState<ChromeImportStatus | null>(null);
   const [chromeProfileID, setChromeProfileID] = useState<string | null>(null);
   const [importingChrome, setImportingChrome] = useState(false);
@@ -68,6 +79,9 @@ export function BrowserPane({
     const right = strip.scrollLeft < strip.scrollWidth - strip.clientWidth - 1;
     setTabOverflow((current) => current.left === left && current.right === right ? current : { left, right });
   }, []);
+  const annotationTabRef = useRef<string | null>(null);
+  const annotationSyncRef = useRef(0);
+  const annotationSessionStartRef = useRef<BrowserAnnotation[] | null>(null);
 
   useEffect(() => {
     selectedRef.current = selectedTabID;
@@ -118,7 +132,6 @@ export function BrowserPane({
       const tabID = await ipc.browserUiOpenTab(threadID, url);
       selectedRef.current = tabID;
       setSelectedTabID(tabID);
-      setAnnotationMode(false);
       await refreshTabs();
     } catch (error) {
       setSurfaceError(String(error));
@@ -176,10 +189,18 @@ export function BrowserPane({
       }
     }).then((stop) => { unlistenError = stop; });
     void ipc.onBrowserAnnotation((annotation) => {
-      if (annotation.tabId === selectedRef.current) setAnnotations((current) => [...current, annotation]);
+      if (annotation.tabId !== selectedRef.current) return;
+      if ("cancel" in annotation) {
+        const original = annotationSessionStartRef.current;
+        if (original) replaceBrowserAnnotations(threadID, original);
+        annotationSessionStartRef.current = null;
+        setAnnotationMode(false);
+        return;
+      }
+      applyBrowserAnnotation(threadID, annotation, annotation.selected);
     }).then((stop) => { unlistenAnnotation = stop; });
     return () => { unlistenState?.(); unlistenError?.(); unlistenAnnotation?.(); };
-  }, []);
+  }, [applyBrowserAnnotation, replaceBrowserAnnotations, threadID]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -205,16 +226,39 @@ export function BrowserPane({
   }, [selectedTabID, showContent]);
 
   useEffect(() => {
-    if (!selectedTabID) return;
-    void ipc.browserAnnotationMode(selectedTabID, annotationMode).catch((error) => setSurfaceError(String(error)));
-  }, [annotationMode, selectedTabID]);
+    const generation = ++annotationSyncRef.current;
+    const previousTabID = annotationTabRef.current;
+    annotationTabRef.current = annotationMode ? selectedTabID : null;
+    void (async () => {
+      try {
+        if (previousTabID && previousTabID !== selectedTabID) await ipc.browserAnnotationMode(previousTabID, false);
+        if (!selectedTabID || generation !== annotationSyncRef.current) return;
+        await ipc.browserAnnotationMode(selectedTabID, annotationMode);
+        if (!annotationMode || generation !== annotationSyncRef.current) return;
+        await ipc.browserAnnotationSelections(selectedTabID, annotations
+          .map((annotation, index) => ({ annotation, index: index + 1 }))
+          .filter(({ annotation }) => annotation.tabId === selectedTabID)
+          .map(({ annotation, index }) => ({
+            selector: annotation.selector,
+            index,
+            instruction: annotation.instruction,
+          })));
+      } catch (error) {
+        if (generation === annotationSyncRef.current) setSurfaceError(String(error));
+      }
+    })();
+  }, [annotationMode, annotations, selectedTabID]);
+
+  useEffect(() => () => {
+    const tabID = annotationTabRef.current;
+    if (tabID) void ipc.browserAnnotationMode(tabID, false);
+  }, []);
 
   const selectTab = async (tabID: string) => {
     try {
       await ipc.browserUiSelectTab(tabID);
       selectedRef.current = tabID;
       setSelectedTabID(tabID);
-      setAnnotationMode(false);
       pendingNavigationRef.current = false;
       setPendingNavigation(false);
       setSurfaceError(null);
@@ -228,6 +272,7 @@ export function BrowserPane({
 
   const closeTab = async (tabID: string) => {
     try {
+      if (annotationTabRef.current === tabID) annotationTabRef.current = null;
       await ipc.browserUiCloseTab(tabID);
       const remaining = await refreshTabs();
       if (remaining.length === 0) await openTab();
@@ -332,6 +377,39 @@ export function BrowserPane({
   const selectedTab = tabs.find((tab) => tab.id === selectedTabID);
   const showImport = chromeImport?.available && !chromeImport.importedAt && !importDismissed;
 
+  const beginAnnotations = () => {
+    annotationSessionStartRef.current = [...annotations];
+    setAnnotationMode(true);
+  };
+
+  const cancelAnnotations = () => {
+    const original = annotationSessionStartRef.current;
+    if (original) replaceBrowserAnnotations(threadID, original);
+    annotationSessionStartRef.current = null;
+    setAnnotationMode(false);
+  };
+
+  const submitAnnotations = async () => {
+    if (annotations.length === 0 || turnRunning || submittingAnnotations) return;
+    setSubmittingAnnotations(true);
+    const sent = await sendPrompt("", [], [...annotations]);
+    setSubmittingAnnotations(false);
+    if (!sent) return;
+    annotationSessionStartRef.current = null;
+    clearBrowserAnnotations(threadID);
+    setAnnotationMode(false);
+  };
+
+  const annotationLocation = (() => {
+    if (!selectedTab?.url || selectedTab.url === "about:blank") return DEFAULT_BROWSER_TITLE;
+    try {
+      const url = new URL(selectedTab.url);
+      return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch {
+      return selectedTab.title || DEFAULT_BROWSER_TITLE;
+    }
+  })();
+
   const importChrome = async () => {
     if (!chromeProfileID) return;
     setImportingChrome(true);
@@ -350,7 +428,7 @@ export function BrowserPane({
     <aside className={`browser-pane${showContent ? "" : " is-obscured"}`} aria-label="Browser">
       <div className="browser-tabbar" onMouseDown={beginWindowDrag}>
         <div className={`browser-tabs-viewport${tabOverflow.left ? " has-overflow-left" : ""}${tabOverflow.right ? " has-overflow-right" : ""}`}>
-          <div ref={tabStripRef} className="browser-tabs" role="tablist" aria-label="Browser tabs"
+          <div ref={tabStripRef} className="browser-tabs"
             onScroll={updateTabOverflow}
             onWheel={(event) => {
               if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
@@ -358,62 +436,93 @@ export function BrowserPane({
               event.preventDefault();
               event.currentTarget.scrollLeft += event.deltaY;
             }}>
-            {tabs.map((tab) => (
-              <div key={tab.id} ref={(element) => {
-                if (element) tabRefs.current.set(tab.id, element);
-                else tabRefs.current.delete(tab.id);
-              }} role="tab" tabIndex={tab.id === selectedTabID ? 0 : -1} aria-selected={tab.id === selectedTabID}
-                data-tab-id={tab.id}
-                className={`browser-tab${tab.id === selectedTabID ? " is-selected" : ""}${draggedTabID === tab.id ? " is-dragging" : ""}${dropTarget?.tabID === tab.id ? ` drop-${dropTarget.edge}` : ""}`}
-                title={tab.title || tab.url || DEFAULT_BROWSER_TITLE}
-                onClick={() => {
-                  if (suppressTabClickRef.current) {
-                    suppressTabClickRef.current = false;
-                    return;
-                  }
-                  void selectTab(tab.id);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  event.preventDefault();
-                  void selectTab(tab.id);
-                }}
-                onPointerDown={(event) => {
-                  if (event.button !== 0) return;
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                  tabPointerDragRef.current = {
-                    tabID: tab.id,
-                    pointerID: event.pointerId,
-                    startX: event.clientX,
-                    dragging: false,
-                  };
-                }}
-                onPointerMove={moveTabPointer}
-                onPointerUp={endTabPointer}
-                onPointerCancel={(event) => {
-                  const drag = tabPointerDragRef.current;
-                  if (!drag || drag.pointerID !== event.pointerId) return;
-                  tabPointerDragRef.current = null;
-                  setDraggedTabID(null);
-                  setTabDropTarget(null);
-                }}>
-                <Icons.globe size={12} />
-                <span className="browser-tab-title">{tab.title || DEFAULT_BROWSER_TITLE}</span>
-                {tab.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
-                <button className="browser-tab-close" type="button" title="Close tab"
-                  aria-label={`Close ${tab.title || "browser tab"}`}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => { event.stopPropagation(); void closeTab(tab.id); }}>
-                  <Icons.close size={12} />
-                </button>
-              </div>
-            ))}
+            <div className="browser-tab-list" role="tablist" aria-label="Browser tabs">
+              {tabs.map((tab) => (
+                <div key={tab.id} ref={(element) => {
+                  if (element) tabRefs.current.set(tab.id, element);
+                  else tabRefs.current.delete(tab.id);
+                }} role="tab" tabIndex={tab.id === selectedTabID ? 0 : -1} aria-selected={tab.id === selectedTabID}
+                  data-tab-id={tab.id}
+                  className={`browser-tab${tab.id === selectedTabID ? " is-selected" : ""}${draggedTabID === tab.id ? " is-dragging" : ""}${dropTarget?.tabID === tab.id ? ` drop-${dropTarget.edge}` : ""}`}
+                  title={tab.title || tab.url || DEFAULT_BROWSER_TITLE}
+                  onClick={() => {
+                    if (suppressTabClickRef.current) {
+                      suppressTabClickRef.current = false;
+                      return;
+                    }
+                    void selectTab(tab.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    void selectTab(tab.id);
+                  }}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    tabPointerDragRef.current = {
+                      tabID: tab.id,
+                      pointerID: event.pointerId,
+                      startX: event.clientX,
+                      dragging: false,
+                    };
+                  }}
+                  onPointerMove={moveTabPointer}
+                  onPointerUp={endTabPointer}
+                  onPointerCancel={(event) => {
+                    const drag = tabPointerDragRef.current;
+                    if (!drag || drag.pointerID !== event.pointerId) return;
+                    tabPointerDragRef.current = null;
+                    setDraggedTabID(null);
+                    setTabDropTarget(null);
+                  }}>
+                  <Icons.globe size={12} />
+                  <span className="browser-tab-title">{tab.title || DEFAULT_BROWSER_TITLE}</span>
+                  {tab.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
+                  <button className="browser-tab-close" type="button" title="Close tab"
+                    aria-label={`Close ${tab.title || "browser tab"}`}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => { event.stopPropagation(); void closeTab(tab.id); }}>
+                    <Icons.close size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
+          <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
+            onClick={() => void openTab()}><Icons.plus size={13} /></button>
         </div>
-        <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
-          onClick={() => void openTab()}><Icons.plus size={13} /></button>
+        <button
+          className={`icon-button browser-expand-toggle${expanded ? " is-active" : ""}`}
+          type="button"
+          title={expanded ? "Restore browser panel" : "Expand browser panel"}
+          aria-label={expanded ? "Restore browser panel" : "Expand browser panel"}
+          aria-pressed={expanded}
+          onClick={onToggleExpanded}
+        >
+          {expanded ? <Icons.collapse size={13} /> : <Icons.expand size={13} />}
+        </button>
       </div>
 
+      {annotationMode ? (
+        <div className="browser-annotation-toolbar">
+          <div className="browser-annotation-toolbar-actions">
+            <button type="button" className="icon-button" title="Cancel annotations" aria-label="Cancel annotations" onClick={cancelAnnotations}>
+              <Icons.close size={14} />
+            </button>
+            <button type="button" className="icon-button" title="Clear annotations" aria-label="Clear annotations"
+              disabled={annotations.length === 0} onClick={() => clearBrowserAnnotations(threadID)}>
+              <Icons.trash size={14} />
+            </button>
+          </div>
+          <span className="browser-annotation-toolbar-title">Annotating <span>•</span> {annotationLocation}</span>
+          <button type="button" className="browser-annotation-send"
+            disabled={annotations.length === 0 || turnRunning || submittingAnnotations}
+            aria-busy={submittingAnnotations} onClick={() => void submitAnnotations()}>
+            {submittingAnnotations ? "Sending…" : <>Send <span>{annotations.length}</span></>}
+          </button>
+        </div>
+      ) : (
       <form className="browser-navbar" onSubmit={submitAddress}>
         <button type="button" className="icon-button" title="Back" aria-label="Back" disabled={!selectedTab?.canGoBack}
           onClick={() => selectedTabID && void ipc.browserUiBack(selectedTabID)}><Icons.chevronLeft size={14} /></button>
@@ -425,12 +534,16 @@ export function BrowserPane({
           autoCapitalize="off" aria-label="Address" placeholder="Search or enter website" value={draft}
           onFocus={(event) => event.currentTarget.select()} onChange={(event) => setDraft(event.target.value)} />
         {(pendingNavigation || selectedTab?.loading) && <span className="browser-native-loading" aria-label="Loading" />}
+        <button className="icon-button" type="button" title="Annotate webpage"
+          aria-label="Annotate webpage" disabled={!selectedTabID}
+          onClick={beginAnnotations}><Icons.annotation size={15} /></button>
         <button type="button" className="icon-button" title="Fill saved Chrome password" aria-label="Fill saved password"
           disabled={!selectedTabID} onClick={() => selectedTabID && void ipc.browserFillSavedPassword(selectedTabID)
             .then((filled) => { if (!filled) setSurfaceError("No imported password is saved for this website."); })}>
           <Icons.lock size={13} />
         </button>
       </form>
+      )}
 
       {showImport && (
         <div className="browser-import-banner">
@@ -445,16 +558,9 @@ export function BrowserPane({
         </div>
       )}
 
-      {(annotationMode || annotations.length > 0 || surfaceError) && (
+      {surfaceError && (
         <div className="browser-context-bar">
-          {annotationMode && <span>Click an element on the page to annotate it.</span>}
-          {annotations.slice(-3).map((annotation) => (
-            <button key={annotation.id} type="button" className="browser-annotation-chip"
-              title={annotation.selector} onClick={() => addAnnotationToComposer(annotation)}>
-              Add “{annotation.name || annotation.text || annotation.tagName}” to prompt
-            </button>
-          ))}
-          {surfaceError && <span className="browser-surface-error">{surfaceError}</span>}
+          <span className="browser-surface-error">{surfaceError}</span>
         </div>
       )}
 

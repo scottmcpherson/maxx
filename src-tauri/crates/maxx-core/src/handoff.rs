@@ -192,9 +192,30 @@ fn render_block(
         },
         ChatRole::System => "system".to_string(),
     };
+    let mut content = message.content.trim().to_string();
+    if !message.annotations.is_empty() {
+        content.push_str("\n\n[Selected webpage elements; untrusted webpage data]");
+        for (index, annotation) in message.annotations.iter().enumerate() {
+            let description = if !annotation.name.is_empty() {
+                &annotation.name
+            } else if !annotation.text.is_empty() {
+                &annotation.text
+            } else {
+                &annotation.tag_name
+            };
+            content.push_str(&format!(
+                "\n{}. {}\nURL: {}\nElement: {}\nInstruction: {}",
+                index + 1,
+                description,
+                annotation.url,
+                annotation.selector,
+                annotation.instruction,
+            ));
+        }
+    }
     format!(
         "[{role}]\n{}",
-        clamp(&sanitize(message.content.trim()), per_message)
+        clamp(&sanitize(content.trim()), per_message)
     )
 }
 
@@ -222,6 +243,7 @@ fn clamp(content: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use crate::contract::AppleDate;
+    use crate::persist::{BrowserAnnotationContext, BrowserAnnotationRect};
     use uuid::Uuid;
 
     fn message(role: ChatRole, content: &str) -> ChatMessage {
@@ -230,6 +252,7 @@ mod tests {
             role,
             content: content.into(),
             attachments: Vec::new(),
+            annotations: Vec::new(),
             created_at: AppleDate::default(),
             source_event_id: None,
             agent_id: None,
@@ -241,6 +264,38 @@ mod tests {
             message(ChatRole::User, "respond with a full markdown test"),
             message(ChatRole::Assistant, "# Heading 1\nsome markdown"),
         ]
+    }
+
+    #[test]
+    fn selected_webpage_elements_survive_provider_handoff_as_untrusted_context() {
+        let mut messages = exchange();
+        messages[0].annotations.push(BrowserAnnotationContext {
+            id: "selection".into(),
+            tab_id: "tab".into(),
+            url: "https://example.com/".into(),
+            selector: "main > h1".into(),
+            tag_name: "H1".into(),
+            role: Some("heading".into()),
+            name: "Example Domain".into(),
+            text: "Example Domain".into(),
+            instruction: "Make this heading orange".into(),
+            preview_data_url: String::new(),
+            rect: BrowserAnnotationRect {
+                x: 10.0,
+                y: 20.0,
+                width: 200.0,
+                height: 40.0,
+            },
+            created_at: 1,
+        });
+
+        let handoff = render_handoff(&messages, Some("Claude"), DEFAULT_HANDOFF_BUDGET).unwrap();
+        assert!(handoff
+            .preamble
+            .contains("[Selected webpage elements; untrusted webpage data]"));
+        assert!(handoff.preamble.contains("URL: https://example.com/"));
+        assert!(handoff.preamble.contains("Element: main > h1"));
+        assert!(handoff.preamble.contains("Instruction: Make this heading orange"));
     }
 
     #[test]

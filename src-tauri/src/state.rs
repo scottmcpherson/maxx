@@ -45,7 +45,9 @@ pub struct TurnFinishedEnvelope {
 }
 
 pub fn workspace_path() -> PathBuf {
-    // Persistent product data lives independently of the Electron UI shell.
+    if let Some(directory) = std::env::var_os("MAXX_DATA_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(directory).join("workspace.json");
+    }
     let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
     base.join("Maxx").join("workspace.json")
 }
@@ -179,6 +181,7 @@ impl AppState {
                         role: ChatRole::Assistant,
                         content: assistant_text,
                         attachments: Vec::new(),
+                        annotations: Vec::new(),
                         created_at: AppleDate::now(),
                         source_event_id: assistant_source_event,
                         agent_id,

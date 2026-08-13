@@ -32,6 +32,7 @@ interface EnsureCatalogOptions {
   provider: ChatProvider;
   profiles: ProviderProfile[];
   workingDirectory?: string | null;
+  hostId?: string | null;
   force?: boolean;
 }
 
@@ -40,6 +41,7 @@ interface PrefetchCatalogOptions {
   providers: ChatProvider[];
   profiles: ProviderProfile[];
   workingDirectory?: string | null;
+  hostId?: string | null;
 }
 
 interface ModelCatalogState {
@@ -198,6 +200,7 @@ function hashContext(value: string): string {
 export function providerCatalogContextKey(
   profiles: ProviderProfile[],
   workingDirectory?: string | null,
+  hostId?: string | null,
 ): string {
   const runtimeProfiles = profiles
     .map((profile) => ({
@@ -211,6 +214,7 @@ export function providerCatalogContextKey(
     }))
     .sort((left, right) => `${left.provider}:${left.id}`.localeCompare(`${right.provider}:${right.id}`));
   return `catalog-v1-${hashContext(JSON.stringify({
+    hostId: hostId ?? "local",
     workingDirectory: workingDirectory ?? "",
     profiles: runtimeProfiles,
   }))}`;
@@ -250,6 +254,7 @@ export const useModelCatalogStore = create<ModelCatalogState>((set, get) => ({
     provider,
     profiles,
     workingDirectory,
+    hostId,
     force = false,
   }) => {
     get().hydrateContext(contextKey);
@@ -290,6 +295,7 @@ export const useModelCatalogStore = create<ModelCatalogState>((set, get) => ({
           provider,
           profile?.id,
           workingDirectory ?? undefined,
+          hostId,
         ));
         if (response.source !== "live" || !response.models.length) {
           throw new Error(response.error || "Provider model discovery returned no models.");
@@ -341,7 +347,7 @@ export const useModelCatalogStore = create<ModelCatalogState>((set, get) => ({
     return request;
   },
 
-  prefetch: async ({ contextKey, providers, profiles, workingDirectory }) => {
+  prefetch: async ({ contextKey, providers, profiles, workingDirectory, hostId }) => {
     get().hydrateContext(contextKey);
     if (prefetchedContexts.has(contextKey)) return;
     prefetchedContexts.add(contextKey);
@@ -351,6 +357,7 @@ export const useModelCatalogStore = create<ModelCatalogState>((set, get) => ({
       provider,
       profiles,
       workingDirectory,
+      hostId,
       force: true,
     })));
   },

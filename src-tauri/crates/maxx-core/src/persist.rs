@@ -33,6 +33,34 @@ pub struct ChatImageAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserAnnotationRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserAnnotationContext {
+    pub id: String,
+    #[serde(rename = "tabId")]
+    pub tab_id: String,
+    pub url: String,
+    pub selector: String,
+    #[serde(rename = "tagName")]
+    pub tag_name: String,
+    pub role: Option<String>,
+    pub name: String,
+    pub text: String,
+    pub instruction: String,
+    #[serde(rename = "previewDataUrl")]
+    pub preview_data_url: String,
+    pub rect: BrowserAnnotationRect,
+    #[serde(rename = "createdAt")]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
@@ -40,6 +68,8 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ChatImageAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<BrowserAnnotationContext>,
     #[serde(rename = "createdAt")]
     pub created_at: AppleDate,
     #[serde(

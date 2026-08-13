@@ -55,6 +55,7 @@ export default function App() {
     browserOpen ? selectedThreadID : null,
   );
   const [browserAnimating, setBrowserAnimating] = useState(false);
+  const [browserExpanded, setBrowserExpanded] = useState(false);
   const previousBrowserOpen = useRef(browserOpen);
   const toggleSidebarShortcut = useAppStore((s) => s.keyboardShortcuts.toggleSidebar);
   const toggleBrowserShortcut = useAppStore((s) => s.keyboardShortcuts.toggleBrowser);
@@ -79,6 +80,7 @@ export default function App() {
     searchOpen,
     renameOpen,
   });
+  const browserExpandedActive = browserExpanded && browserOpen && browserUnobscured;
   const browserVisible = browserPresent && browserUnobscured;
   // The summary rail is the last claim on the row, so it is measured here where
   // both pane widths are already known. `browserPresent`, not `browserVisible`:
@@ -97,6 +99,10 @@ export default function App() {
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
+
+  useEffect(() => {
+    if (!browserOpen || !browserUnobscured) setBrowserExpanded(false);
+  }, [browserOpen, browserUnobscured]);
 
   useEffect(() => {
     if (previousBrowserOpen.current === browserOpen) return;
@@ -288,7 +294,7 @@ export default function App() {
         the whole shell — including the right context rail — still fits the window.
       */}
       <div className="zoom-surface">
-        <div className="app-shell">
+        <div className={`app-shell${browserExpandedActive ? " is-browser-expanded" : ""}`}>
           {/* Outside every pane: it has to stay put while the sidebar slides. */}
           <SidebarToggle />
           <div
@@ -304,8 +310,12 @@ export default function App() {
             commitWidth={commitWidth}
             hidden={!sidebarOpen}
           />
-          {agentsOpen ? <AgentsView /> : <ThreadView summaryFits={summaryFits} />}
-          {browserUnobscured && (
+          {agentsOpen ? (
+            <AgentsView />
+          ) : (
+            <ThreadView summaryFits={summaryFits} browserExpanded={browserExpandedActive} />
+          )}
+          {browserUnobscured && !browserExpandedActive && (
             <BrowserResizer
               width={browserWidth}
               maxWidth={browserMaxWidth}
@@ -314,7 +324,7 @@ export default function App() {
             />
           )}
           <div
-            className={`browser-shell ${browserOpen ? "is-open" : "is-closed"}${browserUnobscured ? "" : " is-obscured"}`}
+            className={`browser-shell ${browserOpen ? "is-open" : "is-closed"}${browserUnobscured ? "" : " is-obscured"}${browserExpandedActive ? " is-expanded" : ""}`}
             aria-hidden={!browserOpen || !browserUnobscured}
             inert={!browserOpen || !browserUnobscured}
             onTransitionEnd={(event) => {
@@ -331,6 +341,8 @@ export default function App() {
                 threadID={browserThreadID}
                 showContent={browserVisible}
                 animating={browserAnimating}
+                expanded={browserExpandedActive}
+                onToggleExpanded={() => setBrowserExpanded((current) => !current)}
               />
             )}
           </div>

@@ -46,6 +46,29 @@ export const Icons = {
   plus: (props: IconProps) => (
     <IconBase {...props}><path d="M12 5v14M5 12h14" /></IconBase>
   ),
+  expand: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M9 4H4v5M4 4l6 6M15 20h5v-5M20 20l-6-6" />
+    </IconBase>
+  ),
+  collapse: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M4 4l6 6M10 6v4H6M20 20l-6-6M14 18v-4h4" />
+    </IconBase>
+  ),
+  screenshot: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M8 4H4v4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+      <rect x="8" y="8" width="8" height="8" rx="1" />
+    </IconBase>
+  ),
+  annotation: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M17.5 12.5v2.25A3.25 3.25 0 0 1 14.25 18H9l-4.5 2 1.2-3.5A3.25 3.25 0 0 1 4 13.75V8.25A3.25 3.25 0 0 1 7.25 5H12" />
+      <path d="m13.5 11.5.75-3 4.8-4.8a1.6 1.6 0 0 1 2.25 2.25l-4.8 4.8-3 .75Z" />
+      <path d="m18 4.75 2.25 2.25" />
+    </IconBase>
+  ),
   bell: (props: IconProps) => (
     <IconBase {...props}>
       <path d="M18 9.5a6 6 0 0 0-12 0c0 5-2 6.5-2 6.5h16s-2-1.5-2-6.5" />
@@ -87,6 +110,12 @@ export const Icons = {
       <circle cx="12" cy="12" r="8.5" />
       <path d="M3.5 12h17" />
       <path d="M12 3.5c2.2 2.3 3.3 5.2 3.3 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.3-5.2-3.3-8.5S9.8 5.8 12 3.5Z" />
+    </IconBase>
+  ),
+  computer: (props: IconProps) => (
+    <IconBase {...props}>
+      <rect x="3.5" y="4.5" width="17" height="12" rx="2" />
+      <path d="M8 20.5h8M12 16.5v4" />
     </IconBase>
   ),
   lock: (props: IconProps) => (
@@ -164,6 +193,12 @@ export const Icons = {
   ),
   check: (props: IconProps) => (
     <IconBase {...props}><path d="m5 12.5 4 4L19 7" /></IconBase>
+  ),
+  copy: (props: IconProps) => (
+    <IconBase {...props}>
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+      <path d="M6.5 15.5H5.5a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" />
+    </IconBase>
   ),
   shuffle: (props: IconProps) => (
     <IconBase {...props}>

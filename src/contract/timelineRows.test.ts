@@ -122,7 +122,35 @@ describe("buildRows", () => {
       attachments: [
         { id: "image", path: "/tmp/image.png", mimeType: "image/png", displayName: "image.png" },
       ],
+      annotations: [],
     }]);
+  });
+
+  it("carries structured browser annotations into user rows", () => {
+    const value = thread([]);
+    const annotation = {
+      id: "annotation",
+      tabId: "tab",
+      url: "https://example.com/",
+      selector: "main > h1",
+      tagName: "H1",
+      role: "heading",
+      name: "Example Domain",
+      text: "Example Domain",
+      instruction: "Make this heading orange",
+      previewDataUrl: "",
+      rect: { x: 20, y: 30, width: 200, height: 40 },
+      createdAt: 1,
+    };
+    value.messages = [{
+      id: "message",
+      role: "user",
+      content: "change this",
+      createdAt: 1,
+      attachments: [],
+      annotations: [annotation],
+    }];
+    expect(buildRows(value, [])[0]).toMatchObject({ kind: "user", annotations: [annotation] });
   });
 });
 

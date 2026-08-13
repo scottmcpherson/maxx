@@ -5,6 +5,15 @@ import { ipc } from "../ipc";
 import { projectName } from "../contract/types";
 import type { ChatThread } from "../contract/types";
 import {
+  attachRemote,
+  emptyCatalog,
+  hostedProjects,
+  isLocalHost,
+  LOCAL_HOST_ID,
+  mergedWorkspace,
+} from "../host/session";
+import { HostFolderPicker } from "./HostFolderPicker";
+import {
   attentionThreads,
   StickyAttentionRef,
   withStickyAttention,
@@ -57,12 +66,15 @@ function loadProjectsSectionCollapsed(): boolean {
 
 export function Sidebar() {
   const workspace = useAppStore((state) => state.workspace);
+  const remoteSessions = useAppStore((state) => state.remoteSessions);
+  const hostStatus = useAppStore((state) => state.hostStatus);
   const selectedThreadID = useAppStore((state) => state.selectedThreadID);
   const selectThread = useAppStore((state) => state.selectThread);
   const addProject = useAppStore((state) => state.addProject);
   const removeProject = useAppStore((state) => state.removeProject);
   const removeThread = useAppStore((state) => state.removeThread);
   const startNewThread = useAppStore((state) => state.startNewThread);
+  const disconnectHost = useAppStore((state) => state.disconnectHost);
   const settingsOpen = useAppStore((state) => state.settingsOpen);
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
   const agentsOpen = useAppStore((state) => state.agentsOpen);
@@ -79,18 +91,39 @@ export function Sidebar() {
   const [pinnedThreadIDs, setPinnedThreadIDs] = useState(loadPinnedThreadIDs);
   const [openProjectMenuID, setOpenProjectMenuID] = useState<string | null>(null);
   const [threadMenu, setThreadMenu] = useState<ThreadMenuTarget | null>(null);
+  const [addingOnHost, setAddingOnHost] = useState<{ id: string; name: string } | null>(null);
+  const [hostPickerOpen, setHostPickerOpen] = useState(false);
   /** Attention row being read: stays listed until selection moves on. */
   const [stickyAttention, setStickyAttention] = useState<StickyAttentionRef | null>(null);
+
+  const catalog = useMemo(() => {
+    let next = emptyCatalog(
+      workspace ?? {
+        schemaVersion: 6,
+        projects: [],
+        providerProfiles: [],
+        agents: [],
+        voice: { isEnabled: false, useGrokSignIn: false, language: "en", apiBase: "https://api.x.ai" },
+      },
+      hostStatus?.name ?? "This Mac",
+    );
+    for (const session of remoteSessions) {
+      next = attachRemote(next, session.host, session.workspace);
+    }
+    return next;
+  }, [hostStatus?.name, remoteSessions, workspace]);
+  const visibleProjects = hostedProjects(catalog);
+  const combinedWorkspace = mergedWorkspace(catalog);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setPinnedThreadIDs((current) => {
-      const next = prunePinnedThreadIDs(current, workspace);
+      const next = prunePinnedThreadIDs(current, combinedWorkspace);
       if (next !== current) persistPinnedThreadIDs(next);
       return next;
     });
-  }, [workspace]);
+  }, [combinedWorkspace]);
 
   useEffect(() => {
     if (
@@ -160,9 +193,27 @@ export function Sidebar() {
     };
   }, [threadMenu]);
 
+  const hosts = [
+    { id: LOCAL_HOST_ID, name: hostStatus?.name ?? "This Mac" },
+    ...remoteSessions.map((session) => ({ id: session.host.id, name: session.host.name })),
+  ];
+
+  const pickFolderOnHost = async (hostId: string, hostName: string) => {
+    setHostPickerOpen(false);
+    if (isLocalHost(hostId)) {
+      const folder = await ipc.openProjectDialog();
+      if (folder) await addProject(folder, LOCAL_HOST_ID);
+      return;
+    }
+    setAddingOnHost({ id: hostId, name: hostName });
+  };
+
   const pickFolder = async () => {
-    const folder = await ipc.openProjectDialog();
-    if (folder) await addProject(folder);
+    if (remoteSessions.length === 0) {
+      await pickFolderOnHost(LOCAL_HOST_ID, hostStatus?.name ?? "This Mac");
+      return;
+    }
+    setHostPickerOpen((open) => !open);
   };
 
   const toggleProject = (projectID: string) => {
@@ -220,12 +271,12 @@ export function Sidebar() {
   };
 
   const attentionItems = useMemo(
-    () => attentionThreads(workspace, activeTurns, unseenThreads, selectedThreadID),
-    [activeTurns, selectedThreadID, unseenThreads, workspace],
+    () => attentionThreads(combinedWorkspace, activeTurns, unseenThreads, selectedThreadID),
+    [activeTurns, combinedWorkspace, selectedThreadID, unseenThreads],
   );
   const attentionDisplay = useMemo(
-    () => withStickyAttention(attentionItems, workspace, stickyAttention, selectedThreadID),
-    [attentionItems, selectedThreadID, stickyAttention, workspace],
+    () => withStickyAttention(attentionItems, combinedWorkspace, stickyAttention, selectedThreadID),
+    [attentionItems, combinedWorkspace, selectedThreadID, stickyAttention],
   );
   const { attentionThreadIDs, attentionProjectIDs, attentionReasons } = useMemo(
     () => ({
@@ -238,9 +289,17 @@ export function Sidebar() {
     [attentionDisplay, attentionItems],
   );
   const pinnedItems = useMemo(
-    () => pinnedThreads(workspace, pinnedThreadIDs),
-    [pinnedThreadIDs, workspace],
+    () => pinnedThreads(combinedWorkspace, pinnedThreadIDs),
+    [combinedWorkspace, pinnedThreadIDs],
   );
+  const hostIdForProject = (projectID: string) =>
+    visibleProjects.find((item) => item.project.id === projectID)?.hostId ?? LOCAL_HOST_ID;
+  const hostGroups = hosts.map((host) => ({
+    host,
+    projects: visibleProjects
+      .filter((item) => item.hostId === host.id)
+      .map((item) => item.project),
+  }));
   const pinnedThreadIDSet = useMemo(
     () => new Set(pinnedItems.map((item) => item.thread.id)),
     [pinnedItems],
@@ -317,7 +376,7 @@ export function Sidebar() {
                           activity={threadActivity(thread, activeTurns)}
                           unseen={Boolean(unseenThreads[thread.id]) && thread.id !== selectedThreadID}
                           pinned
-                          onSelect={() => selectThread(project.id, thread.id)}
+                          onSelect={() => selectThread(project.id, thread.id, hostIdForProject(project.id))}
                           onRename={() => openRenameDialog(project.id, thread.id)}
                           onContextMenu={(event) => openThreadMenu(event, project.id, thread, true)}
                           onTogglePin={() => updateThreadPin(thread.id, false)}
@@ -352,10 +411,26 @@ export function Sidebar() {
               className="icon-button repositories-add"
               title="Open project folder"
               aria-label="Open project folder"
-              onClick={pickFolder}
+              onClick={() => void pickFolder()}
             >
               <Icons.plus size={15} />
             </button>
+            {hostPickerOpen && (
+              <div className="host-choice-menu" role="menu" aria-label="Add project on host">
+                {hosts.map((host) => (
+                  <button
+                    key={host.id}
+                    type="button"
+                    className="host-choice-item"
+                    role="menuitem"
+                    onClick={() => void pickFolderOnHost(host.id, host.name)}
+                  >
+                    <Icons.computer size={15} />
+                    <span>{isLocalHost(host.id) ? `${host.name} (this Mac)` : host.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </header>
 
           <div
@@ -366,8 +441,8 @@ export function Sidebar() {
           >
             <div className="projects-reveal-inner">
               <div className="projects-list">
-                {workspace?.projects.length === 0 && !attentionFilterOpen && (
-                  <button className="empty-project-cta" onClick={pickFolder}>
+                {visibleProjects.length === 0 && !attentionFilterOpen && (
+                  <button className="empty-project-cta" onClick={() => void pickFolder()}>
                     <Icons.folder size={15} />
                     <span>Open a project folder</span>
                   </button>
@@ -386,7 +461,24 @@ export function Sidebar() {
                   </div>
                 </div>
 
-                {workspace?.projects.map((project) => {
+                {hostGroups.map(({ host, projects }) => (
+                  <section key={host.id} className="host-group" aria-label={host.name}>
+                    {(remoteSessions.length > 0 || !isLocalHost(host.id)) && (
+                      <header className="host-group-header">
+                        <Icons.computer size={13} />
+                        <span>{isLocalHost(host.id) ? `${host.name} · this Mac` : host.name}</span>
+                        {!isLocalHost(host.id) && (
+                          <button
+                            type="button"
+                            className="text-button host-disconnect"
+                            onClick={() => void disconnectHost(host.id)}
+                          >
+                            Disconnect
+                          </button>
+                        )}
+                      </header>
+                    )}
+                    {projects.map((project) => {
                   const projectVisible = !attentionFilterOpen || attentionProjectIDs.has(project.id);
                   const projectExpanded = attentionFilterOpen
                     ? projectVisible
@@ -439,7 +531,7 @@ export function Sidebar() {
                                     role="menuitem"
                                     onClick={() => {
                                       setOpenProjectMenuID(null);
-                                      void removeProject(project.id);
+                                      void removeProject(project.id, host.id);
                                     }}
                                   >
                                     Remove project
@@ -451,7 +543,7 @@ export function Sidebar() {
                               type="button"
                               className="icon-button"
                               title="New agent in this project"
-                              onClick={() => startNewThread(project.id)}
+                              onClick={() => startNewThread(project.id, host.id)}
                             >
                               <Icons.compose size={15} />
                             </button>
@@ -490,7 +582,7 @@ export function Sidebar() {
                                           if (attentionFilterOpen && reason) {
                                             setStickyAttention({ threadID: thread.id, reason });
                                           }
-                                          selectThread(project.id, thread.id);
+                                          selectThread(project.id, thread.id, host.id);
                                         }}
                                         onRename={() => openRenameDialog(project.id, thread.id)}
                                         onContextMenu={(event) => openThreadMenu(event, project.id, thread, pinned)}
@@ -508,6 +600,22 @@ export function Sidebar() {
                     </section>
                   );
                 })}
+                  </section>
+                ))}
+                {addingOnHost && (
+                  <div className="host-folder-overlay">
+                    <HostFolderPicker
+                      hostId={addingOnHost.id}
+                      hostName={addingOnHost.name}
+                      onSelect={(folder) => {
+                        const hostId = addingOnHost.id;
+                        setAddingOnHost(null);
+                        void addProject(folder, hostId);
+                      }}
+                      onCancel={() => setAddingOnHost(null)}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>

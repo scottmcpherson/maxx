@@ -3,6 +3,7 @@
 // 2001-01-01, …) so payloads pass through the IPC boundary untouched.
 
 import type { VoiceSettings } from "../voice/types";
+import type { BrowserAnnotation } from "../browser";
 
 export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "hermes";
 
@@ -225,6 +226,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   attachments?: ChatImageAttachment[];
+  annotations?: BrowserAnnotation[];
   createdAt: number;
   /** First runtime event that contributed to an assistant message. */
   sourceEventID?: string;

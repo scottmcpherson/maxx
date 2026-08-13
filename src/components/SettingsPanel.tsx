@@ -18,6 +18,7 @@ import type {
   KeyboardShortcutCommand,
 } from "../keyboardShortcuts";
 import { useAppStore } from "../store/appStore";
+import type { AccessPreset, TailscaleDiscovery } from "../host/types";
 import { DEFAULT_VOICE_SETTINGS, VOICE_LANGUAGES } from "../voice/types";
 import type { VoiceCredentialStatus, VoiceSettings } from "../voice/types";
 import { beginWindowDrag } from "../windowDrag";
@@ -25,7 +26,7 @@ import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
 import { RuntimePicker } from "./RuntimePicker";
 
-type SettingsSection = "providers" | "voice" | "keyboardShortcuts";
+type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connections";
 
 export function SettingsPanel() {
   const workspace = useAppStore((state) => state.workspace);
@@ -231,6 +232,8 @@ export function SettingsPanel() {
         );
       case "voice":
         return <VoiceSettingsSection />;
+      case "connections":
+        return <ConnectionsSettingsSection />;
       case "keyboardShortcuts":
         return (
           <>
@@ -300,6 +303,14 @@ export function SettingsPanel() {
           </button>
           <button
             type="button"
+            className={section === "connections" ? "selected" : ""}
+            aria-current={section === "connections" ? "page" : undefined}
+            onClick={() => selectSection("connections")}
+          >
+            <Icons.computer size={15} />Connections
+          </button>
+          <button
+            type="button"
             className={section === "keyboardShortcuts" ? "selected" : ""}
             aria-current={section === "keyboardShortcuts" ? "page" : undefined}
             onClick={() => selectSection("keyboardShortcuts")}
@@ -312,6 +323,340 @@ export function SettingsPanel() {
       <main className="settings-content">
         {sectionBody()}
       </main>
+    </div>
+  );
+}
+
+function ConnectionsSettingsSection() {
+  const hostStatus = useAppStore((state) => state.hostStatus);
+  const startHostListen = useAppStore((state) => state.startHostListen);
+  const stopHostListen = useAppStore((state) => state.stopHostListen);
+  const connectHost = useAppStore((state) => state.connectHost);
+  const disconnectHost = useAppStore((state) => state.disconnectHost);
+  const refreshHostStatus = useAppStore((state) => state.refreshHostStatus);
+  const error = useAppStore((state) => state.error);
+  const [address, setAddress] = useState("");
+  const [code, setCode] = useState("");
+  const [preset, setPreset] = useState<AccessPreset>("standard");
+  const [discovery, setDiscovery] = useState<TailscaleDiscovery | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const listening = hostStatus?.listening ?? false;
+  const canConnect = address.trim().length > 0 && code.trim().length > 0 && !busy;
+  const shareAddress = hostStatus?.shareAddress ?? null;
+
+  useEffect(() => {
+    void refreshHostStatus();
+    void ipc.hostDiscovery().then(setDiscovery).catch((cause) => {
+      setActionError(String(cause));
+    });
+  }, [refreshHostStatus]);
+
+  useEffect(() => {
+    if (!hostStatus?.pairing) return;
+    const delay = Math.max(0, hostStatus.pairing.expiresAt * 1000 - Date.now() + 250);
+    const timer = window.setTimeout(() => void refreshHostStatus(), delay);
+    return () => window.clearTimeout(timer);
+  }, [hostStatus?.pairing, refreshHostStatus]);
+
+  const toggleListening = (enabled: boolean) => {
+    if (enabled) void startHostListen();
+    else void stopHostListen();
+  };
+
+  const createPairing = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await ipc.hostCreatePairing(preset);
+      await refreshHostStatus();
+    } catch (cause) {
+      setActionError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelPairing = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await ipc.hostCancelPairing();
+      await refreshHostStatus();
+    } catch (cause) {
+      setActionError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeDevice = async (peerId: string) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await ipc.hostRevokePeer(peerId);
+      await refreshHostStatus();
+    } catch (cause) {
+      setActionError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connect = async () => {
+    setBusy(true);
+    setActionError(null);
+    await connectHost(address.trim(), code.trim());
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+        <div>
+          <h1>Connections</h1>
+          <p>
+            This Mac keeps its own projects and chats. Another Maxx can connect over Tailscale
+            and work in this workspace without merging the two.
+          </p>
+        </div>
+      </header>
+
+      <section className="settings-card" aria-label="Allow connections">
+        <div className="settings-row host-listening-row">
+          <span className="settings-row-copy">
+            <strong>Allow connections</strong>
+            <small>
+              Other Maxx apps can pair with {hostStatus?.name ?? "this Mac"}. Leave this on
+              while you want to be reachable.
+            </small>
+          </span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={listening}
+              aria-label="Allow connections from other Maxx apps"
+              onChange={(event) => toggleListening(event.target.checked)}
+            />
+            <span />
+          </label>
+        </div>
+        <div
+          className={`host-listening-details${listening ? " is-open" : ""}`}
+          aria-hidden={!listening}
+          inert={!listening}
+        >
+          <div className="host-listening-details-inner">
+            <div className="settings-row host-action-row">
+              <span className="settings-row-copy">
+                <strong>Address</strong>
+                <small>
+                  {shareAddress
+                    ? "Give this to the other Mac."
+                    : "Give the other Mac this computer’s Tailscale address and port 7422."}
+                </small>
+              </span>
+              {shareAddress ? (
+                <CopyableValue value={shareAddress} label="This Mac’s address" />
+              ) : (
+                <span className="host-muted-value">port 7422</span>
+              )}
+            </div>
+            <div className="settings-row host-pairing-row">
+              <span className="settings-row-copy">
+                <strong>Pairing code</strong>
+                <small>
+                  Generate a one-time code when the other Mac is ready. It expires after five minutes.
+                </small>
+              </span>
+              {hostStatus?.pairing ? (
+                <div className="host-pairing-controls">
+                  <CopyableValue value={hostStatus.pairing.code} label="Pairing code" />
+                  <button type="button" className="host-disconnect-button" onClick={() => void cancelPairing()}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="host-pairing-controls">
+                  <select
+                    className="host-access-select"
+                    value={preset}
+                    aria-label="Pairing access"
+                    onChange={(event) => setPreset(event.target.value as AccessPreset)}
+                  >
+                    <option value="standard">Standard access</option>
+                    <option value="full">Full access</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="host-connect-button"
+                    disabled={busy}
+                    onClick={() => void createPairing()}
+                  >
+                    Generate code
+                  </button>
+                </div>
+              )}
+            </div>
+            {hostStatus?.pairing && (
+              <div className="host-access-summary">
+                Expires {new Date(hostStatus.pairing.expiresAt * 1000).toLocaleTimeString([], {
+                  hour: "numeric",
+                  minute: "2-digit",
+                })}. Access: {hostStatus.pairing.capabilities.join(", ")}.
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-card host-connect-card" aria-label="Connect to another Maxx">
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Connect to another Maxx</strong>
+            <small>Use the address and one-time pairing code shown on that Mac.</small>
+          </span>
+        </div>
+        {discovery?.peers.length ? (
+          <div className="host-discovery-list" aria-label="Tailscale devices">
+            {discovery.peers.map((peer) => {
+              const peerAddress = peer.dnsName || peer.addresses[0] || "";
+              return (
+                <button
+                  key={peer.dnsName || peer.name}
+                  type="button"
+                  className={`host-discovery-device${address.trim() === peerAddress ? " is-selected" : ""}`}
+                  aria-pressed={address.trim() === peerAddress}
+                  disabled={!peer.online || !peerAddress}
+                  onClick={() => setAddress(peerAddress)}
+                >
+                  <span>{peer.name}</span>
+                  <small>{peer.online ? peerAddress : "Offline"}</small>
+                </button>
+              );
+            })}
+          </div>
+        ) : discovery && !discovery.running ? (
+          <div className="host-access-summary">{discovery.error}</div>
+        ) : null}
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Address</strong>
+          </span>
+          <input
+            className="host-text-input"
+            value={address}
+            aria-label="Remote host address"
+            placeholder="mac-mini.tailnet.ts.net"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setAddress(event.target.value)}
+          />
+        </div>
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Pairing code</strong>
+          </span>
+          <input
+            className="host-text-input"
+            value={code}
+            aria-label="Pairing code"
+            placeholder="ABCD-1234"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setCode(event.target.value)}
+          />
+        </div>
+        <div className="settings-row host-connect-row">
+          <span className="settings-row-copy">
+            <small>Your local projects stay on this Mac after you connect.</small>
+          </span>
+          <button
+            type="button"
+            className="host-connect-button"
+            disabled={!canConnect}
+            onClick={() => void connect()}
+          >
+            {busy ? "Connecting…" : "Connect"}
+          </button>
+        </div>
+        {hostStatus?.remotes.map((remote) => (
+          <div key={remote.id} className="settings-row host-action-row">
+            <span className="settings-row-copy">
+              <strong>{remote.name}</strong>
+              <small>
+                {remote.address} · {remote.connected ? "Connected" : remote.error || "Reconnecting…"}
+              </small>
+            </span>
+            <button
+              type="button"
+              className="host-disconnect-button"
+              onClick={() => void disconnectHost(remote.id)}
+            >
+              Forget
+            </button>
+          </div>
+        ))}
+        {(actionError || error) && (
+          <div className="voice-credential-status is-missing" role="status">
+            <Icons.close size={13} />
+            <span>{actionError || error}</span>
+          </div>
+        )}
+      </section>
+
+      <section className="settings-card host-connect-card" aria-label="Paired devices">
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Paired devices</strong>
+            <small>Devices allowed to reconnect to this Mac. Revoking takes effect immediately.</small>
+          </span>
+        </div>
+        {hostStatus?.pairedDevices.length ? hostStatus.pairedDevices.map((device) => (
+          <div key={device.id} className="settings-row host-action-row">
+            <span className="settings-row-copy">
+              <strong>{device.name}</strong>
+              <small>{device.capabilities.join(", ")}</small>
+            </span>
+            <button
+              type="button"
+              className="host-disconnect-button"
+              disabled={busy}
+              onClick={() => void revokeDevice(device.id)}
+            >
+              Revoke
+            </button>
+          </div>
+        )) : (
+          <div className="host-access-summary host-empty-state">
+            No devices are paired with this Mac.
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function CopyableValue({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // Clipboard can be denied; the value stays selectable.
+    }
+  };
+
+  return (
+    <div className="host-copy-field">
+      <code aria-label={label}>{value}</code>
+      <button type="button" onClick={() => void copy()} aria-label={`Copy ${label}`}>
+        {copied ? <Icons.check size={13} /> : <Icons.copy size={13} />}
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
     </div>
   );
 }

@@ -11,6 +11,7 @@
     "build": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json",
     "build:desktop": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json && cargo build --release --manifest-path src-tauri/Cargo.toml && electron-builder --mac dir",
     "test:app": "electron . --app-smoke",
+    "test:host": "node script/verify_host_pairing.mjs",
     "test:browser": "electron . --browser-smoke",
     "test:browser:hermes": "electron . --hermes-browser-smoke",
     "electron:compile": "tsc -p electron/tsconfig.json",

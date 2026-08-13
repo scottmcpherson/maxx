@@ -10,13 +10,15 @@ import {
 } from "electron";
 import {
   ANNOTATION_DISABLE_SCRIPT,
-  ANNOTATION_INSTALL_SCRIPT,
+  annotationInstallScript,
+  annotationSelectionsScript,
   dragScript,
   referenceScript,
   SNAPSHOT_SCRIPT,
 } from "./browser-scripts.js";
 import type {
-  BrowserAnnotation,
+  BrowserAnnotationEvent,
+  BrowserAnnotationSelection,
   BrowserEngineContext,
   BrowserOperation,
   BrowserOperationResult,
@@ -30,6 +32,7 @@ const MAX_DIAGNOSTICS = 300;
 const MAX_CAPTURE_BYTES = 20 * 1024 * 1024;
 const MAX_CAPTURE_PIXELS = 16_000_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
+const MAX_ANNOTATION_SELECTIONS = 20;
 const HUMAN_INPUT_BINDING = "__maxxHumanInput";
 const ANNOTATION_BINDING = "__maxxAnnotationPicked";
 
@@ -46,6 +49,8 @@ interface TabRecord {
   traceOverflow: boolean;
   agentInput: boolean;
   annotationEnabled: boolean;
+  annotationSessionToken: string | null;
+  annotationSelections: BrowserAnnotationSelection[];
   interruptGeneration: number;
   interruptWaiters: Set<() => void>;
 }
@@ -99,16 +104,21 @@ function pushBounded(target: JsonValue[], value: JsonValue): void {
   if (target.length > MAX_DIAGNOSTICS) target.splice(0, target.length - MAX_DIAGNOSTICS);
 }
 
-function parseAnnotation(payload: string, tab: TabRecord): BrowserAnnotation | null {
+function parseAnnotation(payload: string, tab: TabRecord): BrowserAnnotationEvent | null {
   try {
     const value = JSON.parse(payload) as Record<string, unknown>;
+    if (!tab.annotationEnabled || !tab.annotationSessionToken || value.sessionToken !== tab.annotationSessionToken) return null;
+    if (value.cancel === true) return { tabId: tab.state.id, cancel: true };
     const rect = value.rect as Record<string, unknown> | undefined;
     if (
+      typeof value.selected !== "boolean" ||
       typeof value.selector !== "string" || value.selector.length > 4_096 ||
       typeof value.tagName !== "string" || value.tagName.length > 64 ||
       (value.role !== null && typeof value.role !== "string") ||
       typeof value.name !== "string" || value.name.length > 1_000 ||
       typeof value.text !== "string" || value.text.length > 2_000 ||
+      typeof value.instruction !== "string" || value.instruction.length > 2_000 ||
+      (value.selected === true && value.instruction.trim().length === 0) ||
       !rect || ![rect.x, rect.y, rect.width, rect.height].every((part) => typeof part === "number" && Number.isFinite(part))
     ) return null;
     return {
@@ -120,8 +130,11 @@ function parseAnnotation(payload: string, tab: TabRecord): BrowserAnnotation | n
       role: typeof value.role === "string" ? value.role.slice(0, 128) : null,
       name: value.name,
       text: value.text,
+      instruction: value.instruction,
+      previewDataUrl: "",
       rect: { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number },
       createdAt: Date.now(),
+      selected: value.selected,
     };
   } catch {
     return null;
@@ -398,8 +411,44 @@ export class BrowserManager {
 
   async setAnnotationMode(tabId: string, enabled: boolean): Promise<void> {
     const tab = this.#tab(tabId);
+    if (enabled && !tab.annotationEnabled) tab.annotationSessionToken = randomUUID();
+    if (!enabled) tab.annotationSessionToken = null;
     tab.annotationEnabled = enabled;
     await this.#applyAnnotationMode(tab);
+  }
+
+  async setAnnotationSelections(tabId: string, selections: BrowserAnnotationSelection[]): Promise<void> {
+    const tab = this.#tab(tabId);
+    if (!Array.isArray(selections) || selections.length > MAX_ANNOTATION_SELECTIONS) {
+      throw browserError("browser.invalid-annotation-selections", `browser annotations accept at most ${MAX_ANNOTATION_SELECTIONS} selections`);
+    }
+    tab.annotationSelections = selections.map((selection) => {
+      if (
+        !selection ||
+        typeof selection.selector !== "string" ||
+        selection.selector.length === 0 ||
+        selection.selector.length > 4_096 ||
+        typeof selection.instruction !== "string" ||
+        selection.instruction.trim().length === 0 ||
+        selection.instruction.length > 2_000 ||
+        !Number.isInteger(selection.index) ||
+        selection.index < 1 ||
+        selection.index > MAX_ANNOTATION_SELECTIONS
+      ) {
+        throw browserError("browser.invalid-annotation-selection", "browser annotation selection is invalid");
+      }
+      return {
+        selector: selection.selector,
+        index: selection.index,
+        instruction: selection.instruction,
+      };
+    });
+    if (!tab.annotationEnabled || tab.contents.isDestroyed() || tab.contents.isLoadingMainFrame()) return;
+    try {
+      await this.#evaluate(tabId, annotationSelectionsScript(tab.annotationSelections));
+    } catch (error) {
+      if (!this.#isExpectedNavigationRace(tab, error)) throw error;
+    }
   }
 
   async interrupt(tabId: string): Promise<void> {
@@ -422,7 +471,7 @@ export class BrowserManager {
     const view = new WebContentsView({ webPreferences: { session: this.browserSession, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
     const contents = view.webContents;
     view.setBackgroundColor("#ffffff");
-    const record: TabRecord = { view, contents, state: { id: tabId, url: "about:blank", title: "Browser", loading: false, canGoBack: false, canGoForward: false }, generation: 0, console: [], network: [], traceChunks: null, traceBytes: 0, traceOverflow: false, agentInput: false, annotationEnabled: false, interruptGeneration: 0, interruptWaiters: new Set() };
+    const record: TabRecord = { view, contents, state: { id: tabId, url: "about:blank", title: "Browser", loading: false, canGoBack: false, canGoForward: false }, generation: 0, console: [], network: [], traceChunks: null, traceBytes: 0, traceOverflow: false, agentInput: false, annotationEnabled: false, annotationSessionToken: null, annotationSelections: [], interruptGeneration: 0, interruptWaiters: new Set() };
     this.#tabs.set(tabId, record);
     this.#wireTab(record);
     return record;
@@ -462,7 +511,10 @@ export class BrowserManager {
       contents.debugger.sendCommand("DOM.enable"), contents.debugger.sendCommand("Network.enable"),
       contents.debugger.sendCommand("Runtime.addBinding", { name: HUMAN_INPUT_BINDING }),
       contents.debugger.sendCommand("Runtime.addBinding", { name: ANNOTATION_BINDING }),
-    ]).catch((error) => this.#emitRenderer("browser://error", asJson({ tabId: tab.state.id, code: "browser.cdp-attach", message: String(error) })));
+    ]).catch((error) => {
+      if (this.#tabs.get(tab.state.id) !== tab) return;
+      this.#emitRenderer("browser://error", asJson({ tabId: tab.state.id, code: "browser.cdp-attach", message: String(error) }));
+    });
     contents.debugger.on("message", (_event, method, params) => this.#onDebuggerMessage(tab, method, params));
   }
 
@@ -472,7 +524,8 @@ export class BrowserManager {
       if (binding.name === HUMAN_INPUT_BINDING) this.#emitHostEvent("browser.human_input", asJson({ tabId: tab.state.id }));
       if (binding.name === ANNOTATION_BINDING) {
         const annotation = parseAnnotation(binding.payload, tab);
-        if (annotation) this.#emitRenderer("browser://annotation", asJson(annotation));
+        if (annotation && "cancel" in annotation) this.#emitRenderer("browser://annotation", asJson(annotation));
+        else if (annotation) void this.#publishAnnotation(tab, annotation);
       }
       return;
     }
@@ -496,6 +549,23 @@ export class BrowserManager {
     }
   }
 
+  async #publishAnnotation(tab: TabRecord, annotation: Exclude<BrowserAnnotationEvent, { cancel: true }>): Promise<void> {
+    if (annotation.selected && !tab.contents.isDestroyed()) {
+      try {
+        const image = await tab.contents.capturePage();
+        if (!image.isEmpty()) {
+          const preview = image.resize({ width: 96, quality: "good" }).toPNG();
+          if (preview.byteLength <= 128 * 1024) {
+            annotation.previewDataUrl = `data:image/png;base64,${preview.toString("base64")}`;
+          }
+        }
+      } catch {
+        // Annotation metadata remains useful if the page navigates during capture.
+      }
+    }
+    this.#emitRenderer("browser://annotation", asJson(annotation));
+  }
+
   async #installPageBindings(tab: TabRecord): Promise<void> {
     const script = `(() => { if(globalThis.__maxxHumanInstalled)return; globalThis.__maxxHumanInstalled=true; const notify=(event)=>{if(event.isTrusted&&!globalThis.__maxxAgentInput)globalThis.${HUMAN_INPUT_BINDING}("input")}; for(const type of ["pointerdown","wheel","touchstart"]) addEventListener(type,notify,{capture:true,passive:true}); })()`;
     try {
@@ -511,7 +581,13 @@ export class BrowserManager {
   async #applyAnnotationMode(tab: TabRecord): Promise<void> {
     if (tab.contents.isDestroyed() || tab.contents.isLoadingMainFrame()) return;
     try {
-      await this.#evaluate(tab.state.id, tab.annotationEnabled ? ANNOTATION_INSTALL_SCRIPT : ANNOTATION_DISABLE_SCRIPT);
+      if (tab.annotationEnabled) {
+        if (!tab.annotationSessionToken) throw browserError("browser.annotation-session", "browser annotation session is unavailable");
+        await this.#evaluate(tab.state.id, annotationInstallScript(tab.annotationSessionToken));
+        await this.#evaluate(tab.state.id, annotationSelectionsScript(tab.annotationSelections));
+      } else {
+        await this.#evaluate(tab.state.id, ANNOTATION_DISABLE_SCRIPT);
+      }
     } catch (error) {
       if (!this.#isExpectedNavigationRace(tab, error)) throw error;
     }

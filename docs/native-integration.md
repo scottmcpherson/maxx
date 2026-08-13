@@ -54,9 +54,14 @@ login form and returns only success or failure.
 ## Annotation
 
 Annotation mode installs a temporary DOM overlay into the current page. Hover
-highlights the actual element; click returns a bounded payload with selector,
-tag, accessibility role/name, visible text, and page rectangle. The main
-process validates and sizes the payload before React can attach it to a prompt.
+highlights the actual element; click opens an instruction editor over the
+target. Confirming returns a bounded payload with the instruction, selector,
+tag, accessibility role/name, visible text, page rectangle, and a small local
+preview. The main process validates and sizes the payload before React can
+attach it to a prompt. Hovering a numbered page marker shows its saved
+instruction. Cancelling restores the annotations that existed before the
+session; the toolbar Send action submits the staged group directly as a chat
+message, and both pending and sent groups render as one hoverable summary.
 Disabling annotation removes the overlay and listeners from the page.
 
 ## Media and permissions

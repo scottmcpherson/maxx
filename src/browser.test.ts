@@ -109,12 +109,12 @@ describe("width", () => {
     // 1280 - 420 workspace - 250 sidebar, and still a real range above the
     // pane's own 360 minimum — the divider has somewhere to go.
     expect(maximumBrowserWidth(1280, 250)).toBe(610);
-    expect(maximumBrowserWidth(1920, 250)).toBe(MAX_BROWSER_WIDTH);
+    expect(maximumBrowserWidth(1920, 250)).toBe(1140);
     expect(maximumBrowserWidth(900, 250)).toBe(MIN_BROWSER_WIDTH);
   });
 
   it("clamps into the supported range", () => {
-    expect(clampBrowserWidth(1000, MAX_BROWSER_WIDTH)).toBe(MAX_BROWSER_WIDTH);
+    expect(clampBrowserWidth(2000, MAX_BROWSER_WIDTH)).toBe(1140);
     expect(clampBrowserWidth(10, MAX_BROWSER_WIDTH)).toBe(MIN_BROWSER_WIDTH);
     expect(clampBrowserWidth(584.4, MAX_BROWSER_WIDTH)).toBe(584);
   });

@@ -51,6 +51,7 @@ interface RuntimePickerProps {
   speed?: string | null;
   profiles: ProviderProfile[];
   workingDirectory?: string | null;
+  hostId?: string | null;
   disabled?: boolean;
   placement?: "top" | "bottom";
   /** Prefix the trigger with the provider name (settings-style contexts). */
@@ -101,6 +102,7 @@ export function RuntimePicker({
   speed = null,
   profiles,
   workingDirectory = null,
+  hostId = null,
   disabled = false,
   placement = "top",
   triggerShowsProvider = false,
@@ -126,8 +128,8 @@ export function RuntimePicker({
   }), [profiles, workingDirectory]);
 
   const catalogContextKey = useMemo(
-    () => providerCatalogContextKey(profiles, workingDirectory),
-    [profiles, workingDirectory],
+    () => providerCatalogContextKey(profiles, workingDirectory, hostId),
+    [profiles, workingDirectory, hostId],
   );
   const cachedCatalogEntries = useMemo(
     () => readCachedCatalog(catalogContextKey),
@@ -169,8 +171,9 @@ export function RuntimePicker({
       provider: target,
       profiles,
       workingDirectory,
+      hostId,
       force,
-    }), [catalogContextKey, ensureCatalogModels, profiles, workingDirectory]);
+    }), [catalogContextKey, ensureCatalogModels, hostId, profiles, workingDirectory]);
 
   const profileRows: SearchableProviderRow[] = useMemo(() => {
     return ALL_PROVIDERS.map((candidate) => {
@@ -260,8 +263,9 @@ export function RuntimePicker({
       providers: enabledProviders,
       profiles,
       workingDirectory,
+      hostId,
     });
-  }, [catalogContextKey, enabledProviders, prefetchCatalogs, profiles, workingDirectory]);
+  }, [catalogContextKey, enabledProviders, hostId, prefetchCatalogs, profiles, workingDirectory]);
 
   useEffect(() => {
     if (!open) return;

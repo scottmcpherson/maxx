@@ -5,6 +5,7 @@ import { relativeTime } from "../relativeTime";
 import { Icons } from "./Icons";
 
 interface PaletteEntry {
+  hostID: string;
   projectID: string;
   projectLabel: string;
   threadID: string;
@@ -17,6 +18,7 @@ const MAX_RESULTS = 50;
 
 export function SearchPalette() {
   const workspace = useAppStore((state) => state.workspace);
+  const remoteSessions = useAppStore((state) => state.remoteSessions);
   const selectThread = useAppStore((state) => state.selectThread);
   const setSearchOpen = useAppStore((state) => state.setSearchOpen);
   const [query, setQuery] = useState("");
@@ -24,20 +26,30 @@ export function SearchPalette() {
   const listRef = useRef<HTMLUListElement>(null);
 
   const entries = useMemo<PaletteEntry[]>(() => {
-    const all =
-      workspace?.projects.flatMap((project) =>
+    const hosts = [
+      { id: "local", name: "This Mac", projects: workspace?.projects ?? [] },
+      ...remoteSessions.map((session) => ({
+        id: session.host.id,
+        name: session.host.name,
+        projects: session.workspace.projects,
+      })),
+    ];
+    const all = hosts.flatMap((host) =>
+      host.projects.flatMap((project) =>
         // Side threads open from their parent thread, not the palette.
         project.threads.filter((thread) => !thread.parentThreadID).map((thread) => ({
+          hostID: host.id,
           projectID: project.id,
-          projectLabel: projectName(project),
+          projectLabel: `${host.name} · ${projectName(project)}`,
           threadID: thread.id,
           title: thread.title,
           provider: thread.provider,
           updatedAt: thread.updatedAt,
         })),
-      ) ?? [];
+      ),
+    );
     return all.sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [workspace]);
+  }, [remoteSessions, workspace]);
 
   const normalizedQuery = query.trim().toLowerCase();
   const results = useMemo(() => {
@@ -64,7 +76,7 @@ export function SearchPalette() {
   const close = () => setSearchOpen(false);
 
   const openEntry = (entry: PaletteEntry) => {
-    selectThread(entry.projectID, entry.threadID);
+    selectThread(entry.projectID, entry.threadID, entry.hostID);
     close();
   };
 

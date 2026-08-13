@@ -4,6 +4,7 @@ pub mod commands;
 pub mod engine;
 pub mod events;
 pub mod host;
+pub mod host_session;
 pub mod media;
 pub mod sidecar;
 pub mod state;

@@ -74,10 +74,14 @@ can be filled only for their exact origin after a user action.
 
 ## Annotation
 
-Annotation mode is DOM-backed. Hover highlights the real target and click emits
-only bounded selector, accessibility, text, and geometry metadata. The overlay
-and listeners are removed when the mode ends or the page navigates. Annotation
-context is attached to the chat prompt as structured page context.
+Annotation mode is DOM-backed. Hover highlights the real target, hovering a
+numbered marker reveals its saved instruction, and click opens a scoped
+instruction editor. Confirmation emits bounded selector,
+accessibility, text, instruction, geometry, and preview data. The overlay and
+listeners are removed when the mode ends or the page navigates. The annotation
+toolbar submits the staged annotations as an annotation-only chat message.
+Annotation context is attached to the provider prompt as structured page
+context; previews are presentation-only and are not used as page context.
 
 ## Acceptance checks
 
@@ -92,3 +96,5 @@ The browser implementation is accepted only when the packaged app demonstrates:
 5. Browser pages cannot invoke Maxx IPC or navigate to local/privileged schemes.
 6. Annotation selection produces usable prompt context without a screenshot
    being used as the page.
+7. Marker hover reveals the saved instruction and toolbar Send creates the
+   annotation-only user message.

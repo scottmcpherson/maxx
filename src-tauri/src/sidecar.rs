@@ -3,26 +3,39 @@ use crate::browser_runtime::{
 };
 use crate::events::EventSink;
 use crate::host::SidecarHostBridge;
+use crate::host_session::{
+    create_host_folder, has_capability, home_folder, list_host_folder, read_media_bytes,
+    required_capability, store_media_bytes, AccessPreset, AuthenticatedPeer, FolderAuthorizations,
+    FolderEntry, HostHandler, HostHub,
+};
 use crate::state::AppState;
 use crate::voice::VoiceState;
+use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use maxx_core::contract::{ChatProvider, RuntimeInteractionDecision};
 use maxx_core::persist::{AgentDefinition, ProviderProfile, TitleGenerationRuntime};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 struct SidecarEvents {
     outbound: mpsc::UnboundedSender<Value>,
+    journal: Arc<crate::host_session::EventJournal>,
 }
 
 impl EventSink for SidecarEvents {
     fn emit_value(&self, event: &str, payload: Value) {
+        if let Err(error) = self.journal.emit(event, payload.clone()) {
+            log::warn!("could not persist host event: {error}");
+        }
         let _ = self
             .outbound
             .send(json!({"type":"event","event":event,"payload":payload}));
@@ -33,6 +46,119 @@ struct SidecarState {
     app: Arc<AppState>,
     browser: Arc<BrowserRuntime>,
     voice: Arc<VoiceState>,
+    hosts: Arc<HostHub>,
+    outbound: mpsc::UnboundedSender<Value>,
+    host_supervisors: Mutex<HashMap<String, CancellationToken>>,
+}
+
+struct DispatchHandler {
+    state: Arc<SidecarState>,
+    folders: FolderAuthorizations,
+}
+
+impl DispatchHandler {
+    fn new(state: Arc<SidecarState>) -> Self {
+        Self {
+            state,
+            folders: FolderAuthorizations::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl HostHandler for DispatchHandler {
+    async fn handle(
+        &self,
+        peer: &AuthenticatedPeer,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value, String> {
+        if method == "host_forget_peer" {
+            self.state.hosts.forget_incoming(&peer.id)?;
+            return Ok(Value::Null);
+        }
+        if method.starts_with("host_") {
+            return Err("A connected peer cannot manage this Mac's host connections".into());
+        }
+        let required_access = required_capability(method)
+            .ok_or_else(|| format!("{method} is not available to connected environments"))?;
+        if !has_capability(&peer.capabilities, required_access) {
+            return Err(format!("{} is not allowed to use {method}", peer.name));
+        }
+        match method {
+            "home_folder" => {
+                let result = dispatch(self.state.clone(), method, params).await?;
+                if let Some(path) = result.get("path").and_then(Value::as_str) {
+                    self.folders.remember_home(&peer.id, path).await;
+                }
+                Ok(result)
+            }
+            "list_folder" => {
+                let requested = required::<String>(&params, "path")?;
+                let authorized = self.folders.authorize(&peer.id, &requested).await?;
+                params["path"] = Value::String(authorized.clone());
+                let result = dispatch(self.state.clone(), method, params).await?;
+                let entries: Vec<FolderEntry> = serde_json::from_value(result.clone())
+                    .map_err(|error| format!("Could not read folder entries: {error}"))?;
+                self.folders
+                    .remember_listing(&peer.id, authorized, &entries)
+                    .await;
+                Ok(result)
+            }
+            "create_folder" => {
+                let parent = required::<String>(&params, "parent")?;
+                params["parent"] = Value::String(self.folders.authorize(&peer.id, &parent).await?);
+                let result = dispatch(self.state.clone(), method, params).await?;
+                if let Some(path) = result.get("path").and_then(Value::as_str) {
+                    self.folders
+                        .remember_created(&peer.id, path.to_string())
+                        .await;
+                }
+                Ok(result)
+            }
+            "add_project" => {
+                let folder = required::<String>(&params, "folderPath")?;
+                params["folderPath"] =
+                    Value::String(self.folders.authorize(&peer.id, &folder).await?);
+                dispatch(self.state.clone(), method, params).await
+            }
+            _ => dispatch(self.state.clone(), method, params).await,
+        }
+    }
+}
+
+fn take_host_id(params: &Value) -> Option<String> {
+    params
+        .get("hostId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn without_host_id(params: &Value) -> Value {
+    let mut value = params.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("hostId");
+    }
+    value
+}
+
+async fn targets_local_project(state: &SidecarState, params: &Value) -> bool {
+    let Some(project_id) = params
+        .get("projectId")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return false;
+    };
+    state
+        .app
+        .workspace
+        .lock()
+        .await
+        .projects
+        .iter()
+        .any(|project| project.id == project_id)
 }
 
 fn required<T: DeserializeOwned>(params: &Value, key: &str) -> Result<T, String> {
@@ -59,7 +185,104 @@ fn value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, String
 }
 
 async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Result<Value, String> {
+    if !method.starts_with("host_") {
+        if let Some(host_id) = take_host_id(&params) {
+            // The project is the authoritative owner for project-scoped
+            // commands. A stale renderer selection must never forward a local
+            // chat to another Maxx instance and leave the composer waiting on
+            // a remote response.
+            if !state.hosts.is_local(&host_id) && !targets_local_project(&state, &params).await {
+                return state
+                    .hosts
+                    .invoke_remote(&host_id, method, without_host_id(&params))
+                    .await;
+            }
+        }
+    }
     match method {
+        "host_status" => value(Ok(state.hosts.status().await)),
+        "host_discovery" => value(Ok(state.hosts.discovery().await)),
+        "host_listen" => {
+            let bind = optional::<String>(&params, "bindAddress")?;
+            let handler = Arc::new(DispatchHandler::new(state.clone()));
+            value(state.hosts.start_listen(bind.as_deref(), handler).await)
+        }
+        "host_unlisten" => value(state.hosts.stop_listen().await),
+        "host_create_pairing" => value(
+            state
+                .hosts
+                .create_pairing(required::<AccessPreset>(&params, "preset")?)
+                .await,
+        ),
+        "host_cancel_pairing" => {
+            state.hosts.cancel_pairing()?;
+            Ok(Value::Null)
+        }
+        "host_connect" => {
+            let address: String = required(&params, "address")?;
+            let code: String = required(&params, "code")?;
+            let info = state.hosts.connect(&address, &code).await?;
+            ensure_host_supervisor(state.clone(), info.id.clone()).await;
+            value(Ok(info))
+        }
+        "host_disconnect" => {
+            let host_id = required::<String>(&params, "hostId")?;
+            stop_host_supervisor(&state, &host_id).await;
+            value(state.hosts.disconnect(&host_id).await)
+        }
+        "host_revoke_peer" => value(
+            state
+                .hosts
+                .revoke_paired_device(&required::<String>(&params, "peerId")?)
+                .await,
+        ),
+        "list_folder" => value(list_host_folder(&required::<String>(&params, "path")?)),
+        "create_folder" => value(
+            create_host_folder(
+                &required::<String>(&params, "parent")?,
+                &required::<String>(&params, "name")?,
+            )
+            .map(|path| json!({ "path": path })),
+        ),
+        "home_folder" => value(home_folder().map(|path| json!({ "path": path }))),
+        "upload_media" => {
+            let encoded: String = required(&params, "dataBase64")?;
+            let mime: String = required(&params, "mimeType")?;
+            let name: String = required(&params, "displayName")?;
+            let bytes = STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("The image data is invalid: {error}"))?;
+            let attachment =
+                store_media_bytes(&crate::state::chat_images_dir(), &bytes, &mime, &name)?;
+            serde_json::to_value(attachment).map_err(|error| error.to_string())
+        }
+        "read_media" => {
+            let id: Uuid = required(&params, "attachmentId")?;
+            let (bytes, mime, name) = read_media_bytes(&crate::state::chat_images_dir(), id)?;
+            Ok(json!({
+                "id": id,
+                "mimeType": mime,
+                "displayName": name,
+                "dataBase64": STANDARD.encode(bytes),
+            }))
+        }
+        "load_media" => {
+            let resolved = crate::media::resolve_media_source(
+                state.app.clone(),
+                required(&params, "projectId")?,
+                required(&params, "threadId")?,
+                required(&params, "destination")?,
+            )
+            .await?;
+            let bytes = std::fs::read(&resolved.path)
+                .map_err(|error| format!("Could not read media: {error}"))?;
+            Ok(json!({
+                "kind": resolved.kind,
+                "mimeType": resolved.mime_type,
+                "displayName": resolved.display_name,
+                "dataBase64": STANDARD.encode(bytes),
+            }))
+        }
         "workspace_snapshot" => value(crate::commands::workspace_snapshot(state.app.clone()).await),
         "active_turns" => value(crate::commands::active_turns(state.app.clone()).await),
         "add_project" => value(
@@ -147,7 +370,9 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "projectId")?,
                 required(&params, "threadId")?,
                 required(&params, "prompt")?,
-                required(&params, "imagePaths")?,
+                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentIds")?.unwrap_or_default(),
+                optional(&params, "annotations")?.unwrap_or_default(),
             )
             .await,
         ),
@@ -158,7 +383,9 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "parentThreadId")?,
                 required(&params, "agentIds")?,
                 required(&params, "prompt")?,
-                required(&params, "imagePaths")?,
+                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentIds")?.unwrap_or_default(),
+                optional(&params, "annotations")?.unwrap_or_default(),
             )
             .await,
         ),
@@ -169,7 +396,8 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "threadId")?,
                 required(&params, "agentIds")?,
                 required(&params, "prompt")?,
-                required(&params, "imagePaths")?,
+                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentIds")?.unwrap_or_default(),
             )
             .await,
         ),
@@ -339,6 +567,158 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
     }
 }
 
+async fn ensure_host_supervisor(state: Arc<SidecarState>, host_id: String) {
+    let token = {
+        let mut supervisors = state.host_supervisors.lock().await;
+        if supervisors.contains_key(&host_id) {
+            return;
+        }
+        let token = CancellationToken::new();
+        supervisors.insert(host_id.clone(), token.clone());
+        token
+    };
+    tokio::spawn(async move {
+        supervise_host(state, host_id, token).await;
+    });
+}
+
+async fn stop_host_supervisor(state: &SidecarState, host_id: &str) {
+    if let Some(token) = state.host_supervisors.lock().await.remove(host_id) {
+        token.cancel();
+    }
+}
+
+async fn supervise_host(state: Arc<SidecarState>, host_id: String, shutdown: CancellationToken) {
+    let mut retry_seconds = 1_u64;
+    while !shutdown.is_cancelled() && state.hosts.is_remembered(&host_id) {
+        let client = match state.hosts.connected_client(&host_id).await {
+            Some(client) => client,
+            None => match state.hosts.reconnect(&host_id).await {
+                Ok(client) => client,
+                Err(error) => {
+                    state
+                        .hosts
+                        .set_connection_error(&host_id, error.clone())
+                        .await;
+                    emit_remote_event_to_renderer(
+                        &state.outbound,
+                        &host_id,
+                        "host://status-changed",
+                        json!({"error": error}),
+                    );
+                    if wait_for_retry(&shutdown, retry_seconds).await {
+                        break;
+                    }
+                    retry_seconds = (retry_seconds * 2).min(30);
+                    continue;
+                }
+            },
+        };
+        retry_seconds = 1;
+        emit_remote_event_to_renderer(
+            &state.outbound,
+            &host_id,
+            "host://connected",
+            json!({
+                "resyncRequired": client.resync_required,
+                "eventCursor": client.server_cursor,
+            }),
+        );
+        let mut last_cursor = None;
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    client.close().await;
+                    break;
+                }
+                event = client.next_event() => {
+                    let Some(event) = event else { break };
+                    last_cursor = Some(event.cursor);
+                    emit_remote_event_to_renderer(
+                        &state.outbound,
+                        &host_id,
+                        &event.event,
+                        event.payload,
+                    );
+                }
+            }
+        }
+        if let Some(cursor) = last_cursor {
+            if let Err(error) = state.hosts.record_event_cursor(&host_id, cursor) {
+                log::warn!("could not persist event cursor for {host_id}: {error}");
+            }
+        }
+        state.hosts.remove_if_same(&host_id, &client).await;
+        if shutdown.is_cancelled() || !state.hosts.is_remembered(&host_id) {
+            break;
+        }
+        state
+            .hosts
+            .set_connection_error(&host_id, "Connection lost. Retrying…".into())
+            .await;
+        emit_remote_event_to_renderer(
+            &state.outbound,
+            &host_id,
+            "host://disconnected",
+            Value::Null,
+        );
+        if wait_for_retry(&shutdown, retry_seconds).await {
+            break;
+        }
+        retry_seconds = (retry_seconds * 2).min(30);
+    }
+}
+
+async fn wait_for_retry(shutdown: &CancellationToken, seconds: u64) -> bool {
+    tokio::select! {
+        _ = shutdown.cancelled() => true,
+        _ = tokio::time::sleep(Duration::from_secs(seconds)) => false,
+    }
+}
+
+fn restore_host_listener(state: Arc<SidecarState>) {
+    if !state.hosts.listen_enabled() {
+        return;
+    }
+    tokio::spawn(async move {
+        while state.hosts.listen_enabled() && !state.hosts.is_listening().await {
+            let handler = Arc::new(DispatchHandler::new(state.clone()));
+            match state.hosts.restore_listen(handler).await {
+                Ok(address) => {
+                    log::info!("restored Maxx environment listener on {address}");
+                    emit_remote_event_to_renderer(
+                        &state.outbound,
+                        crate::host_session::LOCAL_HOST_ID,
+                        "host://status-changed",
+                        json!({"listening": true, "address": address}),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    log::warn!("could not restore Maxx environment listener: {error}");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+}
+
+fn emit_remote_event_to_renderer(
+    outbound: &mpsc::UnboundedSender<Value>,
+    host_id: &str,
+    event: &str,
+    payload: Value,
+) {
+    // Remote-originated events intentionally bypass SidecarEvents: sending them
+    // through that sink would fan them back out to peers and create loops when
+    // two Maxx installs connect in both directions.
+    let _ = outbound.send(json!({
+        "type":"event",
+        "event":"host://event",
+        "payload":{"hostId":host_id,"event":event,"payload":payload}
+    }));
+}
+
 async fn browser_operation(
     browser: &Arc<BrowserRuntime>,
     operation: BrowserOperation,
@@ -394,6 +774,35 @@ pub fn run() -> Result<(), String> {
     runtime.block_on(run_async())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_events_are_renderer_only_frames() {
+        let (outbound, mut receiver) = mpsc::unbounded_channel();
+        emit_remote_event_to_renderer(
+            &outbound,
+            "remote-a",
+            "runtime://event",
+            json!({"threadID":"thread-a"}),
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            json!({
+                "type":"event",
+                "event":"host://event",
+                "payload":{
+                    "hostId":"remote-a",
+                    "event":"runtime://event",
+                    "payload":{"threadID":"thread-a"}
+                }
+            })
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
 async fn run_async() -> Result<(), String> {
     VoiceState::install_crypto_provider();
     let (outbound, mut output) = mpsc::unbounded_channel::<Value>();
@@ -410,8 +819,10 @@ async fn run_async() -> Result<(), String> {
         }
     });
     let host = SidecarHostBridge::new(outbound.clone());
+    let hosts = Arc::new(HostHub::new());
     let events: Arc<dyn EventSink> = Arc::new(SidecarEvents {
         outbound: outbound.clone(),
+        journal: hosts.events.clone(),
     });
     let browser_root = crate::state::workspace_path().with_file_name("browser-runtime");
     let browser = BrowserRuntime::start(
@@ -424,7 +835,14 @@ async fn run_async() -> Result<(), String> {
         app: Arc::new(AppState::load(browser.clone(), events.clone())),
         browser: browser.clone(),
         voice: Arc::new(VoiceState::default()),
+        hosts,
+        outbound: outbound.clone(),
+        host_supervisors: Mutex::new(HashMap::new()),
     });
+    for host_id in state.hosts.remembered_ids() {
+        ensure_host_supervisor(state.clone(), host_id).await;
+    }
+    restore_host_listener(state.clone());
     let mut reveals = browser.subscribe_ui_reveals();
     let reveal_events = events.clone();
     tokio::spawn(async move {
@@ -468,7 +886,14 @@ async fn run_async() -> Result<(), String> {
                     .and_then(|value| Uuid::parse_str(value).ok());
                 if event == Some("browser.human_input") {
                     if let Some(tab_id) = tab_id {
-                        let _ = browser.broker.human_input(tab_id).await;
+                        // `human_input` interrupts the native engine, which sends a
+                        // host request and waits for its response. Never await that
+                        // round trip on the stdin reader that must receive the
+                        // response, or every later command deadlocks behind it.
+                        let broker = browser.broker.clone();
+                        tokio::spawn(async move {
+                            let _ = broker.human_input(tab_id).await;
+                        });
                     }
                 } else if event == Some("browser.lifecycle") {
                     if let (Some(tab_id), Some(url), Some(title), Some(loading)) = (
@@ -516,5 +941,11 @@ async fn run_async() -> Result<(), String> {
             _ => {}
         }
     }
-    browser.shutdown().await.map_err(|error| error.to_string())
+    match tokio::time::timeout(std::time::Duration::from_secs(5), browser.shutdown()).await {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => {
+            log::warn!("browser runtime shutdown timed out");
+            Ok(())
+        }
+    }
 }

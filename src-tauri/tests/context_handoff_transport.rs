@@ -31,6 +31,7 @@ fn message(role: ChatRole, content: &str) -> ChatMessage {
         role,
         content: content.into(),
         attachments: Vec::new(),
+        annotations: Vec::new(),
         created_at: AppleDate::default(),
         source_event_id: None,
         agent_id: None,

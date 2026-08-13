@@ -10,11 +10,14 @@ if [[ "$(uname -m)" == "x86_64" ]]; then
   APP_BUNDLE="$ROOT_DIR/release/mac/Maxx.app"
 fi
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/Maxx"
+RUNTIME_BINARY="$APP_BUNDLE/Contents/Resources/bin/maxx-runtime"
 APP_BINARY_PATTERN="${APP_BINARY//./\.}"
+RUNTIME_BINARY_PATTERN="${RUNTIME_BINARY//./\.}"
 
-# Stop only the app produced by this workspace. A separately installed Maxx
-# and unrelated Electron/Chromium processes remain untouched.
+# Stop only the app and runtime produced by this workspace. A separately
+# installed Maxx and unrelated Electron/Chromium processes remain untouched.
 pkill -f "$APP_BINARY_PATTERN" >/dev/null 2>&1 || true
+pkill -f "$RUNTIME_BINARY_PATTERN" >/dev/null 2>&1 || true
 
 cd "$ROOT_DIR"
 cargo build --release --manifest-path src-tauri/Cargo.toml

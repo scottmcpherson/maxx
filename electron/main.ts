@@ -19,7 +19,7 @@ import {
 } from "electron";
 import { BrowserManager } from "./browser-manager.js";
 import { ChromeImporter } from "./chrome-importer.js";
-import type { BrowserEngineContext, BrowserOperation, BrowserViewBounds, JsonValue } from "./contracts.js";
+import type { BrowserAnnotationSelection, BrowserEngineContext, BrowserOperation, BrowserViewBounds, JsonValue } from "./contracts.js";
 import { SidecarClient } from "./sidecar-client.js";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +55,9 @@ const RUNTIME_METHODS = new Set([
   "voice_start", "voice_send_audio", "voice_stop", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
   "browser_ui_forward", "browser_ui_reload", "browser_ui_artifact",
+  "host_status", "host_discovery", "host_listen", "host_unlisten", "host_create_pairing",
+  "host_cancel_pairing", "host_connect", "host_disconnect", "host_revoke_peer",
+  "list_folder", "create_folder", "home_folder", "upload_media", "read_media", "load_media",
 ]);
 
 function isInside(candidate: string, root: string): boolean {
@@ -181,6 +184,7 @@ async function createWindow(): Promise<void> {
   runtime = new SidecarClient({
     executable,
     cwd: runtimeWorkingDirectory(),
+    dataDirectory: app.getPath("userData"),
     onEvent: (event, payload) => {
       if (event === "notification://turn-finished") {
         const value = payload as { title?: unknown; terminalState?: unknown };
@@ -226,7 +230,57 @@ async function runAppSmoke(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!state.bridge || !state.newChat || !state.projects) throw new Error(`packaged renderer did not become ready: ${JSON.stringify(state)}`);
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state })}\n`);
+  const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
+  if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
+  const project = await runtime!.request("add_project", { folderPath: runtimeWorkingDirectory() }, 5_000) as Record<string, JsonValue>;
+  const projectId = String(project.id ?? "");
+  const thread = await runtime!.request("add_thread", {
+    projectId,
+    provider: "codex",
+    model: "default",
+    title: "Packaged runtime acceptance",
+  }, 5_000) as Record<string, JsonValue>;
+  const threadId = String(thread.id ?? "");
+  const browserTabId = await runtime!.request("browser_ui_open_tab", { threadId, url: null }, 5_000) as string;
+  // Human input interrupts the native engine through a sidecar host request.
+  // A subsequent command proves that the sidecar input reader remains free to
+  // receive that host response instead of deadlocking behind the event.
+  runtime!.event("browser.human_input", { tabId: browserTabId });
+  await runtime!.request("workspace_snapshot", {}, 5_000);
+  const turnId = await runtime!.request("send_prompt", {
+    projectId,
+    threadId,
+    // Exercise the runtime's ownership guard through the packaged bridge: a
+    // stale host selection must not forward a project that exists locally.
+    hostId: "stale-remote-host",
+    prompt: "Packaged runtime acceptance",
+    imagePaths: [],
+    attachmentIds: [],
+    annotations: [{
+      id: randomUUID(),
+      tabId: randomUUID(),
+      url: "https://example.com/",
+      selector: "html > body > h1",
+      tagName: "h1",
+      role: "heading",
+      name: "Example Domain",
+      text: "Example Domain",
+      instruction: "Make this heading orange",
+      // Exercise the largest preview payload the live annotation capture path
+      // can emit, including transport through Electron and the Rust sidecar.
+      previewDataUrl: `data:image/png;base64,${Buffer.alloc(128 * 1024).toString("base64")}`,
+      rect: { x: 10, y: 20, width: 100, height: 30 },
+      createdAt: Date.now(),
+    }],
+  }, 5_000) as string;
+  const persisted = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
+  const persistedProject = (persisted.projects as Array<Record<string, JsonValue>>).find((value) => value.id === projectId);
+  const persistedThread = (persistedProject?.threads as Array<Record<string, JsonValue>> | undefined)?.find((value) => value.id === threadId);
+  const messages = persistedThread?.messages as Array<Record<string, JsonValue>> | undefined;
+  const annotationPersisted = messages?.some((message) => Array.isArray(message.annotations) && message.annotations.length === 1) === true;
+  if (!turnId || !annotationPersisted) throw new Error("packaged runtime did not acknowledge and persist the annotated prompt");
+  await runtime!.request("cancel_turn", { turnId }, 5_000);
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, runtimeAck: true, annotationPersisted, isolatedWorkspace: true })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {
@@ -245,11 +299,15 @@ async function runBrowserSmoke(): Promise<void> {
   const window = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   window.showInactive();
   const errors: JsonValue[] = [];
+  const annotationEvents: JsonValue[] = [];
   const importer = new ChromeImporter(session.fromPartition("persist:maxx-browser", { cache: true }), app.getPath("userData"));
   const manager = new BrowserManager({
     window,
     userDataPath: app.getPath("userData"),
-    emitRenderer: (event, payload) => { if (event === "browser://error") errors.push(payload); },
+    emitRenderer: (event, payload) => {
+      if (event === "browser://error") errors.push(payload);
+      if (event === "browser://annotation") annotationEvents.push(payload);
+    },
     emitHostEvent: () => undefined,
     chromeImporter: importer,
   });
@@ -270,6 +328,19 @@ async function runBrowserSmoke(): Promise<void> {
   try {
     stage = "open tab";
     await run({ operation: "open_tab", url: null });
+    stage = "rapid tab close";
+    const transientTabId = randomUUID();
+    const transientOpen = manager.execute(
+      { ...context, tabId: transientTabId, actionId: randomUUID() },
+      { operation: "open_tab", url: null },
+    );
+    manager.closeTab(transientTabId);
+    await transientOpen;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const rapidCloseErrors = errors.filter((error) => (
+      error && typeof error === "object" && !Array.isArray(error) && error.code === "browser.cdp-attach"
+    ));
+    if (rapidCloseErrors.length > 0) throw new Error(`closing a new tab surfaced a CDP setup error: ${JSON.stringify(rapidCloseErrors)}`);
     stage = "fixture snapshot";
     const interactive = await observe(fixtureURL);
     const elements = Array.isArray(interactive.elements) ? interactive.elements as Array<Record<string, JsonValue>> : [];
@@ -282,6 +353,42 @@ async function runBrowserSmoke(): Promise<void> {
     await run({ operation: "click", tabId, reference: button.reference });
     const status = await run({ operation: "evaluate", tabId, expression: "document.querySelector('#status')?.textContent ?? ''" });
     if (status.value !== "Selected: Spring Hill") throw new Error("DOM interactions did not affect the visible tab");
+    stage = "annotation selection";
+    await manager.setAnnotationMode(tabId, true);
+    await run({ operation: "click", tabId, reference: button.reference });
+    for (const key of "update") await run({ operation: "press", tabId, key });
+    await run({ operation: "press", tabId, key: "Enter" });
+    for (let attempt = 0; attempt < 40 && annotationEvents.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const picked = annotationEvents.at(-1) as Record<string, JsonValue> | undefined;
+    if (
+      picked?.selected !== true ||
+      picked.instruction !== "update" ||
+      typeof picked.selector !== "string" ||
+      typeof picked.previewDataUrl !== "string" ||
+      !picked.previewDataUrl.startsWith("data:image/png;base64,")
+    ) {
+      throw new Error("Annotation mode did not emit the described element");
+    }
+    await manager.setAnnotationSelections(tabId, [
+      { selector: picked.selector, index: 1, instruction: "update" },
+      { selector: "#status", index: 2, instruction: "verify status" },
+    ]);
+    const hoveredInstruction = await run({
+      operation: "evaluate",
+      tabId,
+      expression: `(() => { const element=document.querySelector(${JSON.stringify(picked.selector)}); if(!element)return "missing"; const rect=element.getBoundingClientRect(); dispatchEvent(new MouseEvent("mousemove",{clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true})); return globalThis.__maxxAnnotation?.hoveredInstruction ?? ""; })()`,
+    });
+    if (hoveredInstruction.value !== "update") throw new Error("Annotation marker hover did not reveal its instruction");
+    const selectedBeforeReload = await run({ operation: "evaluate", tabId, expression: "globalThis.__maxxAnnotation?.selectionList?.length ?? 0" });
+    if (selectedBeforeReload.value !== 2) throw new Error("Annotation overlay did not receive the composer selections");
+    stage = "annotation reload persistence";
+    await run({ operation: "reload", tabId });
+    await run({ operation: "wait", tabId, condition: "globalThis.__maxxAnnotation?.selectionList?.length === 2", timeoutMs: 15_000 });
+    const selectedAfterReload = await run({ operation: "evaluate", tabId, expression: "globalThis.__maxxAnnotation?.selectionList?.length ?? 0" });
+    if (selectedAfterReload.value !== 2) throw new Error("Annotation overlay selections were lost on reload");
+    await manager.setAnnotationMode(tabId, false);
     stage = "Google";
     await observe("https://www.google.com/");
     stage = "Facebook";
@@ -308,7 +415,7 @@ async function runBrowserSmoke(): Promise<void> {
     );
     const tabLifecycleRecovered = replacement.tabId === replacementTabId;
     if (!tabLifecycleRecovered) throw new Error("browser did not recover after the final tab closed during annotation cleanup");
-    process.stdout.write(`MAXX_BROWSER_SMOKE ${JSON.stringify({ ok: true, tabId, observed, screenshotBytes: bytes, persistedBefore, tabLifecycleRecovered, errors })}\n`);
+    process.stdout.write(`MAXX_BROWSER_SMOKE ${JSON.stringify({ ok: true, tabId, observed, annotations: { emitted: annotationEvents.length, hoveredInstruction: hoveredInstruction.value, selectedBeforeReload: selectedBeforeReload.value, selectedAfterReload: selectedAfterReload.value }, screenshotBytes: bytes, persistedBefore, tabLifecycleRecovered, errors })}\n`);
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     throw new Error(`${stage}: ${detail}`);
@@ -475,6 +582,9 @@ function registerIPC(): void {
       case "browser_annotation_mode":
         await browser?.setAnnotationMode(String(params.tabId), Boolean(params.enabled));
         return null;
+      case "browser_annotation_selections":
+        await browser?.setAnnotationSelections(String(params.tabId), params.selections as BrowserAnnotationSelection[]);
+        return null;
       case "browser_chrome_import_status":
         return chromeImporter?.status();
       case "browser_import_chrome":
@@ -527,27 +637,31 @@ else {
   app.on("second-instance", () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     if (appSmoke) {
+      let exitCode = 0;
       try { await runAppSmoke(); }
-      catch (error) { process.stderr.write(`MAXX_APP_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; }
+      catch (error) { process.stderr.write(`MAXX_APP_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); exitCode = 1; }
       browser?.shutdown();
       browser = null;
       mainWindow?.destroy();
       mainWindow = null;
       runtime?.shutdown();
+      runtime?.terminate();
       runtime = null;
-      app.quit();
+      app.exit(exitCode);
       return;
     }
     if (browserSmoke) {
+      let exitCode = 0;
       try { await runBrowserSmoke(); }
-      catch (error) { process.stderr.write(`MAXX_BROWSER_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; }
-      app.quit();
+      catch (error) { process.stderr.write(`MAXX_BROWSER_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); exitCode = 1; }
+      app.exit(exitCode);
       return;
     }
     if (hermesBrowserSmoke) {
+      let exitCode = 0;
       try { await runHermesBrowserSmoke(); }
-      catch (error) { process.stderr.write(`MAXX_HERMES_BROWSER_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; }
-      app.quit();
+      catch (error) { process.stderr.write(`MAXX_HERMES_BROWSER_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); exitCode = 1; }
+      app.exit(exitCode);
       return;
     }
     registerMediaProtocol();
@@ -562,5 +676,6 @@ else {
     app.on("activate", () => { if (!mainWindow) void createWindow(); else mainWindow.show(); });
   }).catch((error) => { dialog.showErrorBox("Maxx could not start", String(error)); app.quit(); });
   app.on("before-quit", () => { quitting = true; browser?.shutdown(); runtime?.shutdown(); });
+  app.on("quit", () => runtime?.terminate());
   app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 }

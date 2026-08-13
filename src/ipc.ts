@@ -5,6 +5,8 @@ type UnlistenFn = () => void;
 import type {
   BrowserArtifactContent,
   BrowserAnnotation,
+  BrowserAnnotationEvent,
+  BrowserAnnotationSelection,
   ChromeImportStatus,
   BrowserNativeState,
   BrowserTabSummary,
@@ -30,8 +32,28 @@ import {
   WorkspaceDocument,
 } from "./contract/types";
 
+import { isLocalHost } from "./host/session";
+import type {
+  AccessPreset,
+  FolderEntry,
+  HostStatus,
+  MediaBytes,
+  PairingInvitation,
+  RemoteHostStatus,
+  TailscaleDiscovery,
+} from "./host/types";
+
 function invoke<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   return window.maxx.invoke<T>(method, params);
+}
+
+function invokeOnHost<T>(
+  hostId: string | null | undefined,
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<T> {
+  if (isLocalHost(hostId)) return invoke<T>(method, params);
+  return invoke<T>(method, { ...params, hostId });
 }
 
 function listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
@@ -46,12 +68,21 @@ export interface ResolvedMediaSource {
 }
 
 export const ipc = {
-  workspaceSnapshot: () => invoke<WorkspaceDocument>("workspace_snapshot"),
-  activeTurns: () => invoke<ActiveTurnRecord[]>("active_turns"),
-  addProject: (folderPath: string) => invoke<ChatProject>("add_project", { folderPath }),
-  removeProject: (projectId: string) => invoke<void>("remove_project", { projectId }),
-  addThread: (projectId: string, provider: ChatProvider, model: string, title: string) =>
-    invoke<ChatThread>("add_thread", { projectId, provider, model, title }),
+  workspaceSnapshot: (hostId?: string | null) =>
+    invokeOnHost<WorkspaceDocument>(hostId, "workspace_snapshot"),
+  activeTurns: (hostId?: string | null) =>
+    invokeOnHost<ActiveTurnRecord[]>(hostId, "active_turns"),
+  addProject: (folderPath: string, hostId?: string | null) =>
+    invokeOnHost<ChatProject>(hostId, "add_project", { folderPath }),
+  removeProject: (projectId: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "remove_project", { projectId }),
+  addThread: (
+    projectId: string,
+    provider: ChatProvider,
+    model: string,
+    title: string,
+    hostId?: string | null,
+  ) => invokeOnHost<ChatThread>(hostId, "add_thread", { projectId, provider, model, title }),
   addThreadWithRuntime: (
     projectId: string,
     provider: ChatProvider,
@@ -59,8 +90,9 @@ export const ipc = {
     title: string,
     effort?: string | null,
     speed?: string | null,
+    hostId?: string | null,
   ) =>
-    invoke<ChatThread>("add_thread_with_runtime", {
+    invokeOnHost<ChatThread>(hostId, "add_thread_with_runtime", {
       projectId,
       provider,
       model,
@@ -68,8 +100,8 @@ export const ipc = {
       effort: effort || null,
       speed: speed || null,
     }),
-  removeThread: (projectId: string, threadId: string) =>
-    invoke<void>("remove_thread", { projectId, threadId }),
+  removeThread: (projectId: string, threadId: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "remove_thread", { projectId, threadId }),
   updateThread: (
     projectId: string,
     threadId: string,
@@ -81,7 +113,8 @@ export const ipc = {
       speed?: string | null;
       updateRuntimeKnobs?: boolean;
     },
-  ) => invoke<void>("update_thread", { projectId, threadId, ...updates }),
+    hostId?: string | null,
+  ) => invokeOnHost<void>(hostId, "update_thread", { projectId, threadId, ...updates }),
   updateProfiles: (profiles: ProviderProfile[]) =>
     invoke<ProviderProfile[]>("update_profiles", { profiles }),
   updateTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) =>
@@ -98,31 +131,112 @@ export const ipc = {
     agentIds: string[],
     prompt: string,
     imagePaths: string[],
-  ) => invoke<ChatThread>("start_side_thread", { projectId, parentThreadId, agentIds, prompt, imagePaths }),
-  sendAgentPrompt: (projectId: string, threadId: string, agentIds: string[], prompt: string, imagePaths: string[]) =>
-    invoke<string>("send_agent_prompt", { projectId, threadId, agentIds, prompt, imagePaths }),
-  sendPrompt: (projectId: string, threadId: string, prompt: string, imagePaths: string[]) =>
-    invoke<string>("send_prompt", { projectId, threadId, prompt, imagePaths }),
-  cancelTurn: (turnId: string) => invoke<void>("cancel_turn", { turnId }),
+    hostId?: string | null,
+    attachmentIds: string[] = [],
+    annotations: BrowserAnnotation[] = [],
+  ) =>
+    invokeOnHost<ChatThread>(hostId, "start_side_thread", {
+      projectId,
+      parentThreadId,
+      agentIds,
+      prompt,
+      imagePaths,
+      attachmentIds,
+      annotations,
+    }),
+  sendAgentPrompt: (
+    projectId: string,
+    threadId: string,
+    agentIds: string[],
+    prompt: string,
+    imagePaths: string[],
+    hostId?: string | null,
+    attachmentIds: string[] = [],
+  ) =>
+    invokeOnHost<string>(hostId, "send_agent_prompt", {
+      projectId,
+      threadId,
+      agentIds,
+      prompt,
+      imagePaths,
+      attachmentIds,
+    }),
+  sendPrompt: (
+    projectId: string,
+    threadId: string,
+    prompt: string,
+    imagePaths: string[],
+    hostId?: string | null,
+    attachmentIds: string[] = [],
+    annotations: BrowserAnnotation[] = [],
+  ) =>
+    invokeOnHost<string>(hostId, "send_prompt", {
+      projectId,
+      threadId,
+      prompt,
+      imagePaths,
+      attachmentIds,
+      annotations,
+    }),
+  cancelTurn: (turnId: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "cancel_turn", { turnId }),
   resolveRequest: (
     projectId: string,
     threadId: string,
     requestId: string,
     decision: RuntimeInteractionDecision,
-  ) => invoke<void>("resolve_request", { projectId, threadId, requestId, decision }),
+    hostId?: string | null,
+  ) => invokeOnHost<void>(hostId, "resolve_request", { projectId, threadId, requestId, decision }),
   providerHealth: (profileId: string) => invoke<ProviderHealth>("provider_health", { profileId }),
   listProviderModels: (
     provider: ChatProvider,
     profileId?: string,
     workingDirectory?: string,
+    hostId?: string | null,
   ) =>
-    invoke<ProviderModelCatalog>("list_provider_models", {
+    invokeOnHost<ProviderModelCatalog>(hostId, "list_provider_models", {
       provider,
       profileId: profileId ?? null,
       workingDirectory: workingDirectory ?? null,
     }),
-  resolveMediaSource: (projectId: string, threadId: string, destination: string) =>
-    invoke<ResolvedMediaSource>("resolve_media_source", { projectId, threadId, destination }),
+  resolveMediaSource: (projectId: string, threadId: string, destination: string, hostId?: string | null) =>
+    invokeOnHost<ResolvedMediaSource>(hostId, "resolve_media_source", { projectId, threadId, destination }),
+  hostStatus: () => invoke<HostStatus>("host_status"),
+  hostDiscovery: () => invoke<TailscaleDiscovery>("host_discovery"),
+  hostListen: (bindAddress?: string) =>
+    invoke<string>("host_listen", { bindAddress: bindAddress ?? null }),
+  hostUnlisten: () => invoke<void>("host_unlisten"),
+  hostCreatePairing: (preset: AccessPreset) =>
+    invoke<PairingInvitation>("host_create_pairing", { preset }),
+  hostCancelPairing: () => invoke<void>("host_cancel_pairing"),
+  hostConnect: (address: string, code: string) =>
+    invoke<RemoteHostStatus>("host_connect", { address, code }),
+  hostDisconnect: (hostId: string) => invoke<void>("host_disconnect", { hostId }),
+  hostRevokePeer: (peerId: string) => invoke<void>("host_revoke_peer", { peerId }),
+  listFolder: (path: string, hostId?: string | null) =>
+    invokeOnHost<FolderEntry[]>(hostId, "list_folder", { path }),
+  createFolder: (parent: string, name: string, hostId?: string | null) =>
+    invokeOnHost<{ path: string }>(hostId, "create_folder", { parent, name }),
+  homeFolder: (hostId?: string | null) =>
+    invokeOnHost<{ path: string }>(hostId, "home_folder"),
+  uploadMedia: (
+    dataBase64: string,
+    mimeType: string,
+    displayName: string,
+    hostId?: string | null,
+  ) =>
+    invokeOnHost<{ id: string; path: string; mimeType: string; displayName: string }>(
+      hostId,
+      "upload_media",
+      { dataBase64, mimeType, displayName },
+    ),
+  readMedia: (attachmentId: string, hostId?: string | null) =>
+    invokeOnHost<MediaBytes>(hostId, "read_media", { attachmentId }),
+  loadMedia: (projectId: string, threadId: string, destination: string, hostId?: string | null) =>
+    invokeOnHost<MediaBytes>(hostId, "load_media", { projectId, threadId, destination }),
+  onHostEvent: (
+    handler: (payload: { hostId: string; event: string; payload: unknown }) => void,
+  ): Promise<UnlistenFn> => listen("host://event", handler),
 
   // Shared browser surface. Electron renders each tab directly and Rust keeps
   // the provider scope/control broker authoritative.
@@ -146,6 +260,8 @@ export const ipc = {
   browserViewVisible: (visible: boolean) => invoke<void>("browser_view_visible", { visible }),
   browserAnnotationMode: (tabId: string, enabled: boolean) =>
     invoke<void>("browser_annotation_mode", { tabId, enabled }),
+  browserAnnotationSelections: (tabId: string, selections: BrowserAnnotationSelection[]) =>
+    invoke<void>("browser_annotation_selections", { tabId, selections }),
   browserChromeImportStatus: () => invoke<ChromeImportStatus>("browser_chrome_import_status"),
   browserImportChrome: (profileId: string) =>
     invoke<ChromeImportStatus>("browser_import_chrome", { profileId }),
@@ -193,8 +309,8 @@ export const ipc = {
     listen<BrowserUiReveal>("browser://reveal", handler),
   onBrowserState: (handler: (state: BrowserNativeState) => void): Promise<UnlistenFn> =>
     listen<BrowserNativeState>("browser://state", handler),
-  onBrowserAnnotation: (handler: (annotation: BrowserAnnotation) => void): Promise<UnlistenFn> =>
-    listen<BrowserAnnotation>("browser://annotation", handler),
+  onBrowserAnnotation: (handler: (annotation: BrowserAnnotationEvent) => void): Promise<UnlistenFn> =>
+    listen<BrowserAnnotationEvent>("browser://annotation", handler),
   onBrowserError: (handler: (error: { tabId: string; code: string; message: string }) => void): Promise<UnlistenFn> =>
     listen("browser://error", handler),
 

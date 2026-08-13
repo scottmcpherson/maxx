@@ -8,7 +8,7 @@ export const DEFAULT_BROWSER_TITLE = "Browser";
 
 export const DEFAULT_BROWSER_WIDTH = 584;
 export const MIN_BROWSER_WIDTH = 360;
-export const MAX_BROWSER_WIDTH = 800;
+export const MAX_BROWSER_WIDTH = 1140;
 
 const SEARCH_ENDPOINT = "https://duckduckgo.com/";
 const BROWSER_WIDTH_STORAGE_KEY = "maxx.browser.width";
@@ -172,8 +172,18 @@ export interface BrowserAnnotation {
   role: string | null;
   name: string;
   text: string;
+  instruction: string;
+  previewDataUrl: string;
   rect: { x: number; y: number; width: number; height: number };
   createdAt: number;
+}
+
+export type BrowserAnnotationEvent = (BrowserAnnotation & { selected: boolean }) | { tabId: string; cancel: true };
+
+export interface BrowserAnnotationSelection {
+  selector: string;
+  index: number;
+  instruction: string;
 }
 
 export interface ChromeImportStatus {

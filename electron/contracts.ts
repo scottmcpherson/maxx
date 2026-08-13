@@ -82,8 +82,19 @@ export interface BrowserAnnotation {
   role: string | null;
   name: string;
   text: string;
+  instruction: string;
+  previewDataUrl: string;
   rect: { x: number; y: number; width: number; height: number };
   createdAt: number;
+  selected: boolean;
+}
+
+export type BrowserAnnotationEvent = BrowserAnnotation | { tabId: string; cancel: true };
+
+export interface BrowserAnnotationSelection {
+  selector: string;
+  index: number;
+  instruction: string;
 }
 
 export interface HostRequest {

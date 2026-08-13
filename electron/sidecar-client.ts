@@ -18,6 +18,7 @@ interface PendingRequest {
 interface SidecarClientOptions {
   executable: string;
   cwd: string;
+  dataDirectory?: string;
   onEvent: (event: string, payload: JsonValue) => void;
   onHostRequest: (method: string, params: JsonValue) => Promise<JsonValue>;
   onLog?: (line: string) => void;
@@ -39,7 +40,11 @@ export class SidecarClient {
     this.#process = spawn(options.executable, ["--sidecar"], {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, MAXX_DESKTOP_HOST: "electron" },
+      env: {
+        ...process.env,
+        MAXX_DESKTOP_HOST: "electron",
+        ...(options.dataDirectory ? { MAXX_DATA_DIR: options.dataDirectory } : {}),
+      },
     });
     const lines = createInterface({ input: this.#process.stdout });
     lines.on("line", (line) => this.#readLine(line));
@@ -73,13 +78,19 @@ export class SidecarClient {
     this.#shuttingDown = true;
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
-      pending.resolve(null);
+      pending.reject(new Error("Maxx runtime is shutting down"));
     }
     this.#pending.clear();
-    this.#write({ type: "shutdown" });
+    this.#bufferedWrites = [];
+    if (this.#ready) this.#process.stdin.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+    else this.#process.stdin.end();
     setTimeout(() => {
       if (!this.#process.killed) this.#process.kill("SIGTERM");
     }, 2_000).unref();
+  }
+
+  terminate(): void {
+    if (!this.#process.killed) this.#process.kill("SIGTERM");
   }
 
   #readLine(line: string): void {
@@ -123,7 +134,9 @@ export class SidecarClient {
 
   #write(value: object): void {
     const serialized = `${JSON.stringify(value)}\n`;
-    if (this.#ready || (value as { type?: string }).type === "host_response") this.#process.stdin.write(serialized);
+    if (this.#ready || (value as { type?: string }).type === "host_response") {
+      this.#process.stdin.write(serialized);
+    }
     else this.#bufferedWrites.push(serialized);
   }
 

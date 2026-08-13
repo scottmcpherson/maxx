@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { ipc, mediaURL } from "../ipc";
+import { isLocalHost } from "../host/session";
+import { mediaDataUrl } from "../host/mediaUpload";
 import { MessageMedia as MessageMediaValue, MessageMediaKind } from "../media";
 
 interface RenderSource {
@@ -12,10 +14,12 @@ export function MessageMedia({
   media,
   projectID,
   threadID,
+  hostID,
 }: {
   media: MessageMediaValue;
   projectID: string;
   threadID: string;
+  hostID?: string;
 }) {
   const { altText, destination, kind } = media;
   const [source, setSource] = useState<RenderSource | null>(() => remoteSource(destination, kind, altText));
@@ -32,14 +36,29 @@ export function MessageMedia({
     let cancelled = false;
     setSource(null);
     setError(null);
-    void ipc.resolveMediaSource(projectID, threadID, destination)
+    const load = destination.startsWith("attachment:")
+      ? ipc.readMedia(destination.slice("attachment:".length), hostID)
+        .then((media) => ({
+          url: mediaDataUrl(media.mimeType, media.dataBase64),
+          kind: "image" as const,
+          displayName: media.displayName,
+        }))
+      : isLocalHost(hostID)
+        ? ipc.resolveMediaSource(projectID, threadID, destination, hostID)
+          .then((resolved) => ({
+            url: mediaURL(resolved.path),
+            kind: resolved.kind,
+            displayName: resolved.displayName,
+          }))
+        : ipc.loadMedia(projectID, threadID, destination, hostID)
+          .then((media) => ({
+            url: mediaDataUrl(media.mimeType, media.dataBase64),
+            kind: media.kind ?? "image",
+            displayName: media.displayName,
+          }));
+    void load
       .then((resolved) => {
-        if (cancelled) return;
-        setSource({
-          url: mediaURL(resolved.path),
-          kind: resolved.kind,
-          displayName: resolved.displayName,
-        });
+        if (!cancelled) setSource(resolved);
       })
       .catch((reason: unknown) => {
         if (!cancelled) setError(typeof reason === "string" ? reason : "Could not load media");
@@ -47,7 +66,7 @@ export function MessageMedia({
     return () => {
       cancelled = true;
     };
-  }, [altText, destination, kind, projectID, threadID]);
+  }, [altText, destination, hostID, kind, projectID, threadID]);
 
   if (error) {
     return (

@@ -1,10 +1,11 @@
 import { AgentDefinition, ChatImageAttachment, ChatThread, EventKind } from "./types";
 import { TimelineItem } from "./timeline";
 import { isProviderDiagnostic } from "../providerDiagnostics";
+import type { BrowserAnnotation } from "../browser";
 
 /** One rendered line of a thread transcript, in chronological order. */
 export type TimelineRow =
-  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[] }
+  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[]; annotations: BrowserAnnotation[] }
   // `system` messages are Maxx's own annotations (currently the cross-provider
   // context handoff notice), rendered as a quiet inline marker.
   | { key: string; at: number; kind: "system"; messageID: string; text: string }
@@ -23,7 +24,7 @@ export function buildRows(
       text: message.content,
     };
     if (message.role === "user") {
-      result.push({ ...shared, kind: "user", attachments: message.attachments ?? [] });
+      result.push({ ...shared, kind: "user", attachments: message.attachments ?? [], annotations: message.annotations ?? [] });
     } else if (message.role === "system") {
       result.push({ ...shared, kind: "system" });
     }

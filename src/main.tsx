@@ -1,9 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { installBrowserPreviewBridge } from "./previewBridge";
 import "streamdown/styles.css";
 import "./streamdown.css";
 import "./styles.css";
+
+installBrowserPreviewBridge();
 
 /** Show custom scrollbars only while an element is actively scrolling. */
 const scrollHideTimers = new WeakMap<Element, number>();
