@@ -13,7 +13,7 @@ import {
 
 function workspace(folderPath: string): WorkspaceDocument {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     projects: [{ id: `project-${folderPath}`, folderPath, threads: [] }],
     providerProfiles: [],
     agents: [],

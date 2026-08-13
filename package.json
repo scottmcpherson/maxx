@@ -14,6 +14,7 @@
     "test:host": "node script/verify_host_pairing.mjs",
     "test:browser": "electron . --browser-smoke",
     "test:browser:hermes": "electron . --hermes-browser-smoke",
+    "benchmark:terminal": "node --expose-gc script/benchmark_terminal.mjs",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "preview": "vite preview",
     "test": "vitest run"
@@ -51,6 +52,9 @@
   },
   "dependencies": {
     "@streamdown/code": "^1.1.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "^6.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
@@ -63,6 +67,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.3",
+    "@xterm/headless": "6.0.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.3",

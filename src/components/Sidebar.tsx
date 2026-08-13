@@ -99,7 +99,7 @@ export function Sidebar() {
   const catalog = useMemo(() => {
     let next = emptyCatalog(
       workspace ?? {
-        schemaVersion: 6,
+        schemaVersion: 7,
         projects: [],
         providerProfiles: [],
         agents: [],

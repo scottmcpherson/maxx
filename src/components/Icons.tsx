@@ -166,6 +166,12 @@ export const Icons = {
   terminal: (props: IconProps) => (
     <IconBase {...props}><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="m7 9 3 3-3 3m6 0h4" /></IconBase>
   ),
+  flask: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M9 3h6M10 3v6l-5 8.5A2.3 2.3 0 0 0 7 21h10a2.3 2.3 0 0 0 2-3.5L14 9V3" />
+      <path d="M7.5 15h9" />
+    </IconBase>
+  ),
   files: (props: IconProps) => (
     <IconBase {...props}><path d="M7 3.5h8l3 3v14H7z" /><path d="M15 3.5v4h3M4 7v13h10" /></IconBase>
   ),

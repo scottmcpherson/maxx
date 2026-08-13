@@ -268,11 +268,15 @@ export interface ChatThread {
   effort?: string | null;
   /** Speed tier when the provider supports a separate speed knob. */
   speed?: string | null;
+  /** The first-class conversation surface currently owning this thread. */
+  surface?: ChatSurface;
   providerSessionID?: string;
   lastTurnID?: string;
   messages: ChatMessage[];
   runtimeEvents: ProviderRuntimeEvent[];
   interactionRequests: RuntimeInteractionRecord[];
+  /** Rendered PTY scrollback captured whenever terminal mode returns to GUI mode. */
+  terminalArchives?: TerminalArchive[];
   /** Set on side threads: the main thread this conversation branched from. */
   parentThreadID?: string;
   /** Set on side threads: the parent-thread message the branch hangs off. */
@@ -283,6 +287,38 @@ export interface ChatThread {
   contextSeed?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export type ChatSurface = "gui" | "terminal";
+
+export interface TerminalArchive {
+  id: string;
+  content: string;
+  startedAt: number;
+  endedAt: number;
+}
+
+export interface TerminalSupport {
+  supported: boolean;
+  browserAvailable: boolean;
+  reason?: string | null;
+}
+
+export interface TerminalStatus {
+  threadID: string;
+  state: "running" | "exited";
+  cursor: number;
+  firstCursor: number;
+  browserAvailable: boolean;
+  startedAt: number;
+}
+
+export interface TerminalRead {
+  chunks: Array<{ cursor: number; dataBase64: string }>;
+  cursor: number;
+  firstCursor: number;
+  gap: boolean;
+  state: "running" | "exited";
 }
 
 export interface ProviderModelOption {

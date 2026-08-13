@@ -18,6 +18,10 @@ import {
   persistShowProviderDiagnostics,
 } from "../providerDiagnostics";
 import {
+  loadTerminalModeEnabled,
+  persistTerminalModeEnabled,
+} from "../terminalModePreference";
+import {
   DEFAULT_KEYBOARD_SHORTCUTS,
   loadKeyboardShortcuts,
   persistKeyboardShortcuts,
@@ -30,6 +34,7 @@ import type {
 import {
   AgentDefinition,
   ChatProvider,
+  ChatSurface,
   ChatThread,
   ProviderProfile,
   RuntimeEventEnvelope,
@@ -113,9 +118,13 @@ interface AppStoreState {
   defaultRuntime: RuntimeSelection;
   /** Ephemeral runtime for the currently open new-chat composer. */
   newThreadRuntime: RuntimeSelection;
+  /** Surface selected for the next chat. Reset after leaving the composer. */
+  newThreadSurface: ChatSurface;
   keyboardShortcuts: KeyboardShortcutBindings;
   /** Non-fatal notices emitted by provider runtimes, hidden from chat by default. */
   showProviderDiagnostics: boolean;
+  /** Experimental access to native provider terminal surfaces. */
+  terminalModeEnabled: boolean;
   error: string | null;
 
   bootstrap: () => Promise<void>;
@@ -138,6 +147,7 @@ interface AppStoreState {
     title?: string,
     effort?: string | null,
     speed?: string | null,
+    surface?: ChatSurface,
   ) => Promise<ChatThread | null>;
   removeThread: (projectID: string, threadID: string) => Promise<void>;
   renameThread: (projectID: string, threadID: string, title: string) => Promise<boolean>;
@@ -157,6 +167,7 @@ interface AppStoreState {
     imagePaths: string[],
     effort?: string | null,
     speed?: string | null,
+    surface?: ChatSurface,
   ) => Promise<boolean>;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
   cancelActiveTurn: (threadID: string) => Promise<void>;
@@ -209,9 +220,11 @@ interface AppStoreState {
   checkForUpdates: () => Promise<void>;
   setDefaultRuntime: (selection: RuntimeSelection) => void;
   setNewThreadRuntime: (selection: RuntimeSelection) => void;
+  setNewThreadSurface: (surface: ChatSurface) => void;
   setKeyboardShortcut: (command: KeyboardShortcutCommand, binding: KeyboardShortcutBinding) => void;
   resetKeyboardShortcut: (command: KeyboardShortcutCommand) => void;
   setShowProviderDiagnostics: (visible: boolean) => void;
+  setTerminalModeEnabled: (enabled: boolean) => void;
   applyRuntimeEvent: (envelope: RuntimeEventEnvelope, hostID?: string) => void;
   applyThreadTitleUpdated: (envelope: ThreadTitleUpdatedEnvelope, hostID?: string) => void;
   applyTurnFinished: (envelope: TurnFinishedEnvelope, hostID?: string) => void;
@@ -252,7 +265,7 @@ function catalogFromState(state: {
   hostStatus: HostStatus | null;
 }) {
   const local = state.workspace ?? {
-    schemaVersion: 6,
+    schemaVersion: 7,
     projects: [],
     providerProfiles: [],
     agents: [],
@@ -307,8 +320,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   updateStatus: null,
   defaultRuntime: { ...initialDefaultRuntime },
   newThreadRuntime: { ...initialDefaultRuntime },
+  newThreadSurface: "gui",
   keyboardShortcuts: loadKeyboardShortcuts(),
   showProviderDiagnostics: loadShowProviderDiagnostics(),
+  terminalModeEnabled: loadTerminalModeEnabled(),
   error: null,
 
   bootstrap: async () => {
@@ -553,6 +568,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       selectedProjectID: resolvedProjectID,
       selectedThreadID: null,
       newThreadRuntime: { ...get().defaultRuntime },
+      newThreadSurface: "gui",
       settingsOpen: false,
       agentsOpen: false,
       renamingThread: null,
@@ -572,6 +588,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         selectedProjectID: project.id,
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
+        newThreadSurface: "gui",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -592,6 +609,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         selectedProjectID: null,
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
+        newThreadSurface: "gui",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -599,12 +617,29 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
-  addThread: async (projectID, provider, model, title = "New thread", effort = null, speed = null) => {
+  addThread: async (
+    projectID,
+    provider,
+    model,
+    title = "New thread",
+    effort = null,
+    speed = null,
+    surface = "gui",
+  ) => {
     try {
       const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       const thread =
-        effort || speed
-          ? await ipc.addThreadWithRuntime(projectID, provider, model, title, effort, speed, hostID)
+        effort || speed || surface === "terminal"
+          ? await ipc.addThreadWithRuntime(
+              projectID,
+              provider,
+              model,
+              title,
+              effort,
+              speed,
+              surface,
+              hostID,
+            )
           : await ipc.addThread(projectID, provider, model, title, hostID);
       await get().refresh();
       set({
@@ -614,6 +649,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
+        newThreadSurface: "gui",
       });
       return thread;
     } catch (error) {
@@ -630,6 +666,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       set({
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
+        newThreadSurface: "gui",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -667,14 +704,23 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
   },
 
-  createThreadAndSend: async (projectID, provider, model, prompt, imagePaths, effort = null, speed = null) => {
-    if (!prompt.trim() && imagePaths.length === 0) return false;
+  createThreadAndSend: async (
+    projectID,
+    provider,
+    model,
+    prompt,
+    imagePaths,
+    effort = null,
+    speed = null,
+    surface = "gui",
+  ) => {
+    if (!prompt.trim() && (surface === "terminal" || imagePaths.length === 0)) return false;
     const title = prompt.trim().split("\n")[0].slice(0, 64) || "Image attachment";
-    const thread = await get().addThread(projectID, provider, model, title, effort, speed);
+    const thread = await get().addThread(projectID, provider, model, title, effort, speed, surface);
     if (!thread) return false;
     try {
       const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
-      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const prepared = await uploadImagesForHost(hostID, surface === "terminal" ? [] : imagePaths);
       const turnID = await ipc.sendPrompt(
         projectID,
         thread.id,
@@ -689,6 +735,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       await get().refresh();
     } catch (error) {
       set({ error: String(error) });
+      return false;
     }
     return true;
   },
@@ -918,6 +965,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     const newThreadRuntime = normalizeDefaultRuntime(selection) ?? { ...get().defaultRuntime };
     set({ newThreadRuntime });
   },
+  setNewThreadSurface: (surface) => set({ newThreadSurface: surface }),
   setKeyboardShortcut: (command, binding) => {
     const keyboardShortcuts = {
       ...get().keyboardShortcuts,
@@ -938,6 +986,13 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setShowProviderDiagnostics: (visible) => {
     persistShowProviderDiagnostics(visible);
     set({ showProviderDiagnostics: visible });
+  },
+  setTerminalModeEnabled: (enabled) => {
+    persistTerminalModeEnabled(enabled);
+    set({
+      terminalModeEnabled: enabled,
+      ...(!enabled ? { newThreadSurface: "gui" as const } : {}),
+    });
   },
 
   applyRuntimeEvent: (envelope, hostID) => {

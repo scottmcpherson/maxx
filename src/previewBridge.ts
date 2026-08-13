@@ -92,7 +92,7 @@ function sampleThread(
 }
 
 let localWorkspace: WorkspaceDocument = {
-  schemaVersion: 6,
+  schemaVersion: 7,
   projects: [
     {
       id: "maxx-project",
@@ -133,7 +133,7 @@ const remoteHost: RemoteHostStatus = {
   id: "studio",
   name: "Studio Mac",
   address: "studio.tailnet.ts.net:7422",
-  capabilities: ["workspace-read", "workspace-write", "agent-run", "browser-control"],
+  capabilities: ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"],
   connected: true,
   lastEventCursor: 42,
   error: "",
@@ -142,7 +142,7 @@ const remoteHost: RemoteHostStatus = {
 let hostStatus: HostStatus = {
   id: "browser-preview",
   name: "This Mac",
-  protocolVersion: 1,
+  protocolVersion: 2,
   listening: true,
   bindAddress: "127.0.0.1:7422",
   shareAddress: "this-mac.tailnet.ts.net:7422",
@@ -309,7 +309,7 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
       ];
       break;
     case "host_create_pairing":
-      result = { code: "MAXX-4821", expiresAt: now() + 600, capabilities: params.preset === "full" ? ["workspace-read", "workspace-write", "agent-run", "browser-control", "settings-manage", "voice-control"] : ["workspace-read", "workspace-write", "agent-run", "browser-control"] };
+      result = { code: "MAXX-4821", expiresAt: now() + 600, capabilities: params.preset === "full" ? ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control", "settings-manage", "voice-control"] : ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"] };
       hostStatus = { ...hostStatus, pairing: result as HostStatus["pairing"] };
       break;
     case "host_cancel_pairing":

@@ -5,14 +5,18 @@
 //! barrier.
 
 use super::process::{JsonLineProcess, LaunchSpec};
-use super::{yield_draft, yield_error, DraftSender, ProviderEngine, TurnRequest};
+use super::{
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+};
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
@@ -281,6 +285,48 @@ impl ProviderEngine for AcpEngine {
         ))
     }
 
+    async fn reconcile_session(
+        &self,
+        request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        let session_id = request.session_id.as_deref().ok_or_else(|| {
+            format!(
+                "The {} session has not been established yet.",
+                self.provider.display_name()
+            )
+        })?;
+        let configuration = super::launch::launch_configuration(&request.profile)?;
+        let turns = match self.provider {
+            ChatProvider::Grok => {
+                let grok_home = configuration
+                    .environment
+                    .get("GROK_HOME")
+                    .map(|path| profile_path(path, &configuration.home))
+                    .unwrap_or_else(|| configuration.home.join(".grok"));
+                let path = find_grok_updates(&grok_home, session_id).await?;
+                read_grok_updates(&path, session_id).await?
+            }
+            ChatProvider::Hermes => {
+                let hermes_home = configuration
+                    .environment
+                    .get("HERMES_HOME")
+                    .map(|path| profile_path(path, &configuration.home))
+                    .unwrap_or_else(|| configuration.home.join(".hermes"));
+                read_hermes_session(&hermes_home.join("state.db"), session_id).await?
+            }
+            ChatProvider::Cursor => {
+                let path = find_cursor_transcript(
+                    &configuration.home.join(".cursor/projects"),
+                    session_id,
+                )
+                .await?;
+                read_cursor_transcript(&path, session_id).await?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(turns))
+    }
+
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
         let key = (provider_instance_id, thread_id);
         let session = self.sessions.lock().await.remove(&key);
@@ -301,6 +347,501 @@ impl ProviderEngine for AcpEngine {
             retire_session(&session).await;
         }
     }
+}
+
+fn profile_path(path: &str, home: &std::path::Path) -> PathBuf {
+    if path == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    }
+}
+
+struct NativeTurnDraft {
+    native_id: String,
+    started_at: AppleDate,
+    user_content: String,
+    assistant_parts: Vec<String>,
+}
+
+fn finish_native_turn(
+    turns: &mut Vec<ReconciledSessionTurn>,
+    current: &mut Option<NativeTurnDraft>,
+) {
+    let Some(turn) = current.take() else {
+        return;
+    };
+    if turn.user_content.trim().is_empty() {
+        return;
+    }
+    turns.push(ReconciledSessionTurn {
+        native_id: turn.native_id,
+        started_at: turn.started_at,
+        user_content: turn.user_content,
+        assistant_content: turn.assistant_parts.join("\n\n").trim().to_owned(),
+    });
+}
+
+async fn read_hermes_session(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let path = path.to_path_buf();
+    let session_id = session_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use rusqlite::{Connection, OpenFlags};
+
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| {
+            format!(
+                "provider.session.not-found: Could not open Hermes session store {}: {error}",
+                path.display()
+            )
+        })?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("Could not find the Hermes session: {error}"))?;
+        if !exists {
+            return Err(
+                "provider.session.not-found: The saved Hermes session is no longer available."
+                    .into(),
+            );
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT id, role, content, timestamp
+                 FROM messages
+                 WHERE session_id = ?1 AND active = 1
+                   AND role IN ('user', 'assistant')
+                 ORDER BY id",
+            )
+            .map_err(|error| format!("Could not read Hermes session messages: {error}"))?;
+        let rows = statement
+            .query_map([&session_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .map_err(|error| format!("Could not query Hermes session messages: {error}"))?;
+
+        let mut turns = Vec::new();
+        let mut current = None;
+        for row in rows {
+            let (id, role, content, timestamp) =
+                row.map_err(|error| format!("Could not decode Hermes session message: {error}"))?;
+            let content = content.trim().to_owned();
+            match role.as_str() {
+                "user" if !content.is_empty() => {
+                    finish_native_turn(&mut turns, &mut current);
+                    current = Some(NativeTurnDraft {
+                        native_id: format!("hermes-message-{id}"),
+                        started_at: AppleDate::from_unix_seconds(timestamp),
+                        user_content: content,
+                        assistant_parts: Vec::new(),
+                    });
+                }
+                "assistant" if !content.is_empty() => {
+                    if let Some(turn) = &mut current {
+                        turn.assistant_parts.push(content);
+                    }
+                }
+                _ => {}
+            }
+        }
+        finish_native_turn(&mut turns, &mut current);
+        Ok(turns)
+    })
+    .await
+    .map_err(|error| format!("Hermes session reader stopped unexpectedly: {error}"))?
+}
+
+async fn find_cursor_transcript(
+    projects_root: &std::path::Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    let session_id = Uuid::parse_str(session_id)
+        .map_err(|_| "provider.session.not-found: The saved Cursor session ID is invalid.")?
+        .to_string();
+    let mut projects = tokio::fs::read_dir(projects_root).await.map_err(|error| {
+        format!(
+            "provider.session.not-found: Could not read Cursor projects in {}: {error}",
+            projects_root.display()
+        )
+    })?;
+    while let Some(project) = projects
+        .next_entry()
+        .await
+        .map_err(|error| format!("Could not inspect Cursor projects: {error}"))?
+    {
+        if !project
+            .file_type()
+            .await
+            .map_err(|error| format!("Could not inspect Cursor project storage: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let candidate = project
+            .path()
+            .join("agent-transcripts")
+            .join(&session_id)
+            .join(format!("{session_id}.jsonl"));
+        if tokio::fs::try_exists(&candidate)
+            .await
+            .map_err(|error| format!("Could not inspect Cursor transcript: {error}"))?
+        {
+            return Ok(candidate);
+        }
+    }
+    Err("provider.session.not-found: The saved Cursor session is no longer available.".into())
+}
+
+fn cursor_message_role(value: &Value) -> Option<&str> {
+    value
+        .pointer("/message/role")
+        .or_else(|| value.get("role"))
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .filter(|role| matches!(*role, "user" | "assistant"))
+}
+
+fn cursor_message_text(value: &Value) -> Option<String> {
+    let content = value
+        .pointer("/message/content")
+        .or_else(|| value.get("content"))?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_none_or(|kind| kind == "text")
+            })
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(block) => block.get("text")?.as_str()?.to_owned(),
+        _ => return None,
+    };
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn cursor_message_timestamp(value: &Value) -> AppleDate {
+    for pointer in [
+        "/timestamp",
+        "/created_at",
+        "/createdAt",
+        "/message/timestamp",
+    ] {
+        let Some(timestamp) = value.pointer(pointer) else {
+            continue;
+        };
+        if let Some(seconds) = timestamp.as_f64() {
+            return AppleDate::from_unix_seconds(if seconds > 10_000_000_000.0 {
+                seconds / 1_000.0
+            } else {
+                seconds
+            });
+        }
+        if let Some(value) = timestamp.as_str() {
+            if let Ok(parsed) = value.parse::<jiff::Timestamp>() {
+                return AppleDate::from_unix_seconds(parsed.as_millisecond() as f64 / 1_000.0);
+            }
+        }
+    }
+    AppleDate::now()
+}
+
+fn cursor_user_content(content: String) -> String {
+    let trimmed = content.trim();
+    trimmed
+        .strip_prefix("<user_query>")
+        .and_then(|content| content.strip_suffix("</user_query>"))
+        .map(str::trim)
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+async fn read_cursor_transcript(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let file = tokio::fs::File::open(path).await.map_err(|error| {
+        format!(
+            "Could not open Cursor transcript {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut lines = BufReader::new(file).lines();
+    let mut turns = Vec::new();
+    let mut current = None;
+    let mut line_number = 0usize;
+    while let Some(line) = lines.next_line().await.map_err(|error| {
+        format!(
+            "Could not read Cursor transcript {}: {error}",
+            path.display()
+        )
+    })? {
+        line_number += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Cursor transcript {} contains invalid JSON on line {line_number}: {error}",
+                path.display()
+            )
+        })?;
+        let (Some(role), Some(content)) =
+            (cursor_message_role(&value), cursor_message_text(&value))
+        else {
+            continue;
+        };
+        match role {
+            "user" => {
+                finish_native_turn(&mut turns, &mut current);
+                current = Some(NativeTurnDraft {
+                    native_id: format!("cursor-{session_id}-line-{line_number}"),
+                    started_at: cursor_message_timestamp(&value),
+                    user_content: cursor_user_content(content),
+                    assistant_parts: Vec::new(),
+                });
+            }
+            "assistant" => {
+                if let Some(turn) = &mut current {
+                    turn.assistant_parts.push(content);
+                }
+            }
+            _ => {}
+        }
+    }
+    finish_native_turn(&mut turns, &mut current);
+    Ok(turns)
+}
+
+async fn find_grok_updates(
+    grok_home: &std::path::Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    let session_id = Uuid::parse_str(session_id)
+        .map_err(|_| "provider.session.not-found: The saved Grok session ID is invalid.")?;
+    let sessions_root = grok_home.join("sessions");
+    let mut workspaces = tokio::fs::read_dir(&sessions_root).await.map_err(|error| {
+        format!(
+            "provider.session.not-found: Could not read Grok sessions in {}: {error}",
+            sessions_root.display()
+        )
+    })?;
+    while let Some(workspace) = workspaces
+        .next_entry()
+        .await
+        .map_err(|error| format!("Could not inspect Grok sessions: {error}"))?
+    {
+        if !workspace
+            .file_type()
+            .await
+            .map_err(|error| format!("Could not inspect Grok session storage: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let candidate = workspace
+            .path()
+            .join(session_id.to_string())
+            .join("updates.jsonl");
+        if tokio::fs::try_exists(&candidate).await.map_err(|error| {
+            format!(
+                "Could not inspect Grok session {}: {error}",
+                candidate.display()
+            )
+        })? {
+            return Ok(candidate);
+        }
+    }
+    Err("provider.session.not-found: The saved Grok session is no longer available.".into())
+}
+
+struct GrokTurnDraft {
+    native_id: String,
+    started_at: AppleDate,
+    user_content: String,
+    assistant_parts: Vec<String>,
+    assistant_stream: Option<String>,
+}
+
+#[derive(Default)]
+struct GrokTranscript {
+    turns: Vec<ReconciledSessionTurn>,
+    current: Option<GrokTurnDraft>,
+}
+
+impl GrokTranscript {
+    fn ingest(&mut self, value: &Value, session_id: &str) {
+        let params = match value.get("params") {
+            Some(params) if params.get("sessionId").and_then(Value::as_str) == Some(session_id) => {
+                params
+            }
+            _ => return,
+        };
+        let update = match params.get("update") {
+            Some(update) => update,
+            None => return,
+        };
+        match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("user_message_chunk") => {
+                let Some(text) = grok_update_text(update) else {
+                    return;
+                };
+                self.finish_current();
+                let native_id = params
+                    .pointer("/_meta/eventId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("grok-user-{}", self.turns.len()));
+                self.current = Some(GrokTurnDraft {
+                    native_id,
+                    started_at: grok_update_timestamp(value, params),
+                    user_content: text,
+                    assistant_parts: Vec::new(),
+                    assistant_stream: None,
+                });
+            }
+            Some("agent_message_chunk") => {
+                let Some(text) = grok_update_text(update) else {
+                    return;
+                };
+                let Some(current) = &mut self.current else {
+                    return;
+                };
+                let stream = params
+                    .pointer("/_meta/streamStartMs")
+                    .map(Value::to_string)
+                    .or_else(|| {
+                        params
+                            .pointer("/_meta/promptId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                if current.assistant_stream == stream && !current.assistant_parts.is_empty() {
+                    current.assistant_parts.last_mut().unwrap().push_str(&text);
+                } else {
+                    current.assistant_stream = stream;
+                    current.assistant_parts.push(text);
+                }
+            }
+            Some("turn_completed") => self.finish_current(),
+            _ => {}
+        }
+    }
+
+    fn finish_current(&mut self) {
+        let Some(turn) = self.current.take() else {
+            return;
+        };
+        if turn.user_content.trim().is_empty() {
+            return;
+        }
+        self.turns.push(ReconciledSessionTurn {
+            native_id: turn.native_id,
+            started_at: turn.started_at,
+            user_content: turn.user_content,
+            assistant_content: turn.assistant_parts.join("\n\n").trim().to_owned(),
+        });
+    }
+
+    fn finish(mut self) -> Vec<ReconciledSessionTurn> {
+        self.finish_current();
+        self.turns
+    }
+}
+
+fn grok_update_text(update: &Value) -> Option<String> {
+    let content = update.get("content")?;
+    let text = match content {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Object(content) if content.get("type").and_then(Value::as_str) == Some("text") => {
+            content.get("text")?.as_str()?.to_owned()
+        }
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn grok_update_timestamp(value: &Value, params: &Value) -> AppleDate {
+    if let Some(milliseconds) = params
+        .pointer("/_meta/agentTimestampMs")
+        .and_then(Value::as_f64)
+    {
+        return AppleDate::from_unix_seconds(milliseconds / 1_000.0);
+    }
+    value
+        .get("timestamp")
+        .and_then(Value::as_f64)
+        .map(|seconds| {
+            AppleDate::from_unix_seconds(if seconds > 10_000_000_000.0 {
+                seconds / 1_000.0
+            } else {
+                seconds
+            })
+        })
+        .unwrap_or_else(AppleDate::now)
+}
+
+async fn read_grok_updates(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("Could not open Grok session {}: {error}", path.display()))?;
+    let mut lines = BufReader::new(file).lines();
+    let mut transcript = GrokTranscript::default();
+    let mut line_number = 0usize;
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("Could not read Grok session {}: {error}", path.display()))?
+    {
+        line_number += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Grok session {} contains invalid JSON on line {line_number}: {error}",
+                path.display()
+            )
+        })?;
+        transcript.ingest(&value, session_id);
+    }
+    Ok(transcript.finish())
 }
 
 async fn retire_session(session: &Arc<AcpSession>) {
@@ -1121,6 +1662,193 @@ mod browser_mcp_tests {
             ]
         );
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn grok_updates_become_gui_turns_without_thoughts_or_tool_output() {
+        let session_id = Uuid::new_v4().to_string();
+        let mut transcript = GrokTranscript::default();
+        let updates = [
+            json!({"timestamp": 1_786_203_711.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first prompt"}},"_meta":{"eventId":"user-1","agentTimestampMs":1_786_203_711_000.0}}}),
+            json!({"timestamp": 1_786_203_712.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private reasoning"}},"_meta":{"eventId":"thought","streamStartMs":100}}}),
+            json!({"timestamp": 1_786_203_713.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I will check. "}},"_meta":{"eventId":"agent-1","streamStartMs":100}}}),
+            json!({"timestamp": 1_786_203_714.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}},"_meta":{"eventId":"agent-2","streamStartMs":100}}}),
+            json!({"timestamp": 1_786_203_715.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"tool_call_update","content":[{"type":"content","content":{"type":"text","text":"secret tool output"}}]},"_meta":{"eventId":"tool"}}}),
+            json!({"timestamp": 1_786_203_716.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Final answer"}},"_meta":{"eventId":"agent-3","streamStartMs":200}}}),
+            json!({"timestamp": 1_786_203_717.0, "method":"_x.ai/session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"turn_completed"},"_meta":{"eventId":"complete"}}}),
+            json!({"timestamp": 1_786_203_718.0, "method":"session/update", "params":{"sessionId":"other-session","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"wrong session"}},"_meta":{"eventId":"wrong"}}}),
+            json!({"timestamp": 1_786_203_719.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"terminal prompt"}},"_meta":{"eventId":"user-2"}}}),
+            json!({"timestamp": 1_786_203_720.0, "method":"session/update", "params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"terminal answer"}},"_meta":{"eventId":"agent-4","promptId":"prompt-2"}}}),
+        ];
+        for update in &updates {
+            transcript.ingest(update, &session_id);
+        }
+
+        let turns = transcript.finish();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].native_id, "user-1");
+        assert_eq!(turns[0].user_content, "first prompt");
+        assert_eq!(
+            turns[0].assistant_content,
+            "I will check. Done.\n\nFinal answer"
+        );
+        assert_eq!(turns[1].native_id, "user-2");
+        assert_eq!(turns[1].user_content, "terminal prompt");
+        assert_eq!(turns[1].assistant_content, "terminal answer");
+    }
+
+    #[tokio::test]
+    async fn finds_and_streams_groks_authoritative_updates() {
+        let session_id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("maxx-grok-session-test-{}", Uuid::new_v4()));
+        let session = root
+            .join("sessions")
+            .join("%2Ftmp")
+            .join(session_id.to_string());
+        std::fs::create_dir_all(&session).unwrap();
+        let path = session.join("updates.jsonl");
+        std::fs::write(
+            &path,
+            [
+                json!({"timestamp":1_786_203_711.0,"method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}},"_meta":{"eventId":"user"}}}).to_string(),
+                json!({"timestamp":1_786_203_712.0,"method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}},"_meta":{"eventId":"assistant","promptId":"prompt"}}}).to_string(),
+                json!({"timestamp":1_786_203_713.0,"method":"_x.ai/session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"turn_completed"},"_meta":{"eventId":"complete"}}}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_grok_updates(&root, &session_id.to_string())
+                .await
+                .unwrap(),
+            path
+        );
+        let turns = read_grok_updates(&path, &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_content, "hello");
+        assert_eq!(turns[0].assistant_content, "world");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hermes_sqlite_messages_become_gui_turns_without_reasoning_or_tools() {
+        let root = std::env::temp_dir().join(format!(
+            "maxx-hermes-session-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.db");
+        let session_id = Uuid::new_v4().to_string();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY);
+                 CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    timestamp REAL NOT NULL,
+                    reasoning TEXT,
+                    tool_calls TEXT,
+                    active INTEGER NOT NULL DEFAULT 1
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO sessions (id) VALUES (?1)", [&session_id])
+            .unwrap();
+        for (id, role, content, active) in [
+            (1, "user", "baseline prompt", 1),
+            (2, "assistant", "", 1),
+            (3, "tool", "private tool output", 1),
+            (4, "assistant", "baseline answer", 1),
+            (5, "user", "discarded branch", 0),
+            (6, "assistant", "discarded answer", 0),
+            (7, "user", "terminal prompt", 1),
+            (8, "assistant", "working", 1),
+            (9, "assistant", "native answer", 1),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO messages
+                     (id, session_id, role, content, timestamp, reasoning, tool_calls, active)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'private reasoning', '[]', ?6)",
+                    rusqlite::params![
+                        id,
+                        session_id,
+                        role,
+                        content,
+                        1_786_203_700.0 + id as f64,
+                        active
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let turns = read_hermes_session(&path, &session_id).await.unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].native_id, "hermes-message-1");
+        assert_eq!(turns[0].user_content, "baseline prompt");
+        assert_eq!(turns[0].assistant_content, "baseline answer");
+        assert_eq!(turns[1].native_id, "hermes-message-7");
+        assert_eq!(turns[1].user_content, "terminal prompt");
+        assert_eq!(turns[1].assistant_content, "working\n\nnative answer");
+        assert_eq!(turns[0].started_at.unix_seconds(), 1_786_203_701.0);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_jsonl_messages_become_gui_turns_and_are_discovered_by_session_id() {
+        let root = std::env::temp_dir().join(format!(
+            "maxx-cursor-session-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_id = Uuid::new_v4();
+        let transcript = root
+            .join("projects")
+            .join("Users-scott-Developer-project")
+            .join("agent-transcripts")
+            .join(session_id.to_string())
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            [
+                json!({"role":"system","message":{"content":[{"type":"text","text":"hidden rules"}]}}).to_string(),
+                json!({"role":"user","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"text","text":"<user_query>\nbaseline prompt\n</user_query>"}]}}).to_string(),
+                json!({"role":"assistant","message":{"content":[{"type":"text","text":"baseline answer"}]}}).to_string(),
+                json!({"role":"tool","message":{"content":[{"type":"text","text":"tool output"}]}}).to_string(),
+                json!({"role":"user","timestamp":1_786_203_719_000.0,"message":{"content":[{"type":"text","text":"terminal prompt"}]}}).to_string(),
+                json!({"role":"assistant","message":{"content":[{"type":"thinking","text":"private thinking"},{"type":"text","text":"native answer"}]}}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_cursor_transcript(&root.join("projects"), &session_id.to_string())
+                .await
+                .unwrap(),
+            transcript
+        );
+        let turns = read_cursor_transcript(&transcript, &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_content, "baseline prompt");
+        assert_eq!(turns[0].assistant_content, "baseline answer");
+        assert_eq!(turns[1].user_content, "terminal prompt");
+        assert_eq!(turns[1].assistant_content, "native answer");
+        assert_eq!(turns[1].started_at.unix_seconds(), 1_786_203_719.0);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

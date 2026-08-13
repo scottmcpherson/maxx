@@ -28,7 +28,10 @@ const development = process.argv.includes("--dev");
 const appSmoke = process.argv.includes("--app-smoke");
 const browserSmoke = process.argv.includes("--browser-smoke");
 const hermesBrowserSmoke = process.argv.includes("--hermes-browser-smoke");
-const smokeMode = appSmoke || browserSmoke || hermesBrowserSmoke;
+// Manual, isolated app session used by Computer Use to exercise the real
+// terminal UI without touching the user's normal Maxx workspace.
+const terminalUiSmoke = process.argv.includes("--terminal-ui-smoke");
+const smokeMode = appSmoke || browserSmoke || hermesBrowserSmoke || terminalUiSmoke;
 const smokeUserData = process.argv.find((argument) => argument.startsWith("--browser-smoke-user-data="))?.slice("--browser-smoke-user-data=".length);
 const BEST_BUY_BENCHMARK = "https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat335400050008&id=pcat17071&qp=brand_facet%3DBrand%7EBambu+Lab%5Estorepickupstores_facet%3DStore+Availability+-+In+Store+Pickup%7E885&st=categoryid%24pcmcat335400050008";
 const HERMES_SMOKE_MODEL = "custom:vllm-spark:unsloth/Qwen3.6-35B-A3B-NVFP4";
@@ -51,6 +54,8 @@ const RUNTIME_METHODS = new Set([
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
   "start_side_thread", "send_agent_prompt", "cancel_turn", "resolve_request", "provider_health",
+  "terminal_support", "terminal_start", "terminal_status", "terminal_input", "terminal_resize",
+  "terminal_read", "terminal_stop",
   "list_provider_models", "resolve_media_source", "voice_status", "update_voice_settings",
   "voice_start", "voice_send_audio", "voice_stop", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
@@ -280,6 +285,11 @@ async function runAppSmoke(): Promise<void> {
   const annotationPersisted = messages?.some((message) => Array.isArray(message.annotations) && message.annotations.length === 1) === true;
   if (!turnId || !annotationPersisted) throw new Error("packaged runtime did not acknowledge and persist the annotated prompt");
   await runtime!.request("cancel_turn", { turnId }, 5_000);
+  // A terminal PTY can make Electron's macOS stdin pipe briefly report EAGAIN.
+  // Keep the packaged runtime alive across an idle boundary so verification
+  // catches regressions in the real sidecar transport, not only request bursts.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await runtime!.request("workspace_snapshot", {}, 5_000);
   process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, runtimeAck: true, annotationPersisted, isolatedWorkspace: true })}\n`);
 }
 
@@ -644,8 +654,13 @@ else {
       browser = null;
       mainWindow?.destroy();
       mainWindow = null;
-      runtime?.shutdown();
-      runtime?.terminate();
+      const stoppingRuntime = runtime;
+      stoppingRuntime?.shutdown();
+      stoppingRuntime?.terminate();
+      if (stoppingRuntime && !await stoppingRuntime.waitForExit()) {
+        process.stderr.write("MAXX_APP_SMOKE_FAILED runtime did not exit after verification\n");
+        exitCode = 1;
+      }
       runtime = null;
       app.exit(exitCode);
       return;

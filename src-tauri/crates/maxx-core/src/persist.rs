@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -117,6 +117,30 @@ pub struct AgentDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatSurface {
+    Gui,
+    Terminal,
+}
+
+impl Default for ChatSurface {
+    fn default() -> Self {
+        Self::Gui
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalArchive {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub content: String,
+    #[serde(rename = "startedAt", default)]
+    pub started_at: AppleDate,
+    #[serde(rename = "endedAt", default)]
+    pub ended_at: AppleDate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatThread {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
@@ -131,6 +155,9 @@ pub struct ChatThread {
     /// Speed tier when the provider exposes a separate speed control.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub speed: Option<String>,
+    /// Which first-class conversation surface should own this thread.
+    #[serde(default)]
+    pub surface: ChatSurface,
     #[serde(
         rename = "providerSessionID",
         skip_serializing_if = "Option::is_none",
@@ -155,6 +182,9 @@ pub struct ChatThread {
     pub runtime_events: Vec<ProviderRuntimeEvent>,
     #[serde(rename = "interactionRequests", default)]
     pub interaction_requests: Vec<RuntimeInteractionRecord>,
+    /// Rendered terminal scrollback captured at terminal-to-GUI handoff.
+    #[serde(rename = "terminalArchives", default)]
+    pub terminal_archives: Vec<TerminalArchive>,
     /// Set on side threads: the main thread this conversation branched from.
     #[serde(
         rename = "parentThreadID",
@@ -197,12 +227,14 @@ impl ChatThread {
             model,
             effort: None,
             speed: None,
+            surface: ChatSurface::Gui,
             provider_session_id: None,
             provider_resume_cursor: None,
             last_turn_id: None,
             messages: Vec::new(),
             runtime_events: Vec::new(),
             interaction_requests: Vec::new(),
+            terminal_archives: Vec::new(),
             parent_thread_id: None,
             anchor_message_id: None,
             agent_id: None,

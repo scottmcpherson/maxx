@@ -512,7 +512,7 @@ async fn ensure_server(
     Ok(base_url)
 }
 
-fn inject_browser_mcp_config(
+pub(crate) fn inject_browser_mcp_config(
     environment: &mut HashMap<String, String>,
     access: &crate::browser_runtime::BrowserProviderAccess,
 ) -> Result<(), String> {

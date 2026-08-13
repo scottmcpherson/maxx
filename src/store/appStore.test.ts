@@ -32,8 +32,62 @@ afterEach(() => {
     refresh: originalRefresh,
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
+    newThreadSurface: "gui",
+    terminalModeEnabled: false,
   });
   vi.restoreAllMocks();
+});
+
+describe("terminal chat creation", () => {
+  it("resets the new-chat surface when terminal mode is disabled", () => {
+    useAppStore.setState({ newThreadSurface: "terminal", terminalModeEnabled: true });
+
+    useAppStore.getState().setTerminalModeEnabled(false);
+
+    expect(useAppStore.getState().terminalModeEnabled).toBe(false);
+    expect(useAppStore.getState().newThreadSurface).toBe("gui");
+  });
+
+  it("creates the first turn on the terminal surface without GUI-only attachments", async () => {
+    const workspace = sampleWorkspace("/tmp/project");
+    useAppStore.setState({
+      workspace,
+      remoteSessions: [],
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: "project",
+      selectedThreadID: null,
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+    const thread = { ...workspace.projects[0].threads[0], id: "terminal-thread", surface: "terminal" as const };
+    const add = vi.spyOn(ipc, "addThreadWithRuntime").mockResolvedValue(thread);
+    const send = vi.spyOn(ipc, "sendPrompt").mockResolvedValue("turn-terminal");
+    const upload = vi.spyOn(ipc, "uploadMedia");
+
+    await expect(useAppStore.getState().createThreadAndSend(
+      "project",
+      "codex",
+      "Default",
+      "Continue in the terminal",
+      ["/tmp/not-sent.png"],
+      null,
+      null,
+      "terminal",
+    )).resolves.toBe(true);
+
+    expect(add).toHaveBeenCalledWith(
+      "project", "codex", "Default", "Continue in the terminal", null, null, "terminal", LOCAL_HOST_ID,
+    );
+    expect(upload).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      "project", "terminal-thread", "Continue in the terminal", [], LOCAL_HOST_ID, [],
+    );
+  });
+
+  it("requires a typed first prompt for terminal mode", async () => {
+    await expect(useAppStore.getState().createThreadAndSend(
+      "project", "codex", "Default", "", ["/tmp/image.png"], null, null, "terminal",
+    )).resolves.toBe(false);
+  });
 });
 
 function annotation(id: string, selector: string): BrowserAnnotation {
@@ -55,7 +109,7 @@ function annotation(id: string, selector: string): BrowserAnnotation {
 
 function sampleWorkspace(folderPath: string, projectID = "project"): WorkspaceDocument {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     projects: [{
       id: projectID,
       folderPath,
@@ -100,7 +154,7 @@ describe("additive remote hosts", () => {
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
       name: "This Mac",
-      protocolVersion: 1,
+      protocolVersion: 2,
       listening: false,
       bindAddress: null,
       shareAddress: null,
@@ -145,7 +199,7 @@ describe("additive remote hosts", () => {
       id: "mini",
       name: "Mac mini",
       address: "100.64.0.2:7422",
-      capabilities: ["workspace-read", "workspace-write", "agent-run", "browser-control"],
+      capabilities: ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"],
       connected: true,
       lastEventCursor: 0,
       error: "",
@@ -157,7 +211,7 @@ describe("additive remote hosts", () => {
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
       name: "This Mac",
-      protocolVersion: 1,
+      protocolVersion: 2,
       listening: true,
       bindAddress: "100.64.0.2:7422",
       shareAddress: "100.64.0.2:7422",
@@ -166,7 +220,7 @@ describe("additive remote hosts", () => {
         id: "mini",
         name: "Mac mini",
         address: "100.64.0.2:7422",
-        capabilities: ["workspace-read", "workspace-write", "agent-run", "browser-control"],
+        capabilities: ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"],
         connected: true,
         lastEventCursor: 0,
         error: "",
@@ -190,7 +244,7 @@ describe("additive remote hosts", () => {
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
       name: "This Mac",
-      protocolVersion: 1,
+      protocolVersion: 2,
       listening: true,
       bindAddress: "100.64.0.1:7422",
       shareAddress: "100.64.0.1:7422",
@@ -199,7 +253,7 @@ describe("additive remote hosts", () => {
         id: "mini",
         name: "Mac mini",
         address: "100.64.0.2:7422",
-        capabilities: ["workspace-read", "workspace-write", "agent-run", "browser-control"],
+        capabilities: ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"],
         connected: true,
         lastEventCursor: 0,
         error: "",
@@ -243,7 +297,7 @@ describe("additive remote hosts", () => {
 describe("generated thread titles", () => {
   it("applies a backend title event without waiting for a workspace refresh", () => {
     const workspace: WorkspaceDocument = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       projects: [{
         id: "project",
         folderPath: "/tmp/project",

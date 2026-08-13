@@ -311,6 +311,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "title")?,
                 optional(&params, "effort")?,
                 optional(&params, "speed")?,
+                optional(&params, "surface")?,
             )
             .await,
         ),
@@ -335,6 +336,71 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 optional(&params, "updateRuntimeKnobs")?,
             )
             .await,
+        ),
+        "terminal_support" => value(Ok(crate::terminal::TerminalBroker::support(required(
+            &params, "provider",
+        )?))),
+        "terminal_start" => value(
+            state
+                .app
+                .terminals
+                .start(
+                    state.app.clone(),
+                    required(&params, "projectId")?,
+                    required(&params, "threadId")?,
+                    optional(&params, "rows")?,
+                    optional(&params, "cols")?,
+                )
+                .await,
+        ),
+        "terminal_status" => value(Ok(state
+            .app
+            .terminals
+            .status(required(&params, "threadId")?)
+            .await)),
+        "terminal_input" => value(
+            state
+                .app
+                .terminals
+                .input(
+                    required(&params, "threadId")?,
+                    required(&params, "dataBase64")?,
+                )
+                .await,
+        ),
+        "terminal_resize" => value(
+            state
+                .app
+                .terminals
+                .resize(
+                    required(&params, "threadId")?,
+                    required(&params, "rows")?,
+                    required(&params, "cols")?,
+                )
+                .await,
+        ),
+        "terminal_read" => value(
+            state
+                .app
+                .terminals
+                .read(
+                    required(&params, "threadId")?,
+                    required(&params, "after")?,
+                    optional(&params, "maxBytes")?,
+                )
+                .await,
+        ),
+        "terminal_stop" => value(
+            state
+                .app
+                .terminals
+                .stop(
+                    state.app.clone(),
+                    required(&params, "projectId")?,
+                    required(&params, "threadId")?,
+                    optional(&params, "archive")?,
+                )
+                .await,
         ),
         "update_profiles" => value(
             crate::commands::update_profiles(
@@ -855,7 +921,21 @@ async fn run_async() -> Result<(), String> {
         .map_err(|_| "desktop host disconnected before startup".to_string())?;
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+    loop {
+        let line = loop {
+            match lines.next_line().await {
+                Ok(line) => break line,
+                // Electron owns the pipe connected to the sidecar's stdin. On
+                // macOS that descriptor can briefly surface EAGAIN after a PTY
+                // child is launched. This is not a desktop-host disconnect, so
+                // keep the protocol reader alive until input or EOF arrives.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        let Some(line) = line else { break };
         let message: Value = match serde_json::from_str(&line) {
             Ok(message) => message,
             Err(error) => {
@@ -941,6 +1021,7 @@ async fn run_async() -> Result<(), String> {
             _ => {}
         }
     }
+    state.app.terminals.shutdown().await;
     match tokio::time::timeout(std::time::Duration::from_secs(5), browser.shutdown()).await {
         Ok(result) => result.map_err(|error| error.to_string()),
         Err(_) => {

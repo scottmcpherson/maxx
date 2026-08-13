@@ -6,6 +6,7 @@ export type Capability =
   | "workspace-read"
   | "workspace-write"
   | "agent-run"
+  | "terminal-control"
   | "browser-control"
   | "settings-manage"
   | "voice-control";

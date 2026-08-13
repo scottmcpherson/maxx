@@ -62,6 +62,7 @@ pub async fn remove_project(state: Arc<AppState>, project_id: Uuid) -> Result<()
         removed
     };
     for thread_id in removed_threads {
+        state.terminals.terminate(thread_id).await;
         state.browser.revoke_thread(thread_id).await;
     }
     state.save().await;
@@ -119,6 +120,7 @@ pub async fn remove_thread(
         }
     };
     for removed_thread_id in removed_threads {
+        state.terminals.terminate(removed_thread_id).await;
         state.browser.revoke_thread(removed_thread_id).await;
     }
     state.save().await;
@@ -147,6 +149,11 @@ pub async fn update_thread(
     {
         let mut workspace = state.workspace.lock().await;
         let thread = find_thread(&mut workspace, project_id, thread_id).ok_or("Unknown thread")?;
+        if thread.surface == ChatSurface::Terminal
+            && (provider.is_some() || model.is_some() || update_knobs)
+        {
+            return Err("Return to GUI mode before changing this chat's runtime.".into());
+        }
         if let Some(title) = title {
             thread.title = title;
         }
@@ -183,10 +190,12 @@ pub async fn add_thread_with_runtime(
     title: String,
     effort: Option<String>,
     speed: Option<String>,
+    surface: Option<ChatSurface>,
 ) -> Result<ChatThread, String> {
     let mut thread = ChatThread::new(title, provider, model);
     thread.effort = effort.filter(|v| !v.trim().is_empty());
     thread.speed = speed.filter(|v| !v.trim().is_empty() && !v.eq_ignore_ascii_case("normal"));
+    thread.surface = surface.unwrap_or_default();
     {
         let mut workspace = state.workspace.lock().await;
         let project = workspace
@@ -317,8 +326,23 @@ pub(crate) fn handoff_for_thread(
         return None;
     }
     let from_label = previous_provider_label(profiles, thread);
+    let mut transcript = thread.messages.clone();
+    transcript.extend(thread.terminal_archives.iter().map(|archive| ChatMessage {
+        id: archive.id,
+        role: ChatRole::Assistant,
+        content: format!(
+            "[Transcript captured from the provider's native terminal UI]\n{}",
+            archive.content
+        ),
+        attachments: Vec::new(),
+        annotations: Vec::new(),
+        created_at: archive.ended_at,
+        source_event_id: None,
+        agent_id: None,
+    }));
+    transcript.sort_by(|left, right| left.created_at.total_cmp(&right.created_at));
     let handoff = maxx_core::handoff::render_handoff_with_agents(
-        &thread.messages,
+        &transcript,
         from_label,
         maxx_core::handoff::DEFAULT_HANDOFF_BUDGET,
         agent_names,
@@ -440,6 +464,23 @@ fn prompt_with_browser_annotations(
     output.trim_end().to_string()
 }
 
+fn validate_surface_prompt(
+    thread: &ChatThread,
+    is_first_user_message: bool,
+    has_gui_only_context: bool,
+) -> Result<(), String> {
+    if thread.surface != ChatSurface::Terminal {
+        return Ok(());
+    }
+    if !is_first_user_message || thread.provider_session_id.is_some() {
+        return Err("Use the active terminal to continue this chat.".into());
+    }
+    if has_gui_only_context {
+        return Err("Terminal chats do not support attachments or browser annotations.".into());
+    }
+    Ok(())
+}
+
 pub async fn send_prompt(
     state: Arc<AppState>,
     project_id: Uuid,
@@ -449,6 +490,8 @@ pub async fn send_prompt(
     attachment_ids: Vec<Uuid>,
     annotations: Vec<BrowserAnnotationContext>,
 ) -> Result<Uuid, String> {
+    let has_terminal_extras =
+        !image_paths.is_empty() || !attachment_ids.is_empty() || !annotations.is_empty();
     let attachments = load_prompt_attachments(image_paths, attachment_ids)?;
     let annotations = validate_browser_annotations(annotations)?;
     let provider_prompt = prompt_with_browser_annotations(&prompt, &annotations);
@@ -470,6 +513,7 @@ pub async fn send_prompt(
             .messages
             .iter()
             .any(|message| message.role == ChatRole::User);
+        validate_surface_prompt(thread, is_first_user_message, has_terminal_extras)?;
         let provisional_title = thread.title.clone();
 
         // Every engine takes `prompt` as plain text, so carrying the transcript
@@ -844,6 +888,9 @@ pub async fn start_side_thread(
         if parent.parent_thread_id.is_some() {
             return Err("Side threads cannot branch further".into());
         }
+        if parent.surface == ChatSurface::Terminal {
+            return Err("@agent side threads are unavailable in terminal mode.".into());
+        }
         // Seed from the parent transcript as it stood before this mention, so
         // the prompt itself is not duplicated into the context block.
         let seed = maxx_core::handoff::render_handoff_with_agents(
@@ -946,6 +993,9 @@ pub async fn send_agent_prompt(
         let agent_names = agent_name_map(&workspace.agents);
         let profiles = workspace.provider_profiles.clone();
         let thread = find_thread(&mut workspace, project_id, thread_id).ok_or("Unknown thread")?;
+        if thread.surface == ChatSurface::Terminal {
+            return Err("@agent side threads are unavailable in terminal mode.".into());
+        }
         let request = prepare_agent_turn(
             &profiles,
             &agent_names,
@@ -1503,5 +1553,41 @@ mod tests {
         assert_eq!(handoff.included, 3, "system notice is not conversation");
         assert!(!handoff.preamble.contains("Context handed off"));
         assert!(handoff.preamble.contains("codex reply"));
+    }
+
+    #[test]
+    fn terminal_surface_accepts_only_its_plain_initial_bridge_prompt() {
+        let mut thread = ChatThread::new("terminal".into(), ChatProvider::Codex, "default".into());
+        thread.surface = ChatSurface::Terminal;
+        assert!(validate_surface_prompt(&thread, true, false).is_ok());
+        assert!(validate_surface_prompt(&thread, true, true)
+            .unwrap_err()
+            .contains("attachments"));
+        assert!(validate_surface_prompt(&thread, false, false)
+            .unwrap_err()
+            .contains("active terminal"));
+        thread.provider_session_id = Some("bound".into());
+        assert!(validate_surface_prompt(&thread, true, false).is_err());
+
+        thread.surface = ChatSurface::Gui;
+        assert!(validate_surface_prompt(&thread, false, true).is_ok());
+    }
+
+    #[test]
+    fn provider_switch_handoff_carries_archived_terminal_context() {
+        let mut thread = thread_after_exchange(
+            ChatProvider::Codex,
+            ChatProvider::Claude.default_instance_id(),
+        );
+        thread.terminal_archives.push(TerminalArchive {
+            id: Uuid::new_v4(),
+            content: "USER: remember cobalt\nASSISTANT: I will remember cobalt".into(),
+            started_at: AppleDate::default(),
+            ended_at: AppleDate(100.0),
+        });
+        let (handoff, _) =
+            handoff_for_thread(&profiles(), &HashMap::new(), &thread).expect("handoff");
+        assert!(handoff.preamble.contains("native terminal UI"));
+        assert!(handoff.preamble.contains("remember cobalt"));
     }
 }

@@ -19,6 +19,7 @@ import { relativeTime } from "../relativeTime";
 import { useAppStore } from "../store/appStore";
 import { showsPinnedSummary } from "../summary";
 import { beginWindowDrag } from "../windowDrag";
+import { ipc } from "../ipc";
 import { useDictation } from "../voice/useDictation";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentHoverCard } from "./AgentHoverCard";
@@ -34,6 +35,7 @@ import { RuntimePicker } from "./RuntimePicker";
 import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
 import { SideThreadPanel } from "./SideThreadPanel";
 import { SideThreadResizer } from "./SideThreadResizer";
+import { TerminalView, type TerminalViewHandle } from "./TerminalView";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
@@ -113,6 +115,11 @@ export function ThreadView({
     ? state.browserAnnotationsByThread[selectedThreadID] ?? EMPTY_BROWSER_ANNOTATIONS
     : EMPTY_BROWSER_ANNOTATIONS);
   const clearBrowserAnnotations = useAppStore((state) => state.clearBrowserAnnotations);
+  const terminalModeEnabled = useAppStore((state) => state.terminalModeEnabled);
+  const refresh = useAppStore((state) => state.refresh);
+  const terminalViewRef = useRef<TerminalViewHandle>(null);
+  const [switchingSurface, setSwitchingSurface] = useState(false);
+  const [surfaceError, setSurfaceError] = useState<string | null>(null);
 
   const projectWorkspace = useMemo(() => {
     if (!selectedHostID || selectedHostID === "local") return workspace;
@@ -173,7 +180,7 @@ export function ThreadView({
   // clobber the other.
   const dictation = useDictation({
     boundTo: selectedThreadID,
-    enabled: voiceEnabled,
+    enabled: voiceEnabled && thread?.surface !== "terminal",
     shortcut: dictationShortcut,
   });
   const { draft, setDraft } = dictation;
@@ -203,6 +210,35 @@ export function ThreadView({
 
   useEffect(() => images.clear(), [images.clear, selectedThreadID]);
 
+  // Turning the experiment off must not strand an existing terminal chat with
+  // its return control hidden. Restore that chat's persisted GUI surface as
+  // soon as it is selected.
+  const terminalProjectID = project?.id;
+  const terminalThreadID = thread?.id;
+  const selectedSurface = thread?.surface;
+  useEffect(() => {
+    if (
+      terminalModeEnabled
+      || !terminalProjectID
+      || !terminalThreadID
+      || selectedSurface !== "terminal"
+    ) return;
+    let cancelled = false;
+    setSwitchingSurface(true);
+    setSurfaceError(null);
+    void ipc.terminalStop(terminalProjectID, terminalThreadID, null, selectedHostID)
+      .then(() => refresh())
+      .catch((cause) => {
+        if (!cancelled) setSurfaceError(String(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setSwitchingSurface(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh, selectedHostID, selectedSurface, terminalModeEnabled, terminalProjectID, terminalThreadID]);
+
   if (!workspace) {
     return <main className="thread-view loading"><span className="loading-orb" />Loading workspace…</main>;
   }
@@ -220,6 +256,7 @@ export function ThreadView({
   }
 
   const isRunning = !!activeTurns[thread.id];
+  const terminalSurface = thread.surface === "terminal";
   // The reply panel and the rail share one slot, so an open side thread leaves
   // the rail nowhere to sit — same as a window too narrow for it, and the
   // toggle falls back to the popover for both.
@@ -229,6 +266,31 @@ export function ThreadView({
     if (!requestID) return null;
     const record = thread.interactionRequests.find((request) => request.id === requestID);
     return record && record.status !== "pending" ? record.status : null;
+  };
+  const toggleTerminalSurface = async () => {
+    if (switchingSurface || (!terminalSurface && (isRunning || !thread.providerSessionID))) return;
+    setSwitchingSurface(true);
+    setSurfaceError(null);
+    try {
+      if (terminalSurface) {
+        await ipc.terminalStop(
+          project.id,
+          thread.id,
+          terminalViewRef.current?.archiveText() || null,
+          selectedHostID,
+        );
+      } else {
+        dictation.stop();
+        clearBrowserAnnotations(thread.id);
+        setOpenSideThreadID(null);
+        await ipc.terminalStart(project.id, thread.id, 32, 120, selectedHostID);
+      }
+      await refresh();
+    } catch (cause) {
+      setSurfaceError(String(cause));
+    } finally {
+      setSwitchingSurface(false);
+    }
   };
   const submit = async () => {
     if ((!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0) || isRunning || submitting) return;
@@ -282,6 +344,26 @@ export function ThreadView({
           </button>
           <div className="thread-header-side end">
             <SummaryToggle project={project} thread={thread} fits={summarySlotFree} />
+            {terminalModeEnabled && (
+              <button
+                className={`icon-button terminal-surface-toggle${terminalSurface ? " is-active" : ""}`}
+                title={
+                  terminalSurface
+                    ? "Return to GUI chat"
+                    : isRunning
+                      ? "Wait for the current turn before opening terminal mode"
+                      : !thread.providerSessionID
+                        ? "Send a first message before opening terminal mode"
+                        : "Open this chat in terminal mode"
+                }
+                aria-label={terminalSurface ? "Return to GUI chat" : "Open terminal chat"}
+                aria-pressed={terminalSurface}
+                disabled={switchingSurface || (!terminalSurface && (isRunning || !thread.providerSessionID))}
+                onClick={() => void toggleTerminalSurface()}
+              >
+                {switchingSurface ? <span className="mini-spinner" /> : <Icons.terminal size={14} />}
+              </button>
+            )}
             {(!selectedHostID || selectedHostID === "local") && (
             <button
               className={`icon-button${browserOpen ? " is-active" : ""}`}
@@ -296,6 +378,21 @@ export function ThreadView({
           </div>
         </header>
 
+        {(surfaceError || (terminalSurface ? error : null)) && (
+          <div className="error-banner terminal-surface-error">{surfaceError || error}</div>
+        )}
+        {terminalSurface ? (
+          <TerminalView
+            key={`${selectedHostID ?? "local"}:${thread.id}`}
+            ref={terminalViewRef}
+            project={project}
+            thread={thread}
+            hostID={selectedHostID}
+            initialTurnRunning={isRunning}
+            onReturnToGUI={() => void toggleTerminalSurface()}
+          />
+        ) : (
+        <>
         <ThreadTimeline
           key={thread.id}
           projectID={project.id}
@@ -427,8 +524,10 @@ export function ThreadView({
             ) : null}
           </div>
         </footer>
+        </>
+        )}
       </main>
-      {openSideThread && project ? (
+      {!terminalSurface && (openSideThread && project ? (
         <>
           <SideThreadResizer />
           <SideThreadPanel
@@ -440,7 +539,7 @@ export function ThreadView({
         </>
       ) : (
         showSummaryRail && <ContextRail project={project} thread={thread} />
-      )}
+      ))}
     </div>
   );
 }
@@ -567,6 +666,27 @@ export function ThreadTimeline({
                 <Icons.arrowUp size={11} />
                 <span>{row.text}</span>
               </div>
+            );
+          }
+          if (row.kind === "assistant") {
+            return (
+              <div key={row.key} className="assistant-block">
+                <Markdown
+                  text={row.text}
+                  isAnimating={false}
+                  projectID={projectID}
+                  threadID={threadID}
+                  hostID={hostID}
+                />
+              </div>
+            );
+          }
+          if (row.kind === "terminalArchive") {
+            return (
+              <details key={row.key} className="terminal-archive-row">
+                <summary><Icons.terminal size={13} />Terminal session</summary>
+                <pre>{row.text}</pre>
+              </details>
             );
           }
           const byline = bylineByRowKey.get(row.key);
@@ -809,6 +929,9 @@ function NewAgentView({
   const createThreadAndSend = useAppStore((state) => state.createThreadAndSend);
   const runtime = useAppStore((state) => state.newThreadRuntime);
   const setRuntime = useAppStore((state) => state.setNewThreadRuntime);
+  const surface = useAppStore((state) => state.newThreadSurface);
+  const setSurface = useAppStore((state) => state.setNewThreadSurface);
+  const terminalModeEnabled = useAppStore((state) => state.terminalModeEnabled);
   const error = useAppStore((state) => state.error);
   const hosted = [
     ...projects.map((project) => ({ project, hostId: "local", hostName: "This Mac" })),
@@ -830,7 +953,7 @@ function NewAgentView({
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
   const dictation = useDictation({
     boundTo: "new-agent",
-    enabled: voiceEnabled,
+    enabled: voiceEnabled && surface === "gui",
     shortcut: dictationShortcut,
   });
   const { draft, setDraft } = dictation;
@@ -844,9 +967,9 @@ function NewAgentView({
   }, [initialProjectID]);
 
   const submit = async () => {
-    if (!projectID || (!draft.trim() && images.paths.length === 0) || sending) return;
+    if (!projectID || (!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending) return;
     const prompt = draft.trim();
-    const imagePaths = images.paths;
+    const imagePaths = surface === "terminal" ? [] : images.paths;
     dictation.clear();
     setSending(true);
     const created = await createThreadAndSend(
@@ -857,6 +980,7 @@ function NewAgentView({
       imagePaths,
       runtime.effort,
       runtime.speed,
+      surface,
     );
     setSending(false);
     if (created) images.clear();
@@ -889,9 +1013,9 @@ function NewAgentView({
             <span>›</span>
             <span>{hosted.find((item) => item.project.id === projectID)?.hostName ?? "This Mac"}</span>
           </div>
-          <DictationStatus dictation={dictation} />
+          {surface === "gui" && <DictationStatus dictation={dictation} />}
           <div className="new-agent-composer">
-            <PendingImageStrip paths={images.paths} onRemove={images.remove} />
+            {surface === "gui" && <PendingImageStrip paths={images.paths} onRemove={images.remove} />}
             <textarea
               ref={textRef}
               value={draft}
@@ -912,7 +1036,7 @@ function NewAgentView({
             />
             <div className="composer-toolbar">
               <div className="composer-leading-actions">
-                <AttachImagesButton disabled={sending} onChoose={() => void images.choose()} />
+                {surface === "gui" && <AttachImagesButton disabled={sending} onChoose={() => void images.choose()} />}
                 <RuntimePicker
                   provider={runtime.provider}
                   model={runtime.model}
@@ -931,19 +1055,45 @@ function NewAgentView({
                 />
               </div>
               <div className="composer-actions">
-                <DictationButton
-                  dictation={dictation}
-                  enabled={voiceEnabled}
-                  shortcut={dictationShortcut}
-                />
-                <button className="send-button" title="Start agent" disabled={(!draft.trim() && images.paths.length === 0) || !projectID || sending} onClick={() => void submit()}>
+                {terminalModeEnabled && (
+                  <button
+                    className={`icon-button new-chat-terminal-toggle${surface === "terminal" ? " is-active" : ""}`}
+                    title={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
+                    aria-label={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
+                    aria-pressed={surface === "terminal"}
+                    disabled={sending}
+                    onClick={() => {
+                      const next = surface === "terminal" ? "gui" : "terminal";
+                      if (next === "terminal") {
+                        dictation.stop();
+                        images.clear();
+                      }
+                      setSurface(next);
+                      requestAnimationFrame(() => textRef.current?.focus());
+                    }}
+                  >
+                    <Icons.terminal size={15} />
+                  </button>
+                )}
+                {surface === "gui" && (
+                  <DictationButton
+                    dictation={dictation}
+                    enabled={voiceEnabled}
+                    shortcut={dictationShortcut}
+                  />
+                )}
+                <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || !projectID || sending} onClick={() => void submit()}>
                   {sending ? <span className="mini-spinner" /> : <Icons.arrowUp size={16} />}
                 </button>
               </div>
             </div>
           </div>
           {error && <div className="error-banner">{error}</div>}
-          <p className="new-agent-hint">Enter to send · Shift+Enter for a new line</p>
+          <p className="new-agent-hint">
+            {surface === "terminal"
+              ? "Terminal mode · attachments, dictation, annotations, and @agent side threads are unavailable"
+              : "Enter to send · Shift+Enter for a new line"}
+          </p>
         </div>
       )}
     </main>

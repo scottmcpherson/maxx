@@ -5,7 +5,7 @@
 
 use super::{
     acp::AcpEngine, claude::ClaudeEngine, codex::CodexEngine, opencode::OpenCodeEngine,
-    pi::PiEngine, DraftReceiver, ProviderEngine, TurnRequest,
+    pi::PiEngine, DraftReceiver, ProviderEngine, ReconciledSessionTurn, TurnRequest,
 };
 use maxx_core::contract::*;
 use maxx_core::normalize::ProviderEventDraft;
@@ -230,6 +230,42 @@ impl Runtime {
 
     pub async fn finish_turn(&self, turn_id: Uuid) {
         self.live_turns.lock().await.remove(&turn_id);
+    }
+
+    /// Relinquish the structured transport before a provider-native terminal
+    /// takes ownership of the same session. A thread may have only one writer.
+    pub async fn release_thread(
+        &self,
+        provider: ChatProvider,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+    ) -> Result<(), String> {
+        if self
+            .live_turns
+            .lock()
+            .await
+            .values()
+            .any(|turn| turn.thread_id == thread_id)
+        {
+            return Err("Wait for the current turn to finish before opening terminal mode.".into());
+        }
+        let engine = self
+            .engines
+            .get(&provider)
+            .ok_or_else(|| format!("No adapter for provider {}", provider.raw_value()))?;
+        engine.release_thread(provider_instance_id, thread_id).await;
+        Ok(())
+    }
+
+    pub async fn reconcile_session(
+        &self,
+        request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        let engine = self
+            .engines
+            .get(&request.provider)
+            .ok_or_else(|| format!("No adapter for provider {}", request.provider.raw_value()))?;
+        engine.reconcile_session(request).await
     }
 
     pub async fn cancel(&self, turn_id: Uuid) {

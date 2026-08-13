@@ -48,6 +48,12 @@ export function BrowserPane({
   const clearBrowserAnnotations = useAppStore((state) => state.clearBrowserAnnotations);
   const sendPrompt = useAppStore((state) => state.sendPrompt);
   const turnRunning = useAppStore((state) => Boolean(state.activeTurnByThread[threadID]));
+  const terminalMode = useAppStore((state) => {
+    const workspaces = [state.workspace, ...state.remoteSessions.map((session) => session.workspace)];
+    return workspaces.some((workspace) => workspace?.projects.some((project) =>
+      project.threads.some((thread) => thread.id === threadID && thread.surface === "terminal"),
+    ));
+  });
   const [tabs, setTabs] = useState<BrowserTabSummary[]>([]);
   const [selectedTabID, setSelectedTabID] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -86,6 +92,16 @@ export function BrowserPane({
   useEffect(() => {
     selectedRef.current = selectedTabID;
   }, [selectedTabID]);
+
+  useEffect(() => {
+    if (!terminalMode || !annotationMode) return;
+    const tabID = annotationTabRef.current;
+    annotationTabRef.current = null;
+    annotationSessionStartRef.current = null;
+    setAnnotationMode(false);
+    clearBrowserAnnotations(threadID);
+    if (tabID) void ipc.browserAnnotationMode(tabID, false);
+  }, [annotationMode, clearBrowserAnnotations, terminalMode, threadID]);
 
   useEffect(() => {
     if (!selectedTabID) return;
@@ -534,9 +550,11 @@ export function BrowserPane({
           autoCapitalize="off" aria-label="Address" placeholder="Search or enter website" value={draft}
           onFocus={(event) => event.currentTarget.select()} onChange={(event) => setDraft(event.target.value)} />
         {(pendingNavigation || selectedTab?.loading) && <span className="browser-native-loading" aria-label="Loading" />}
-        <button className="icon-button" type="button" title="Annotate webpage"
-          aria-label="Annotate webpage" disabled={!selectedTabID}
-          onClick={beginAnnotations}><Icons.annotation size={15} /></button>
+        {!terminalMode && (
+          <button className="icon-button" type="button" title="Annotate webpage"
+            aria-label="Annotate webpage" disabled={!selectedTabID}
+            onClick={beginAnnotations}><Icons.annotation size={15} /></button>
+        )}
         <button type="button" className="icon-button" title="Fill saved Chrome password" aria-label="Fill saved password"
           disabled={!selectedTabID} onClick={() => selectedTabID && void ipc.browserFillSavedPassword(selectedTabID)
             .then((filled) => { if (!filled) setSurfaceError("No imported password is saved for this website."); })}>

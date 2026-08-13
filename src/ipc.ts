@@ -21,6 +21,7 @@ import {
   ChatProvider,
   ChatProject,
   ChatThread,
+  ChatSurface,
   ProviderHealth,
   ProviderModelCatalog,
   ProviderProfile,
@@ -28,6 +29,9 @@ import {
   RuntimeInteractionDecision,
   ThreadTitleUpdatedEnvelope,
   TitleGenerationRuntime,
+  TerminalRead,
+  TerminalStatus,
+  TerminalSupport,
   TurnFinishedEnvelope,
   WorkspaceDocument,
 } from "./contract/types";
@@ -90,6 +94,7 @@ export const ipc = {
     title: string,
     effort?: string | null,
     speed?: string | null,
+    surface: ChatSurface = "gui",
     hostId?: string | null,
   ) =>
     invokeOnHost<ChatThread>(hostId, "add_thread_with_runtime", {
@@ -99,6 +104,7 @@ export const ipc = {
       title,
       effort: effort || null,
       speed: speed || null,
+      surface,
     }),
   removeThread: (projectId: string, threadId: string, hostId?: string | null) =>
     invokeOnHost<void>(hostId, "remove_thread", { projectId, threadId }),
@@ -115,6 +121,29 @@ export const ipc = {
     },
     hostId?: string | null,
   ) => invokeOnHost<void>(hostId, "update_thread", { projectId, threadId, ...updates }),
+  terminalSupport: (provider: ChatProvider, hostId?: string | null) =>
+    invokeOnHost<TerminalSupport>(hostId, "terminal_support", { provider }),
+  terminalStart: (
+    projectId: string,
+    threadId: string,
+    rows: number,
+    cols: number,
+    hostId?: string | null,
+  ) => invokeOnHost<TerminalStatus>(hostId, "terminal_start", { projectId, threadId, rows, cols }),
+  terminalStatus: (threadId: string, hostId?: string | null) =>
+    invokeOnHost<TerminalStatus | null>(hostId, "terminal_status", { threadId }),
+  terminalInput: (threadId: string, dataBase64: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "terminal_input", { threadId, dataBase64 }),
+  terminalResize: (threadId: string, rows: number, cols: number, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "terminal_resize", { threadId, rows, cols }),
+  terminalRead: (threadId: string, after: number, hostId?: string | null) =>
+    invokeOnHost<TerminalRead>(hostId, "terminal_read", { threadId, after, maxBytes: 262_144 }),
+  terminalStop: (
+    projectId: string,
+    threadId: string,
+    archive: string | null,
+    hostId?: string | null,
+  ) => invokeOnHost<void>(hostId, "terminal_stop", { projectId, threadId, archive }),
   updateProfiles: (profiles: ProviderProfile[]) =>
     invoke<ProviderProfile[]>("update_profiles", { profiles }),
   updateTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) =>

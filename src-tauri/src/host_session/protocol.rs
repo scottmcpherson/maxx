@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_NAME: &str = "maxx-environment";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -9,6 +9,7 @@ pub enum Capability {
     WorkspaceRead,
     WorkspaceWrite,
     AgentRun,
+    TerminalControl,
     BrowserControl,
     SettingsManage,
     VoiceControl,
@@ -20,6 +21,7 @@ impl Capability {
             Self::WorkspaceRead,
             Self::WorkspaceWrite,
             Self::AgentRun,
+            Self::TerminalControl,
             Self::BrowserControl,
         ]
     }
@@ -69,10 +71,15 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "authorize_image_previews" => Some(Capability::WorkspaceWrite),
         "send_prompt" | "start_side_thread" | "send_agent_prompt" | "cancel_turn"
         | "resolve_request" => Some(Capability::AgentRun),
+        "terminal_support" | "terminal_start" | "terminal_status" | "terminal_input"
+        | "terminal_resize" | "terminal_read" | "terminal_stop" => {
+            Some(Capability::TerminalControl)
+        }
         "browser_ui_tabs"
         | "browser_ui_open_tab"
         | "browser_ui_select_tab"
         | "browser_ui_close_tab"
+        | "browser_ui_reorder_tabs"
         | "browser_ui_navigate"
         | "browser_ui_back"
         | "browser_ui_forward"
@@ -110,6 +117,10 @@ mod tests {
             Some(Capability::BrowserControl)
         );
         assert_eq!(required_capability("host_connect"), None);
+        assert_eq!(
+            required_capability("terminal_input"),
+            Some(Capability::TerminalControl)
+        );
         assert_eq!(required_capability("future_unreviewed_method"), None);
     }
 }

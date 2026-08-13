@@ -14,12 +14,14 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::browser_runtime::BrowserRuntime;
+use crate::terminal::TerminalBroker;
 
 pub struct AppState {
     pub workspace: Mutex<WorkspaceDocument>,
     pub persistence: WorkspacePersistence,
     pub runtime: Runtime,
     pub browser: Arc<BrowserRuntime>,
+    pub terminals: TerminalBroker,
     pub events: Arc<dyn EventSink>,
 }
 
@@ -83,7 +85,8 @@ impl AppState {
             workspace: Mutex::new(document),
             persistence,
             runtime: Runtime::new(browser.clone()),
-            browser,
+            browser: browser.clone(),
+            terminals: TerminalBroker::new(browser),
             events,
         }
     }

@@ -8,5 +8,6 @@ pub mod host_session;
 pub mod media;
 pub mod sidecar;
 pub mod state;
+pub mod terminal;
 pub mod title;
 pub mod voice;

@@ -102,6 +102,49 @@ describe("rendersRow", () => {
 });
 
 describe("buildRows", () => {
+  it("renders reconciled terminal replies without duplicating event-backed replies", () => {
+    const value = thread([]);
+    value.messages = [
+      { id: "native", role: "assistant", content: "native reply", createdAt: 2 },
+      { id: "gui", role: "assistant", content: "event reply", createdAt: 3, sourceEventID: "event" },
+    ];
+    expect(buildRows(value, [])).toEqual([{
+      key: "message-native",
+      at: 2,
+      kind: "assistant",
+      messageID: "native",
+      text: "native reply",
+    }]);
+  });
+
+  it("reconciles archived terminal scrollback into transcript chronology", () => {
+    const value = thread([]);
+    value.messages = [{
+      id: "before-terminal",
+      role: "user",
+      content: "start here",
+      createdAt: 1,
+      attachments: [],
+    }];
+    value.terminalArchives = [{
+      id: "archive",
+      content: "native terminal reply",
+      startedAt: 2,
+      endedAt: 3,
+    }];
+    value.messages.push({
+      id: "after-terminal",
+      role: "user",
+      content: "back in GUI",
+      createdAt: 4,
+      attachments: [],
+    });
+
+    expect(buildRows(value, []).map((row) => row.kind)).toEqual([
+      "user", "terminalArchive", "user",
+    ]);
+  });
+
   it("carries persisted image attachments into user rows", () => {
     const value = thread([]);
     value.messages = [{

@@ -6,9 +6,13 @@ import type { BrowserAnnotation } from "../browser";
 /** One rendered line of a thread transcript, in chronological order. */
 export type TimelineRow =
   | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[]; annotations: BrowserAnnotation[] }
+  // Provider-reconciled terminal replies have no synthetic runtime event; a
+  // normal GUI reply still renders from its source event to avoid duplication.
+  | { key: string; at: number; kind: "assistant"; messageID: string; text: string }
   // `system` messages are Maxx's own annotations (currently the cross-provider
   // context handoff notice), rendered as a quiet inline marker.
   | { key: string; at: number; kind: "system"; messageID: string; text: string }
+  | { key: string; at: number; kind: "terminalArchive"; archiveID: string; text: string }
   | { key: string; at: number; kind: "item"; item: TimelineItem };
 
 export function buildRows(
@@ -25,12 +29,23 @@ export function buildRows(
     };
     if (message.role === "user") {
       result.push({ ...shared, kind: "user", attachments: message.attachments ?? [], annotations: message.annotations ?? [] });
+    } else if (message.role === "assistant" && !message.sourceEventID) {
+      result.push({ ...shared, kind: "assistant" });
     } else if (message.role === "system") {
       result.push({ ...shared, kind: "system" });
     }
     return result;
   }, []);
   const eventTimes = new Map<string, number>();
+  for (const archive of thread.terminalArchives ?? []) {
+    rows.push({
+      key: `terminal-archive-${archive.id}`,
+      at: archive.endedAt,
+      kind: "terminalArchive",
+      archiveID: archive.id,
+      text: archive.content,
+    });
+  }
   for (const event of thread.runtimeEvents) {
     const existing = eventTimes.get(event.turnID);
     if (existing === undefined || event.occurredAt < existing) eventTimes.set(event.turnID, event.occurredAt);

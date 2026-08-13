@@ -4,7 +4,9 @@
 
 use super::jsonrpc::JsonRpcClient;
 use super::process::{JsonLineProcess, LaunchSpec};
-use super::{yield_draft, yield_error, DraftSender, ProviderEngine, TurnRequest};
+use super::{
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+};
 use crate::browser_runtime::BrowserProviderAccess;
 use async_trait::async_trait;
 use maxx_core::contract::*;
@@ -162,6 +164,33 @@ impl ProviderEngine for CodexEngine {
             return client.respond(&interaction.native_id, result).await;
         }
         Err("The Codex request is no longer actionable.".into())
+    }
+
+    async fn reconcile_session(
+        &self,
+        request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        let native_thread = request
+            .session_id
+            .as_deref()
+            .ok_or("The Codex session has not been established yet.")?;
+        let key = (request.provider_instance_id, request.thread_id);
+        let instance = {
+            let mut instances = self.instances.lock().await;
+            instances
+                .entry(key)
+                .or_insert_with(|| Arc::new(CodexInstance::default()))
+                .clone()
+        };
+        let client = ensure_client(&instance, &request).await?;
+        let response = client
+            .request(
+                "thread/read",
+                json!({"threadId": native_thread, "includeTurns": true}),
+            )
+            .await
+            .map_err(|error| map_missing_session(error, &request))?;
+        Ok(Some(reconciled_turns(&response)?))
     }
 
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
@@ -365,6 +394,61 @@ fn map_missing_session(error: String, request: &TurnRequest) -> String {
     } else {
         error
     }
+}
+
+fn reconciled_turns(response: &Value) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let turns = response
+        .get("thread")
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+        .ok_or("thread/read omitted result.thread.turns")?;
+    Ok(turns
+        .iter()
+        .filter_map(|turn| {
+            let native_id = turn.get("id")?.as_str()?.to_string();
+            let started_at = turn
+                .get("startedAt")
+                .or_else(|| turn.get("completedAt"))
+                .and_then(Value::as_f64)
+                .map(AppleDate::from_unix_seconds)
+                .unwrap_or_else(AppleDate::now);
+            let items = turn.get("items").and_then(Value::as_array)?;
+            let mut user_parts = Vec::new();
+            let mut assistant_parts = Vec::new();
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("userMessage") => {
+                        if let Some(content) = item.get("content").and_then(Value::as_array) {
+                            user_parts.extend(content.iter().filter_map(|input| {
+                                (input.get("type").and_then(Value::as_str) == Some("text"))
+                                    .then(|| input.get("text").and_then(Value::as_str))
+                                    .flatten()
+                                    .map(str::to_string)
+                            }));
+                        }
+                    }
+                    Some("agentMessage") => {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            if !text.trim().is_empty() {
+                                assistant_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let user_content = user_parts.join("\n").trim().to_string();
+            let assistant_content = assistant_parts.join("\n\n").trim().to_string();
+            (!user_content.is_empty() || !assistant_content.is_empty()).then_some(
+                ReconciledSessionTurn {
+                    native_id,
+                    started_at,
+                    user_content,
+                    assistant_content,
+                },
+            )
+        })
+        .collect())
 }
 
 async fn ensure_client(
@@ -771,5 +855,38 @@ mod browser_mcp_tests {
                 "content": {"enabled": true, "targets": ["alpha"], "count": 3}
             })
         );
+    }
+
+    #[test]
+    fn thread_read_turns_become_authoritative_gui_messages() {
+        let response = json!({
+            "thread": {
+                "turns": [
+                    {
+                        "id": "turn-before",
+                        "startedAt": 1_700_000_000.0,
+                        "items": [
+                            {"type": "userMessage", "content": [
+                                {"type": "text", "text": "Build it"},
+                                {"type": "localImage", "path": "/tmp/image.png"}
+                            ]},
+                            {"type": "commandExecution", "command": "cargo test"},
+                            {"type": "agentMessage", "text": "Working on it.", "phase": "commentary"},
+                            {"type": "agentMessage", "text": "Done.", "phase": "final_answer"}
+                        ]
+                    },
+                    {
+                        "id": "tool-only",
+                        "items": [{"type": "commandExecution", "command": "pwd"}]
+                    }
+                ]
+            }
+        });
+        let turns = reconciled_turns(&response).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].native_id, "turn-before");
+        assert_eq!(turns[0].user_content, "Build it");
+        assert_eq!(turns[0].assistant_content, "Working on it.\n\nDone.");
+        assert_eq!(turns[0].started_at.unix_seconds(), 1_700_000_000.0);
     }
 }

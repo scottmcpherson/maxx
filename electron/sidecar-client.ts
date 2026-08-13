@@ -29,6 +29,10 @@ export class SidecarClient {
   readonly #pending = new Map<number, PendingRequest>();
   readonly #onEvent: SidecarClientOptions["onEvent"];
   readonly #onHostRequest: SidecarClientOptions["onHostRequest"];
+  readonly #exitPromise: Promise<void>;
+  readonly #stderrLines: string[] = [];
+  #resolveExit: (() => void) | null = null;
+  #exitError: Error | null = null;
   #nextId = 1;
   #bufferedWrites: string[] = [];
   #ready = false;
@@ -37,6 +41,7 @@ export class SidecarClient {
   constructor(options: SidecarClientOptions) {
     this.#onEvent = options.onEvent;
     this.#onHostRequest = options.onHostRequest;
+    this.#exitPromise = new Promise((resolve) => { this.#resolveExit = resolve; });
     this.#process = spawn(options.executable, ["--sidecar"], {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -50,13 +55,28 @@ export class SidecarClient {
     lines.on("line", (line) => this.#readLine(line));
     this.#process.stderr.setEncoding("utf8");
     this.#process.stderr.on("data", (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/).filter(Boolean)) options.onLog?.(line);
+      for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
+        this.#stderrLines.push(line);
+        if (this.#stderrLines.length > 12) this.#stderrLines.shift();
+        options.onLog?.(line);
+      }
     });
-    this.#process.once("error", (error) => this.#failAll(error));
-    this.#process.once("exit", (code, signal) => this.#failAll(new Error(`Maxx runtime exited (${code ?? signal ?? "unknown"})`)));
+    this.#process.once("error", (error) => {
+      this.#exitError = error;
+      this.#failAll(error);
+    });
+    this.#process.once("exit", (code, signal) => {
+      const diagnostics = this.#stderrLines.at(-1);
+      const error = new Error(`Maxx runtime exited (${code ?? signal ?? "unknown"})${diagnostics ? `: ${diagnostics}` : ""}`);
+      this.#exitError = error;
+      this.#failAll(error);
+      this.#resolveExit?.();
+      this.#resolveExit = null;
+    });
   }
 
   request(method: string, params: JsonValue, timeoutMs = 120_000): Promise<JsonValue> {
+    if (this.#exitError) return Promise.reject(this.#exitError);
     const id = this.#nextId++;
     const message: SidecarRequest = { type: "request", id, method, params };
     return new Promise((resolve, reject) => {
@@ -91,6 +111,14 @@ export class SidecarClient {
 
   terminate(): void {
     if (!this.#process.killed) this.#process.kill("SIGTERM");
+  }
+
+  async waitForExit(timeoutMs = 2_000): Promise<boolean> {
+    if (this.#process.exitCode !== null || this.#process.signalCode !== null) return true;
+    return Promise.race([
+      this.#exitPromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ]);
   }
 
   #readLine(line: string): void {

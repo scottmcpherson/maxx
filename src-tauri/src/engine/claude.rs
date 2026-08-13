@@ -4,17 +4,36 @@
 //! permission responses, and native-session reaffirmation on resumed turns.
 
 use super::process::{JsonLineProcess, LaunchSpec};
-use super::{yield_draft, yield_error, DraftSender, ProviderEngine, TurnRequest};
+use super::{
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+};
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
+
+pub(crate) const MAXX_BROWSER_TOOL_RULE: &str = "mcp__maxx_browser";
+
+pub(crate) fn browser_mcp_config(access: &crate::browser_runtime::BrowserProviderAccess) -> Value {
+    json!({
+        "mcpServers": {
+            "maxx_browser": {
+                "type": "http",
+                "url": access.endpoint,
+                "headers": {
+                    "Authorization": format!("Bearer {}", access.bearer_token)
+                }
+            }
+        }
+    })
+}
 
 #[derive(Default)]
 pub struct ClaudeEngine {
@@ -114,6 +133,24 @@ impl ProviderEngine for ClaudeEngine {
         Err("The Claude request is no longer actionable.".into())
     }
 
+    async fn reconcile_session(
+        &self,
+        request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        let session_id = request
+            .session_id
+            .as_deref()
+            .ok_or("The Claude session has not been established yet.")?;
+        let configuration = super::launch::launch_configuration(&request.profile)?;
+        let config_root = configuration
+            .environment
+            .get("CLAUDE_CONFIG_DIR")
+            .map(|path| profile_path(path, &configuration.home))
+            .unwrap_or_else(|| configuration.home.join(".claude"));
+        let path = find_claude_session(&config_root, session_id).await?;
+        Ok(Some(read_claude_session(&path, session_id).await?))
+    }
+
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
         let key = (provider_instance_id, thread_id);
         let session = self.sessions.lock().await.remove(&key);
@@ -134,6 +171,286 @@ impl ProviderEngine for ClaudeEngine {
             retire_session(&session).await;
         }
     }
+}
+
+fn profile_path(path: &str, home: &std::path::Path) -> PathBuf {
+    if path == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    }
+}
+
+async fn find_claude_session(
+    config_root: &std::path::Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    let session_id = Uuid::parse_str(session_id)
+        .map_err(|_| "provider.session.not-found: The saved Claude session ID is invalid.")?;
+    let projects = config_root.join("projects");
+    let mut directories = tokio::fs::read_dir(&projects).await.map_err(|error| {
+        format!(
+            "provider.session.not-found: Could not read Claude sessions in {}: {error}",
+            projects.display()
+        )
+    })?;
+    while let Some(entry) = directories
+        .next_entry()
+        .await
+        .map_err(|error| format!("Could not inspect Claude sessions: {error}"))?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| format!("Could not inspect Claude session storage: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let candidate = entry.path().join(format!("{session_id}.jsonl"));
+        if tokio::fs::try_exists(&candidate).await.map_err(|error| {
+            format!(
+                "Could not inspect Claude session {}: {error}",
+                candidate.display()
+            )
+        })? {
+            return Ok(candidate);
+        }
+    }
+    Err("provider.session.not-found: The saved Claude session is no longer available.".into())
+}
+
+#[derive(Default)]
+struct ClaudeSessionGraph {
+    nodes: HashMap<String, ClaudeLogNode>,
+    latest_leaf: Option<String>,
+    latest_node: Option<String>,
+}
+
+struct ClaudeLogNode {
+    parent_uuid: Option<String>,
+    timestamp: Option<AppleDate>,
+    kind: ClaudeLogNodeKind,
+}
+
+enum ClaudeLogNodeKind {
+    User(Option<String>),
+    Assistant {
+        text: Option<String>,
+        synthetic: bool,
+    },
+    Other,
+}
+
+struct ClaudeTurnDraft {
+    native_id: String,
+    started_at: AppleDate,
+    user_content: String,
+    assistant_parts: Vec<String>,
+    synthetic: bool,
+}
+
+impl ClaudeSessionGraph {
+    fn ingest(&mut self, value: Value) {
+        if value.get("type").and_then(Value::as_str) == Some("last-prompt") {
+            if let Some(leaf) = value.get("leafUuid").and_then(Value::as_str) {
+                self.latest_leaf = Some(leaf.to_string());
+            }
+            return;
+        }
+        let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
+            return;
+        };
+        let parent_uuid = value
+            .get("parentUuid")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let timestamp = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_claude_timestamp);
+        let is_sidechain = value
+            .get("isSidechain")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let kind = if is_sidechain {
+            ClaudeLogNodeKind::Other
+        } else {
+            match value.get("type").and_then(Value::as_str) {
+                Some("user") => ClaudeLogNodeKind::User(claude_user_text(&value)),
+                Some("assistant") => ClaudeLogNodeKind::Assistant {
+                    text: claude_assistant_text(&value),
+                    synthetic: value.pointer("/message/model").and_then(Value::as_str)
+                        == Some("<synthetic>"),
+                },
+                _ => ClaudeLogNodeKind::Other,
+            }
+        };
+        self.latest_node = Some(uuid.to_string());
+        self.nodes.insert(
+            uuid.to_string(),
+            ClaudeLogNode {
+                parent_uuid,
+                timestamp,
+                kind,
+            },
+        );
+    }
+
+    fn reconciled_turns(self) -> Vec<ReconciledSessionTurn> {
+        let Some(mut cursor) = self.latest_leaf.or(self.latest_node) else {
+            return Vec::new();
+        };
+        let mut branch = Vec::new();
+        let mut seen = HashSet::new();
+        while seen.insert(cursor.clone()) {
+            let Some(node) = self.nodes.get(&cursor) else {
+                break;
+            };
+            branch.push((cursor, node));
+            let Some(parent) = &node.parent_uuid else {
+                break;
+            };
+            cursor = parent.clone();
+        }
+        branch.reverse();
+
+        let mut turns = Vec::new();
+        let mut current: Option<ClaudeTurnDraft> = None;
+        for (uuid, node) in branch {
+            match &node.kind {
+                ClaudeLogNodeKind::User(Some(text)) => {
+                    finish_claude_turn(&mut turns, current.take());
+                    current = Some(ClaudeTurnDraft {
+                        native_id: uuid,
+                        started_at: node.timestamp.unwrap_or_else(AppleDate::now),
+                        user_content: text.clone(),
+                        assistant_parts: Vec::new(),
+                        synthetic: false,
+                    });
+                }
+                ClaudeLogNodeKind::Assistant { text, synthetic } => {
+                    if let Some(turn) = &mut current {
+                        turn.synthetic |= synthetic;
+                        if let Some(text) = text {
+                            if !turn.assistant_parts.iter().any(|part| part == text) {
+                                turn.assistant_parts.push(text.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        finish_claude_turn(&mut turns, current);
+        turns
+    }
+}
+
+fn finish_claude_turn(turns: &mut Vec<ReconciledSessionTurn>, turn: Option<ClaudeTurnDraft>) {
+    let Some(turn) = turn else { return };
+    if turn.synthetic || turn.user_content.trim().is_empty() {
+        return;
+    }
+    turns.push(ReconciledSessionTurn {
+        native_id: turn.native_id,
+        started_at: turn.started_at,
+        user_content: turn.user_content,
+        assistant_content: turn.assistant_parts.join("\n\n").trim().to_string(),
+    });
+}
+
+fn claude_user_text(value: &Value) -> Option<String> {
+    let content = value.pointer("/message/content")?;
+    let text = match content {
+        Value::String(text) => text.trim().to_string(),
+        Value::Array(blocks) => {
+            if blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            {
+                return None;
+            }
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        }
+        _ => return None,
+    };
+    if text.is_empty() || text.starts_with("<local-command-") || text.starts_with("<command-") {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn claude_assistant_text(value: &Value) -> Option<String> {
+    let blocks = value.pointer("/message/content")?.as_array()?;
+    let text = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn parse_claude_timestamp(value: &str) -> Option<AppleDate> {
+    value
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .map(|timestamp| AppleDate::from_unix_seconds(timestamp.as_millisecond() as f64 / 1_000.0))
+}
+
+async fn read_claude_session(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("Could not open Claude session {}: {error}", path.display()))?;
+    let mut lines = BufReader::new(file).lines();
+    let mut graph = ClaudeSessionGraph::default();
+    let mut line_number = 0usize;
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("Could not read Claude session {}: {error}", path.display()))?
+    {
+        line_number += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Claude session {} contains invalid JSON on line {line_number}: {error}",
+                path.display()
+            )
+        })?;
+        if value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|stored| stored != session_id)
+        {
+            continue;
+        }
+        graph.ingest(value);
+    }
+    Ok(graph.reconciled_turns())
 }
 
 async fn retire_session(session: &Arc<ClaudeSession>) {
@@ -267,7 +584,7 @@ async fn ensure_process(session: &Arc<ClaudeSession>, request: &TurnRequest) -> 
             "--mcp-config".into(),
             config.path.to_string_lossy().to_string(),
             "--allowedTools".into(),
-            "mcp__maxx_browser".into(),
+            MAXX_BROWSER_TOOL_RULE.into(),
         ]);
     }
     let process = JsonLineProcess::spawn(&LaunchSpec {
@@ -368,17 +685,7 @@ impl EphemeralClaudeMcpConfig {
         let mut file = options
             .open(&path)
             .map_err(|error| format!("Could not create Claude browser MCP config: {error}"))?;
-        let body = json!({
-            "mcpServers": {
-                "maxx_browser": {
-                    "type": "http",
-                    "url": access.endpoint,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", access.bearer_token)
-                    }
-                }
-            }
-        });
+        let body = browser_mcp_config(access);
         let serialized = serde_json::to_vec(&body)
             .map_err(|error| format!("Could not encode Claude browser MCP config: {error}"))?;
         if let Err(error) = file.write_all(&serialized).and_then(|_| file.sync_all()) {
@@ -446,6 +753,195 @@ mod browser_mcp_tests {
             .windows(2)
             .any(|pair| pair == ["--append-system-prompt", "You are Dana."]));
         assert_eq!(request.prompt, "user prompt");
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_tests {
+    use super::*;
+
+    #[test]
+    fn active_branch_becomes_gui_turns_without_commands_synthetic_resume_or_tool_results() {
+        let mut graph = ClaudeSessionGraph::default();
+        let records = [
+            json!({
+                "type": "user", "uuid": "user-baseline", "parentUuid": null,
+                "timestamp": "2026-08-13T16:22:46.319Z", "isSidechain": false,
+                "message": {"role": "user", "content": "Hi"}
+            }),
+            json!({
+                "type": "assistant", "uuid": "assistant-baseline", "parentUuid": "user-baseline",
+                "timestamp": "2026-08-13T16:22:46.360Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "text", "text": "Hello"}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "synthetic-user", "parentUuid": "assistant-baseline",
+                "timestamp": "2026-08-13T16:23:05.264Z", "isSidechain": false,
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "Continue from where you left off."}
+                ]}
+            }),
+            json!({
+                "type": "assistant", "uuid": "synthetic-assistant", "parentUuid": "synthetic-user",
+                "timestamp": "2026-08-13T16:23:05.264Z", "isSidechain": false,
+                "message": {"model": "<synthetic>", "role": "assistant", "content": [
+                    {"type": "text", "text": "No response requested."}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "command-caveat", "parentUuid": "synthetic-assistant",
+                "timestamp": "2026-08-13T16:23:29.245Z", "isSidechain": false,
+                "message": {"role": "user", "content": "<local-command-caveat>ignore</local-command-caveat>"}
+            }),
+            json!({
+                "type": "user", "uuid": "command-login", "parentUuid": "command-caveat",
+                "timestamp": "2026-08-13T16:23:29.245Z", "isSidechain": false,
+                "message": {"role": "user", "content": "<command-name>/login</command-name>"}
+            }),
+            json!({
+                "type": "user", "uuid": "command-output", "parentUuid": "command-login",
+                "timestamp": "2026-08-13T16:23:29.245Z", "isSidechain": false,
+                "message": {"role": "user", "content": "<local-command-stdout>Login successful</local-command-stdout>"}
+            }),
+            json!({
+                "type": "user", "uuid": "terminal-user", "parentUuid": "command-output",
+                "timestamp": "2026-08-13T16:24:09.602Z", "isSidechain": false,
+                "message": {"role": "user", "content": "Reply exactly with: READY"}
+            }),
+            json!({
+                "type": "assistant", "uuid": "thinking", "parentUuid": "terminal-user",
+                "timestamp": "2026-08-13T16:24:11.258Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "private"}
+                ]}
+            }),
+            json!({
+                "type": "assistant", "uuid": "terminal-answer", "parentUuid": "thinking",
+                "timestamp": "2026-08-13T16:24:11.302Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "text", "text": "READY"}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "browser-user", "parentUuid": "terminal-answer",
+                "timestamp": "2026-08-13T16:25:41.089Z", "isSidechain": false,
+                "message": {"role": "user", "content": "Use maxx_browser"}
+            }),
+            json!({
+                "type": "assistant", "uuid": "browser-progress", "parentUuid": "browser-user",
+                "timestamp": "2026-08-13T16:25:48.319Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "text", "text": "Checking the browser."}
+                ]}
+            }),
+            json!({
+                "type": "assistant", "uuid": "browser-tool", "parentUuid": "browser-progress",
+                "timestamp": "2026-08-13T16:25:51.413Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tool-1", "name": "mcp__maxx_browser__browser_observe"}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "browser-result", "parentUuid": "browser-tool",
+                "timestamp": "2026-08-13T16:25:51.419Z", "isSidechain": false,
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tool-1", "content": "no tabs"}
+                ]}
+            }),
+            json!({
+                "type": "assistant", "uuid": "browser-answer", "parentUuid": "browser-result",
+                "timestamp": "2026-08-13T16:25:54.102Z", "isSidechain": false,
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "text", "text": "MAXX BROWSER OK"}
+                ]}
+            }),
+            json!({
+                "type": "system", "uuid": "leaf", "parentUuid": "browser-answer",
+                "timestamp": "2026-08-13T16:25:54.135Z", "isSidechain": false
+            }),
+            json!({
+                "type": "user", "uuid": "abandoned-user", "parentUuid": "assistant-baseline",
+                "timestamp": "2026-08-13T16:26:00Z", "isSidechain": false,
+                "message": {"role": "user", "content": "Abandoned branch"}
+            }),
+            json!({
+                "type": "last-prompt", "leafUuid": "leaf", "sessionId": Uuid::new_v4()
+            }),
+        ];
+        for record in records {
+            graph.ingest(record);
+        }
+
+        let turns = graph.reconciled_turns();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].native_id, "user-baseline");
+        assert_eq!(turns[0].user_content, "Hi");
+        assert_eq!(turns[0].assistant_content, "Hello");
+        assert_eq!(turns[1].native_id, "terminal-user");
+        assert_eq!(turns[1].user_content, "Reply exactly with: READY");
+        assert_eq!(turns[1].assistant_content, "READY");
+        assert_eq!(turns[2].native_id, "browser-user");
+        assert_eq!(turns[2].user_content, "Use maxx_browser");
+        assert_eq!(
+            turns[2].assistant_content,
+            "Checking the browser.\n\nMAXX BROWSER OK"
+        );
+        assert!(turns.iter().all(|turn| !turn.user_content.contains("login")
+            && !turn.user_content.contains("Continue")
+            && !turn.user_content.contains("Abandoned")));
+        assert!((turns[1].started_at.unix_seconds() - 1_786_638_249.602).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn finds_and_streams_the_native_session_file() {
+        let session_id = Uuid::new_v4();
+        let other_session_id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("maxx-claude-session-{session_id}"));
+        let project = root.join("projects").join("-tmp-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join(format!("{session_id}.jsonl"));
+        let lines = [
+            json!({
+                "type": "user", "uuid": "ignored-user", "parentUuid": null,
+                "sessionId": other_session_id, "timestamp": "2026-08-13T16:24:00Z",
+                "message": {"role": "user", "content": "wrong session"}
+            }),
+            json!({
+                "type": "user", "uuid": "real-user", "parentUuid": null,
+                "sessionId": session_id, "timestamp": "2026-08-13T16:24:09.602Z",
+                "message": {"role": "user", "content": "terminal prompt"}
+            }),
+            json!({
+                "type": "assistant", "uuid": "real-answer", "parentUuid": "real-user",
+                "sessionId": session_id, "timestamp": "2026-08-13T16:24:11.302Z",
+                "message": {"model": "claude-haiku", "role": "assistant", "content": [
+                    {"type": "text", "text": "terminal answer"}
+                ]}
+            }),
+            json!({
+                "type": "last-prompt", "leafUuid": "real-answer", "sessionId": session_id
+            }),
+        ]
+        .into_iter()
+        .map(|line| serde_json::to_string(&line).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let found = find_claude_session(&root, &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(found, path);
+        let turns = read_claude_session(&found, &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_content, "terminal prompt");
+        assert_eq!(turns[0].assistant_content, "terminal answer");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -25,6 +25,14 @@ use uuid::Uuid;
 
 use crate::browser_runtime::BrowserProviderAccess;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconciledSessionTurn {
+    pub native_id: String,
+    pub started_at: maxx_core::contract::AppleDate,
+    pub user_content: String,
+    pub assistant_content: String,
+}
+
 /// Draft stream from an engine to the orchestrator. `Err` carries a thrown
 /// adapter error which the stamper converts into error + failed terminal.
 pub type DraftSender = mpsc::Sender<Result<ProviderEventDraft, String>>;
@@ -110,6 +118,14 @@ pub trait ProviderEngine: Send + Sync {
         request_id: Uuid,
         decision: RuntimeInteractionDecision,
     ) -> Result<(), String>;
+    /// Read the provider's authoritative persisted conversation. Providers
+    /// without a structured read API return `None` and use terminal archives.
+    async fn reconcile_session(
+        &self,
+        _request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        Ok(None)
+    }
     /// Tear down the provider-native session owned by one Maxx thread.
     /// Background text generation uses isolated synthetic thread IDs and must
     /// release them as soon as the result has been collected.

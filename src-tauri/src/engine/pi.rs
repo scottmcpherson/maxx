@@ -4,15 +4,18 @@
 //! normalizer's `agent_settled` handling terminates it, `abort` cancels.
 
 use super::process::{JsonLineProcess, LaunchSpec};
-use super::{yield_draft, yield_error, DraftSender, ProviderEngine, TurnRequest};
+use super::{
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+};
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
@@ -167,6 +170,31 @@ impl ProviderEngine for PiEngine {
         Err("The Pi extension request is no longer actionable.".into())
     }
 
+    async fn reconcile_session(
+        &self,
+        request: TurnRequest,
+    ) -> Result<Option<Vec<ReconciledSessionTurn>>, String> {
+        let session_id = request
+            .session_id
+            .as_deref()
+            .ok_or("The Pi session has not been established yet.")?;
+        let configuration = super::launch::launch_configuration(&request.profile)?;
+        let sessions_root = configuration
+            .environment
+            .get("PI_CODING_AGENT_SESSION_DIR")
+            .map(|path| profile_path(path, &configuration.home))
+            .unwrap_or_else(|| {
+                configuration
+                    .environment
+                    .get("PI_CODING_AGENT_DIR")
+                    .map(|path| profile_path(path, &configuration.home))
+                    .unwrap_or_else(|| configuration.home.join(".pi/agent"))
+                    .join("sessions")
+            });
+        let path = find_pi_session(&sessions_root, session_id).await?;
+        Ok(Some(read_pi_session(&path, session_id).await?))
+    }
+
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
         let key = (provider_instance_id, thread_id);
         let session = self.sessions.lock().await.remove(&key);
@@ -187,6 +215,254 @@ impl ProviderEngine for PiEngine {
             retire_session(&session).await;
         }
     }
+}
+
+fn profile_path(path: &str, home: &std::path::Path) -> PathBuf {
+    if path == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    }
+}
+
+async fn find_pi_session(
+    sessions_root: &std::path::Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    let session_id = Uuid::parse_str(session_id)
+        .map_err(|_| "provider.session.not-found: The saved Pi session ID is invalid.")?;
+    let mut directories = tokio::fs::read_dir(sessions_root).await.map_err(|error| {
+        format!(
+            "provider.session.not-found: Could not read Pi sessions in {}: {error}",
+            sessions_root.display()
+        )
+    })?;
+    let suffix = format!("_{session_id}.jsonl");
+    while let Some(entry) = directories
+        .next_entry()
+        .await
+        .map_err(|error| format!("Could not inspect Pi sessions: {error}"))?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| format!("Could not inspect Pi session storage: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let mut files = tokio::fs::read_dir(entry.path())
+            .await
+            .map_err(|error| format!("Could not inspect Pi session directory: {error}"))?;
+        while let Some(file) = files
+            .next_entry()
+            .await
+            .map_err(|error| format!("Could not inspect Pi session file: {error}"))?
+        {
+            if file
+                .file_name()
+                .to_string_lossy()
+                .ends_with(suffix.as_str())
+                && file
+                    .file_type()
+                    .await
+                    .map_err(|error| format!("Could not inspect Pi session file: {error}"))?
+                    .is_file()
+            {
+                return Ok(file.path());
+            }
+        }
+    }
+    Err("provider.session.not-found: The saved Pi session is no longer available.".into())
+}
+
+#[derive(Default)]
+struct PiSessionGraph {
+    nodes: HashMap<String, PiLogNode>,
+    latest_node: Option<String>,
+}
+
+struct PiLogNode {
+    parent_id: Option<String>,
+    timestamp: Option<AppleDate>,
+    kind: PiLogNodeKind,
+}
+
+enum PiLogNodeKind {
+    User(Option<String>),
+    Assistant(Option<String>),
+    Other,
+}
+
+struct PiTurnDraft {
+    native_id: String,
+    started_at: AppleDate,
+    user_content: String,
+    assistant_parts: Vec<String>,
+}
+
+impl PiSessionGraph {
+    fn ingest(&mut self, value: Value) {
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let parent_id = value
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let timestamp = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_pi_timestamp);
+        let kind = if value.get("type").and_then(Value::as_str) == Some("message") {
+            match value.pointer("/message/role").and_then(Value::as_str) {
+                Some("user") => PiLogNodeKind::User(pi_message_text(&value)),
+                Some("assistant") => PiLogNodeKind::Assistant(pi_message_text(&value)),
+                _ => PiLogNodeKind::Other,
+            }
+        } else {
+            PiLogNodeKind::Other
+        };
+        self.latest_node = Some(id.to_owned());
+        self.nodes.insert(
+            id.to_owned(),
+            PiLogNode {
+                parent_id,
+                timestamp,
+                kind,
+            },
+        );
+    }
+
+    fn reconciled_turns(self) -> Vec<ReconciledSessionTurn> {
+        let Some(mut cursor) = self.latest_node else {
+            return Vec::new();
+        };
+        let mut branch = Vec::new();
+        let mut seen = HashSet::new();
+        while seen.insert(cursor.clone()) {
+            let Some(node) = self.nodes.get(&cursor) else {
+                break;
+            };
+            branch.push((cursor, node));
+            let Some(parent) = &node.parent_id else {
+                break;
+            };
+            cursor = parent.clone();
+        }
+        branch.reverse();
+
+        let mut turns = Vec::new();
+        let mut current: Option<PiTurnDraft> = None;
+        for (id, node) in branch {
+            match &node.kind {
+                PiLogNodeKind::User(Some(text)) => {
+                    finish_pi_turn(&mut turns, current.take());
+                    current = Some(PiTurnDraft {
+                        native_id: id,
+                        started_at: node.timestamp.unwrap_or_else(AppleDate::now),
+                        user_content: text.clone(),
+                        assistant_parts: Vec::new(),
+                    });
+                }
+                PiLogNodeKind::Assistant(Some(text)) => {
+                    if let Some(turn) = &mut current {
+                        if !turn.assistant_parts.iter().any(|part| part == text) {
+                            turn.assistant_parts.push(text.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        finish_pi_turn(&mut turns, current);
+        turns
+    }
+}
+
+fn finish_pi_turn(turns: &mut Vec<ReconciledSessionTurn>, turn: Option<PiTurnDraft>) {
+    let Some(turn) = turn else { return };
+    if turn.user_content.trim().is_empty() {
+        return;
+    }
+    turns.push(ReconciledSessionTurn {
+        native_id: turn.native_id,
+        started_at: turn.started_at,
+        user_content: turn.user_content,
+        assistant_content: turn.assistant_parts.join("\n\n").trim().to_owned(),
+    });
+}
+
+fn pi_message_text(value: &Value) -> Option<String> {
+    let content = value.pointer("/message/content")?;
+    let text = match content {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+fn parse_pi_timestamp(value: &str) -> Option<AppleDate> {
+    value
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .map(|timestamp| AppleDate::from_unix_seconds(timestamp.as_millisecond() as f64 / 1_000.0))
+}
+
+async fn read_pi_session(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<ReconciledSessionTurn>, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("Could not open Pi session {}: {error}", path.display()))?;
+    let mut lines = BufReader::new(file).lines();
+    let mut graph = PiSessionGraph::default();
+    let mut line_number = 0usize;
+    let mut confirmed_session = false;
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("Could not read Pi session {}: {error}", path.display()))?
+    {
+        line_number += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Pi session {} contains invalid JSON on line {line_number}: {error}",
+                path.display()
+            )
+        })?;
+        if value.get("type").and_then(Value::as_str) == Some("session") {
+            confirmed_session = value.get("id").and_then(Value::as_str) == Some(session_id);
+            continue;
+        }
+        graph.ingest(value);
+    }
+    if !confirmed_session {
+        return Err(
+            "provider.session.not-found: The saved Pi session ID did not match its session file."
+                .into(),
+        );
+    }
+    Ok(graph.reconciled_turns())
 }
 
 async fn retire_session(session: &Arc<PiSession>) {
@@ -607,5 +883,65 @@ mod browser_mcp_tests {
             .windows(2)
             .any(|pair| pair == ["--append-system-prompt", "You are Dana."]));
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn active_branch_becomes_gui_turns_without_thinking_or_tool_results() {
+        let mut graph = PiSessionGraph::default();
+        for value in [
+            json!({"type":"model_change","id":"model","parentId":null,"timestamp":"2026-08-13T12:00:00Z"}),
+            json!({"type":"message","id":"user-1","parentId":"model","timestamp":"2026-08-13T12:00:01Z","message":{"role":"user","content":[{"type":"text","text":"first prompt"}]}}),
+            json!({"type":"message","id":"assistant-1","parentId":"user-1","timestamp":"2026-08-13T12:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"first answer"},{"type":"toolCall","name":"read"}]}}),
+            json!({"type":"message","id":"tool-result","parentId":"assistant-1","timestamp":"2026-08-13T12:00:03Z","message":{"role":"toolResult","content":[{"type":"text","text":"not a user"}]}}),
+            json!({"type":"message","id":"abandoned-user","parentId":"assistant-1","timestamp":"2026-08-13T12:00:04Z","message":{"role":"user","content":"abandoned branch"}}),
+            json!({"type":"message","id":"abandoned-answer","parentId":"abandoned-user","timestamp":"2026-08-13T12:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"abandoned answer"}]}}),
+            json!({"type":"message","id":"user-2","parentId":"tool-result","timestamp":"2026-08-13T12:00:06Z","message":{"role":"user","content":"terminal prompt"}}),
+            json!({"type":"message","id":"assistant-2","parentId":"user-2","timestamp":"2026-08-13T12:00:07Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"terminal answer"}]}}),
+        ] {
+            graph.ingest(value);
+        }
+
+        let turns = graph.reconciled_turns();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].native_id, "user-1");
+        assert_eq!(turns[0].user_content, "first prompt");
+        assert_eq!(turns[0].assistant_content, "first answer");
+        assert_eq!(turns[1].native_id, "user-2");
+        assert_eq!(turns[1].user_content, "terminal prompt");
+        assert_eq!(turns[1].assistant_content, "terminal answer");
+    }
+
+    #[tokio::test]
+    async fn finds_and_streams_the_native_session_file() {
+        let session_id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("maxx-pi-session-test-{}", Uuid::new_v4()));
+        let project = root.join("--project--");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join(format!("2026-08-13T12-00-00Z_{session_id}.jsonl"));
+        std::fs::write(
+            &path,
+            [
+                json!({"type":"session","version":3,"id":session_id,"timestamp":"2026-08-13T12:00:00Z","cwd":"/tmp"}).to_string(),
+                json!({"type":"message","id":"user","parentId":null,"timestamp":"2026-08-13T12:00:01Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}).to_string(),
+                json!({"type":"message","id":"assistant","parentId":"user","timestamp":"2026-08-13T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_pi_session(&root, &session_id.to_string())
+                .await
+                .unwrap(),
+            path
+        );
+        let turns = read_pi_session(&path, &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_content, "hello");
+        assert_eq!(turns[0].assistant_content, "world");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

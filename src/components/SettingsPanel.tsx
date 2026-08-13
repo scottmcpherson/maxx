@@ -26,7 +26,7 @@ import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
 import { RuntimePicker } from "./RuntimePicker";
 
-type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connections";
+type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connections" | "experimental";
 
 export function SettingsPanel() {
   const workspace = useAppStore((state) => state.workspace);
@@ -234,6 +234,8 @@ export function SettingsPanel() {
         return <VoiceSettingsSection />;
       case "connections":
         return <ConnectionsSettingsSection />;
+      case "experimental":
+        return <ExperimentalSettingsSection />;
       case "keyboardShortcuts":
         return (
           <>
@@ -317,6 +319,14 @@ export function SettingsPanel() {
           >
             <Icons.keyboard size={15} />Keyboard Shortcuts
           </button>
+          <button
+            type="button"
+            className={section === "experimental" ? "selected" : ""}
+            aria-current={section === "experimental" ? "page" : undefined}
+            onClick={() => selectSection("experimental")}
+          >
+            <Icons.flask size={15} />Experimental
+          </button>
         </nav>
       </aside>
 
@@ -324,6 +334,43 @@ export function SettingsPanel() {
         {sectionBody()}
       </main>
     </div>
+  );
+}
+
+function ExperimentalSettingsSection() {
+  const terminalModeEnabled = useAppStore((state) => state.terminalModeEnabled);
+  const setTerminalModeEnabled = useAppStore((state) => state.setTerminalModeEnabled);
+
+  return (
+    <>
+      <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+        <div>
+          <h1>Experimental</h1>
+          <p>Try features that are still being refined. They may change in future builds.</p>
+        </div>
+      </header>
+
+      <section className="settings-card experimental-settings" aria-label="Experimental settings">
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Terminal mode</strong>
+            <small>
+              Show controls for starting chats in a provider’s native terminal interface
+              and switching existing chats between terminal and GUI modes.
+            </small>
+          </span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={terminalModeEnabled}
+              aria-label="Enable terminal mode"
+              onChange={(event) => setTerminalModeEnabled(event.target.checked)}
+            />
+            <span />
+          </label>
+        </div>
+      </section>
+    </>
   );
 }
 
