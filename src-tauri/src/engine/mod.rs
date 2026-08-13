@@ -64,6 +64,13 @@ pub struct TurnRequest {
     pub browser_access: Option<Arc<BrowserProviderAccess>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SteerRequest {
+    pub turn_id: Uuid,
+    pub prompt: String,
+    pub attachments: Vec<ChatImageAttachment>,
+}
+
 impl TurnRequest {
     pub fn starts_fresh_agent_session(&self) -> bool {
         self.agent_instructions.is_some() && self.session_id.is_none()
@@ -112,6 +119,12 @@ pub trait ProviderEngine: Send + Sync {
     fn provider(&self) -> ChatProvider;
     /// Begin a turn; must return promptly and stream drafts through `sink`.
     async fn run_turn(&self, request: TurnRequest, sink: DraftSender);
+    async fn steer(&self, _request: SteerRequest) -> Result<(), String> {
+        Err(format!(
+            "{} does not support steering an active turn.",
+            self.provider().display_name()
+        ))
+    }
     async fn cancel(&self, turn_id: Uuid);
     async fn resolve(
         &self,

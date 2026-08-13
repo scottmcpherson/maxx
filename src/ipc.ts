@@ -214,6 +214,25 @@ export const ipc = {
       attachmentIds,
       annotations,
     }),
+  steerPrompt: (
+    projectId: string,
+    threadId: string,
+    turnId: string,
+    prompt: string,
+    imagePaths: string[],
+    hostId?: string | null,
+    attachmentIds: string[] = [],
+    annotations: BrowserAnnotation[] = [],
+  ) =>
+    invokeOnHost<void>(hostId, "steer_prompt", {
+      projectId,
+      threadId,
+      turnId,
+      prompt,
+      imagePaths,
+      attachmentIds,
+      annotations,
+    }),
   cancelTurn: (turnId: string, hostId?: string | null) =>
     invokeOnHost<void>(hostId, "cancel_turn", { turnId }),
   resolveRequest: (

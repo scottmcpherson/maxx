@@ -28,6 +28,9 @@ afterEach(() => {
     openSideThreadID: null,
     summaryPopoverOpen: false,
     browserAnnotationsByThread: {},
+    activeTurnByThread: {},
+    queuedMessagesByThread: {},
+    sendingMessageByThread: {},
     error: null,
     refresh: originalRefresh,
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
@@ -503,5 +506,140 @@ describe("browser annotations", () => {
     await expect(useAppStore.getState().sendPrompt("change this", [], [annotation("first", "#first")]))
       .resolves.toBe(false);
     expect(useAppStore.getState().error).toContain("backend rejected");
+  });
+});
+
+describe("message queue", () => {
+  function seedBusyThread() {
+    useAppStore.setState({
+      workspace: sampleWorkspace("/tmp/project"),
+      remoteSessions: [],
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: "project",
+      selectedThreadID: "thread-a",
+      activeTurnByThread: { "thread-a": "turn-active" },
+      queuedMessagesByThread: {},
+      sendingMessageByThread: {},
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+  }
+
+  it("sends queued messages FIFO one turn at a time", async () => {
+    seedBusyThread();
+    const send = vi.spyOn(ipc, "sendPrompt")
+      .mockResolvedValueOnce("turn-first")
+      .mockResolvedValueOnce("turn-second")
+      .mockResolvedValueOnce("turn-third");
+
+    await expect(useAppStore.getState().sendPrompt("first queued", [])).resolves.toBe(true);
+    await expect(useAppStore.getState().sendPrompt("second queued", [])).resolves.toBe(true);
+    await expect(useAppStore.getState().sendPrompt("third queued", [])).resolves.toBe(true);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"].map((message) => message.prompt))
+      .toEqual(["first queued", "second queued", "third queued"]);
+
+    useAppStore.getState().applyTurnFinished({
+      projectID: "project",
+      threadID: "thread-a",
+      turnID: "turn-active",
+      terminalState: "completed",
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[2]).toBe("first queued");
+    expect(useAppStore.getState().activeTurnByThread["thread-a"]).toBe("turn-first");
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"].map((message) => message.prompt))
+      .toEqual(["second queued", "third queued"]);
+
+    useAppStore.getState().applyTurnFinished({
+      projectID: "project",
+      threadID: "thread-a",
+      turnID: "turn-first",
+      terminalState: "completed",
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1]?.[2]).toBe("second queued");
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"].map((message) => message.prompt))
+      .toEqual(["third queued"]);
+
+    useAppStore.getState().applyTurnFinished({
+      projectID: "project",
+      threadID: "thread-a",
+      turnID: "turn-second",
+      terminalState: "completed",
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+    expect(send.mock.calls[2]?.[2]).toBe("third queued");
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"]).toBeUndefined();
+  });
+
+  it("accepts more queued input while the first send is still being admitted", async () => {
+    const workspace = sampleWorkspace("/tmp/project");
+    useAppStore.setState({
+      workspace,
+      remoteSessions: [],
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: "project",
+      selectedThreadID: "thread-a",
+      activeTurnByThread: {},
+      queuedMessagesByThread: {},
+      sendingMessageByThread: {},
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+    let admitFirst!: (turnID: string) => void;
+    const firstAdmission = new Promise<string>((resolve) => { admitFirst = resolve; });
+    const send = vi.spyOn(ipc, "sendPrompt").mockReturnValueOnce(firstAdmission);
+
+    const first = useAppStore.getState().sendPrompt("first", []);
+    await expect(useAppStore.getState().sendPrompt("second", [])).resolves.toBe(true);
+    await expect(useAppStore.getState().sendPrompt("third", [])).resolves.toBe(true);
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"].map((message) => message.prompt))
+      .toEqual(["second", "third"]);
+
+    admitFirst("turn-first");
+    await expect(first).resolves.toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().activeTurnByThread["thread-a"]).toBe("turn-first");
+  });
+
+  it("steers a supported active turn without disturbing the rest of the queue", async () => {
+    seedBusyThread();
+    vi.spyOn(ipc, "sendPrompt");
+    const steer = vi.spyOn(ipc, "steerPrompt").mockResolvedValue(undefined);
+
+    await useAppStore.getState().sendPrompt("stay FIFO", []);
+    await useAppStore.getState().sendPrompt("steer this now", []);
+    const queued = useAppStore.getState().queuedMessagesByThread["thread-a"];
+
+    await expect(useAppStore.getState().steerQueuedMessage("thread-a", queued[1].id))
+      .resolves.toBe(true);
+    expect(steer).toHaveBeenCalledWith(
+      "project", "thread-a", "turn-active", "steer this now", [], LOCAL_HOST_ID, [], [],
+    );
+    expect(useAppStore.getState().activeTurnByThread["thread-a"]).toBe("turn-active");
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"].map((message) => message.prompt))
+      .toEqual(["stay FIFO"]);
+  });
+
+  it("keeps a failed queued dispatch available for retry", async () => {
+    seedBusyThread();
+    const send = vi.spyOn(ipc, "sendPrompt")
+      .mockRejectedValueOnce(new Error("temporary failure"))
+      .mockResolvedValueOnce("turn-retry");
+    await useAppStore.getState().sendPrompt("retry me", []);
+
+    useAppStore.getState().applyTurnFinished({
+      projectID: "project",
+      threadID: "thread-a",
+      turnID: "turn-active",
+      terminalState: "completed",
+    });
+    await vi.waitFor(() => expect(useAppStore.getState().error).toContain("temporary failure"));
+    const message = useAppStore.getState().queuedMessagesByThread["thread-a"][0];
+
+    await expect(useAppStore.getState().retryQueuedMessage("thread-a", message.id)).resolves.toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().queuedMessagesByThread["thread-a"]).toBeUndefined();
+    expect(useAppStore.getState().activeTurnByThread["thread-a"]).toBe("turn-retry");
   });
 });

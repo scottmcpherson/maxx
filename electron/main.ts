@@ -54,7 +54,7 @@ const RUNTIME_METHODS = new Set([
   "add_project", "remove_project", "add_thread",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
-  "start_side_thread", "send_agent_prompt", "cancel_turn", "resolve_request", "provider_health",
+  "start_side_thread", "send_agent_prompt", "steer_prompt", "cancel_turn", "resolve_request", "provider_health",
   "terminal_support", "terminal_start", "terminal_status", "terminal_input", "terminal_resize",
   "terminal_read", "terminal_stop",
   "list_provider_models", "resolve_media_source", "voice_status", "update_voice_settings",

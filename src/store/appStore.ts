@@ -77,6 +77,7 @@ import {
   routeHostId,
 } from "../host/session";
 import { uploadImagesForHost } from "../host/mediaUpload";
+import type { QueuedMessage } from "../messageQueue";
 
 let listenersStarted = false;
 const initialDefaultRuntime = loadDefaultRuntime();
@@ -89,6 +90,8 @@ interface AppStoreState {
   selectedProjectID: string | null;
   selectedThreadID: string | null;
   activeTurnByThread: Record<string, string>;
+  queuedMessagesByThread: Record<string, QueuedMessage[]>;
+  sendingMessageByThread: Record<string, boolean>;
   /** Threads that finished a turn while the user was not viewing them. */
   unseenThreadIDs: UnseenThreadMap;
   settingsOpen: boolean;
@@ -170,6 +173,10 @@ interface AppStoreState {
     surface?: ChatSurface,
   ) => Promise<boolean>;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
+  drainPromptQueue: (threadID: string) => Promise<boolean>;
+  steerQueuedMessage: (threadID: string, messageID: string) => Promise<boolean>;
+  retryQueuedMessage: (threadID: string, messageID: string) => Promise<boolean>;
+  removeQueuedMessage: (threadID: string, messageID: string) => void;
   cancelActiveTurn: (threadID: string) => Promise<void>;
   resolveRequest: (
     projectID: string,
@@ -195,7 +202,7 @@ interface AppStoreState {
     agentIDs: string[],
     prompt: string,
     imagePaths: string[],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   setSettingsOpen: (open: boolean) => void;
   setAgentsOpen: (open: boolean) => void;
   setOpenSideThreadID: (threadID: string | null) => void;
@@ -296,7 +303,50 @@ function hostForProject(
   return remote?.host.id ?? fallback;
 }
 
-export const useAppStore = create<AppStoreState>((set, get) => ({
+export const useAppStore = create<AppStoreState>((set, get) => {
+  const dispatchQueuedMessage = async (message: QueuedMessage): Promise<string> => {
+    const prepared = await uploadImagesForHost(message.hostID, message.imagePaths);
+    if (message.kind === "agent") {
+      return ipc.sendAgentPrompt(
+        message.projectID,
+        message.threadID,
+        message.agentIDs,
+        message.prompt,
+        prepared.imagePaths,
+        message.hostID,
+        prepared.attachmentIds,
+      );
+    }
+    return ipc.sendPrompt(
+      message.projectID,
+      message.threadID,
+      message.prompt,
+      prepared.imagePaths,
+      message.hostID,
+      prepared.attachmentIds,
+      message.annotations,
+    );
+  };
+
+  const setMessageSending = (threadID: string, sending: boolean) => {
+    set((state) => {
+      const next = { ...state.sendingMessageByThread };
+      if (sending) next[threadID] = true;
+      else delete next[threadID];
+      return { sendingMessageByThread: next };
+    });
+  };
+
+  const enqueueMessage = (message: QueuedMessage) => {
+    set((state) => ({
+      queuedMessagesByThread: {
+        ...state.queuedMessagesByThread,
+        [message.threadID]: [...(state.queuedMessagesByThread[message.threadID] ?? []), message],
+      },
+    }));
+  };
+
+  return ({
   workspace: null,
   selectedHostID: LOCAL_HOST_ID,
   remoteSessions: [],
@@ -304,6 +354,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   selectedProjectID: null,
   selectedThreadID: null,
   activeTurnByThread: {},
+  queuedMessagesByThread: {},
+  sendingMessageByThread: {},
   unseenThreadIDs: loadUnseenThreadIDs(),
   settingsOpen: false,
   agentsOpen: false,
@@ -661,6 +713,13 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   removeThread: async (projectID, threadID) => {
     const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     await ipc.removeThread(projectID, threadID, hostID);
+    set((state) => {
+      const queuedMessagesByThread = { ...state.queuedMessagesByThread };
+      const sendingMessageByThread = { ...state.sendingMessageByThread };
+      delete queuedMessagesByThread[threadID];
+      delete sendingMessageByThread[threadID];
+      return { queuedMessagesByThread, sendingMessageByThread };
+    });
     await get().refresh();
     if (get().selectedThreadID === threadID) {
       set({
@@ -743,18 +802,32 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   sendPrompt: async (prompt, imagePaths, annotations = []) => {
     const { selectedProjectID, selectedThreadID, selectedHostID, remoteSessions, workspace } = get();
     if (!selectedProjectID || !selectedThreadID || (!prompt.trim() && imagePaths.length === 0 && annotations.length === 0)) return false;
+    const hostID = hostForProject(remoteSessions, workspace, selectedProjectID, selectedHostID);
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      kind: "prompt",
+      projectID: selectedProjectID,
+      threadID: selectedThreadID,
+      hostID,
+      prompt,
+      imagePaths: [...imagePaths],
+      annotations: [...annotations],
+    };
+    const current = get();
+    if (
+      current.activeTurnByThread[selectedThreadID]
+      || current.sendingMessageByThread[selectedThreadID]
+      || (current.queuedMessagesByThread[selectedThreadID]?.length ?? 0) > 0
+    ) {
+      enqueueMessage(message);
+      if (!current.activeTurnByThread[selectedThreadID] && !current.sendingMessageByThread[selectedThreadID]) {
+        void get().drainPromptQueue(selectedThreadID);
+      }
+      return true;
+    }
+    setMessageSending(selectedThreadID, true);
     try {
-      const hostID = hostForProject(remoteSessions, workspace, selectedProjectID, selectedHostID);
-      const prepared = await uploadImagesForHost(hostID, imagePaths);
-      const turnID = await ipc.sendPrompt(
-        selectedProjectID,
-        selectedThreadID,
-        prompt,
-        prepared.imagePaths,
-        hostID,
-        prepared.attachmentIds,
-        annotations,
-      );
+      const turnID = await dispatchQueuedMessage(message);
       set((state) => ({
         activeTurnByThread: setActiveTurn(state.activeTurnByThread, selectedThreadID, turnID),
       }));
@@ -763,7 +836,106 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     } catch (error) {
       set({ error: String(error) });
       return false;
+    } finally {
+      setMessageSending(selectedThreadID, false);
     }
+  },
+
+  drainPromptQueue: async (threadID) => {
+    const current = get();
+    if (current.activeTurnByThread[threadID] || current.sendingMessageByThread[threadID]) return false;
+    const message = current.queuedMessagesByThread[threadID]?.[0];
+    if (!message) return false;
+    setMessageSending(threadID, true);
+    try {
+      const turnID = await dispatchQueuedMessage(message);
+      set((state) => {
+        const remaining = (state.queuedMessagesByThread[threadID] ?? [])
+          .filter((candidate) => candidate.id !== message.id);
+        const queuedMessagesByThread = { ...state.queuedMessagesByThread };
+        if (remaining.length > 0) queuedMessagesByThread[threadID] = remaining;
+        else delete queuedMessagesByThread[threadID];
+        return {
+          activeTurnByThread: setActiveTurn(state.activeTurnByThread, threadID, turnID),
+          queuedMessagesByThread,
+          error: null,
+        };
+      });
+      await get().refresh();
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    } finally {
+      setMessageSending(threadID, false);
+    }
+  },
+
+  steerQueuedMessage: async (threadID, messageID) => {
+    const current = get();
+    const turnID = current.activeTurnByThread[threadID];
+    const message = current.queuedMessagesByThread[threadID]
+      ?.find((candidate) => candidate.id === messageID);
+    if (!turnID || !message || message.kind !== "prompt" || current.sendingMessageByThread[threadID]) {
+      return false;
+    }
+    setMessageSending(threadID, true);
+    try {
+      const prepared = await uploadImagesForHost(message.hostID, message.imagePaths);
+      await ipc.steerPrompt(
+        message.projectID,
+        message.threadID,
+        turnID,
+        message.prompt,
+        prepared.imagePaths,
+        message.hostID,
+        prepared.attachmentIds,
+        message.annotations,
+      );
+      set((state) => {
+        const remaining = (state.queuedMessagesByThread[threadID] ?? [])
+          .filter((candidate) => candidate.id !== messageID);
+        const queuedMessagesByThread = { ...state.queuedMessagesByThread };
+        if (remaining.length > 0) queuedMessagesByThread[threadID] = remaining;
+        else delete queuedMessagesByThread[threadID];
+        return { queuedMessagesByThread, error: null };
+      });
+      await get().refresh();
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    } finally {
+      setMessageSending(threadID, false);
+      if (!get().activeTurnByThread[threadID]) void get().drainPromptQueue(threadID);
+    }
+  },
+
+  retryQueuedMessage: async (threadID, messageID) => {
+    const current = get();
+    if (current.activeTurnByThread[threadID] || current.sendingMessageByThread[threadID]) return false;
+    const queued = current.queuedMessagesByThread[threadID] ?? [];
+    const message = queued.find((candidate) => candidate.id === messageID);
+    if (!message) return false;
+    set((state) => ({
+      queuedMessagesByThread: {
+        ...state.queuedMessagesByThread,
+        [threadID]: [message, ...queued.filter((candidate) => candidate.id !== messageID)],
+      },
+    }));
+    return get().drainPromptQueue(threadID);
+  },
+
+  removeQueuedMessage: (threadID, messageID) => {
+    if (get().sendingMessageByThread[threadID]) return;
+    set((state) => {
+      const remaining = (state.queuedMessagesByThread[threadID] ?? [])
+        .filter((message) => message.id !== messageID);
+      const queuedMessagesByThread = { ...state.queuedMessagesByThread };
+      if (remaining.length > 0) queuedMessagesByThread[threadID] = remaining;
+      else delete queuedMessagesByThread[threadID];
+      return { queuedMessagesByThread };
+    });
   },
 
   cancelActiveTurn: async (threadID) => {
@@ -852,25 +1024,43 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
 
   sendAgentPrompt: async (projectID, threadID, agentIDs, prompt, imagePaths) => {
-    if ((!prompt.trim() && imagePaths.length === 0) || agentIDs.length === 0) return;
+    if ((!prompt.trim() && imagePaths.length === 0) || agentIDs.length === 0) return false;
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      kind: "agent",
+      projectID,
+      threadID,
+      hostID,
+      agentIDs: [...agentIDs],
+      prompt: prompt.trim(),
+      imagePaths: [...imagePaths],
+    };
+    const current = get();
+    if (
+      current.activeTurnByThread[threadID]
+      || current.sendingMessageByThread[threadID]
+      || (current.queuedMessagesByThread[threadID]?.length ?? 0) > 0
+    ) {
+      enqueueMessage(message);
+      if (!current.activeTurnByThread[threadID] && !current.sendingMessageByThread[threadID]) {
+        void get().drainPromptQueue(threadID);
+      }
+      return true;
+    }
+    setMessageSending(threadID, true);
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
-      const prepared = await uploadImagesForHost(hostID, imagePaths);
-      const turnID = await ipc.sendAgentPrompt(
-        projectID,
-        threadID,
-        agentIDs,
-        prompt.trim(),
-        prepared.imagePaths,
-        hostID,
-        prepared.attachmentIds,
-      );
+      const turnID = await dispatchQueuedMessage(message);
       set((state) => ({
         activeTurnByThread: setActiveTurn(state.activeTurnByThread, threadID, turnID),
       }));
       await get().refresh();
+      return true;
     } catch (error) {
       set({ error: String(error) });
+      return false;
+    } finally {
+      setMessageSending(threadID, false);
     }
   },
 
@@ -1073,5 +1263,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       };
     });
     void get().refresh();
+    void get().drainPromptQueue(envelope.threadID);
   },
-}));
+  });
+});

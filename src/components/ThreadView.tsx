@@ -14,6 +14,7 @@ import {
 } from "../contract/types";
 import { formatKeyboardShortcut } from "../keyboardShortcuts";
 import { parseMessageContent } from "../media";
+import { providerSupportsSteering } from "../messageQueue";
 import { mentionedAgents, splitMentions } from "../mentions";
 import { relativeTime } from "../relativeTime";
 import { useAppStore } from "../store/appStore";
@@ -32,6 +33,7 @@ import { MentionTextarea } from "./MentionTextarea";
 import { MessageMedia } from "./MessageMedia";
 import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
 import { RuntimePicker } from "./RuntimePicker";
+import { QueuedMessages } from "./QueuedMessages";
 import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
 import { GitEnvironment } from "./GitEnvironment";
 import { SideThreadPanel } from "./SideThreadPanel";
@@ -96,7 +98,12 @@ export function ThreadView({
   const selectedProjectID = useAppStore((state) => state.selectedProjectID);
   const selectedThreadID = useAppStore((state) => state.selectedThreadID);
   const activeTurns = useAppStore((state) => state.activeTurnByThread);
+  const queuedMessagesByThread = useAppStore((state) => state.queuedMessagesByThread);
+  const sendingMessageByThread = useAppStore((state) => state.sendingMessageByThread);
   const sendPrompt = useAppStore((state) => state.sendPrompt);
+  const steerQueuedMessage = useAppStore((state) => state.steerQueuedMessage);
+  const retryQueuedMessage = useAppStore((state) => state.retryQueuedMessage);
+  const removeQueuedMessage = useAppStore((state) => state.removeQueuedMessage);
   const startSideThread = useAppStore((state) => state.startSideThread);
   const openSideThreadID = useAppStore((state) => state.openSideThreadID);
   const setOpenSideThreadID = useAppStore((state) => state.setOpenSideThreadID);
@@ -257,6 +264,8 @@ export function ThreadView({
   }
 
   const isRunning = !!activeTurns[thread.id];
+  const queuedMessages = queuedMessagesByThread[thread.id] ?? [];
+  const queueActionPending = !!sendingMessageByThread[thread.id];
   const terminalSurface = thread.surface === "terminal";
   // The reply panel and the rail share one slot, so an open side thread leaves
   // the rail nowhere to sit — same as a window too narrow for it, and the
@@ -294,7 +303,7 @@ export function ThreadView({
     }
   };
   const submit = async () => {
-    if ((!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0) || isRunning || submitting) return;
+    if ((!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0) || submitting) return;
     // A mention routes the message to those agents in a side thread; the main
     // thread's provider never sees it. Multiple mentions respond in sequence.
     const mentioned = mentionedAgents(draft, agents);
@@ -421,6 +430,15 @@ export function ThreadView({
             </div>
           )}
           <DictationStatus dictation={dictation} />
+          <QueuedMessages
+            messages={queuedMessages}
+            isRunning={isRunning}
+            canSteer={providerSupportsSteering(thread.provider)}
+            actionPending={queueActionPending}
+            onSteer={(messageID) => void steerQueuedMessage(thread.id, messageID)}
+            onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
+            onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
+          />
           <div className="composer">
             <MentionMenu menu={mentionMenu} />
             <BrowserAnnotationPills
@@ -463,7 +481,7 @@ export function ThreadView({
             />
             <div className="composer-toolbar">
               <div className="composer-leading-actions">
-                <AttachImagesButton disabled={isRunning} onChoose={() => void images.choose()} />
+                <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
                 <RuntimePicker
                 provider={thread.provider}
                 model={thread.model}
@@ -496,9 +514,19 @@ export function ThreadView({
                   shortcut={dictationShortcut}
                 />
                 {isRunning ? (
-                  <button className="send-button stop" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
-                    <Icons.stop size={14} />
-                  </button>
+                  <>
+                    <button className="send-button stop" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
+                      <Icons.stop size={14} />
+                    </button>
+                    <button
+                      className="send-button"
+                      title={submitting ? "Queueing message" : "Queue message"}
+                      disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)}
+                      onClick={() => void submit()}
+                    >
+                      <Icons.arrowUp size={16} />
+                    </button>
+                  </>
                 ) : (
                   <button className="send-button" title={submitting ? "Sending message" : "Send message"}
                     disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)} onClick={() => void submit()}>

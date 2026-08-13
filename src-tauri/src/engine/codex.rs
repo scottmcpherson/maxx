@@ -5,7 +5,8 @@
 use super::jsonrpc::JsonRpcClient;
 use super::process::{JsonLineProcess, LaunchSpec};
 use super::{
-    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, SteerRequest,
+    TurnRequest,
 };
 use crate::browser_runtime::BrowserProviderAccess;
 use async_trait::async_trait;
@@ -78,6 +79,49 @@ impl ProviderEngine for CodexEngine {
                 yield_error(&sink, error).await;
             }
         });
+    }
+
+    async fn steer(&self, request: SteerRequest) -> Result<(), String> {
+        let mut ready = None;
+        for _ in 0..80 {
+            let key = self
+                .instance_by_turn
+                .lock()
+                .await
+                .get(&request.turn_id)
+                .copied();
+            if let Some(key) = key {
+                if let Some(instance) = self.instances.lock().await.get(&key).cloned() {
+                    let state = instance.state.lock().await;
+                    if let Some((native_thread, active)) = state
+                        .active_by_native_thread
+                        .iter()
+                        .find(|(_, turn)| turn.turn_id == request.turn_id)
+                    {
+                        if let (Some(client), Some(native_turn)) =
+                            (state.client.clone(), active.native_turn_id.clone())
+                        {
+                            ready = Some((client, native_thread.clone(), native_turn));
+                            break;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let (client, native_thread, native_turn) =
+            ready.ok_or("Codex is not ready to accept steering.")?;
+        client
+            .request(
+                "turn/steer",
+                json!({
+                    "threadId": native_thread,
+                    "expectedTurnId": native_turn,
+                    "input": codex_user_input(&request.prompt, &request.attachments),
+                }),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn cancel(&self, turn_id: Uuid) {
@@ -344,19 +388,9 @@ async fn begin(
     )
     .await;
 
-    let mut input = Vec::new();
-    if !request.prompt.is_empty() {
-        input.push(json!({"type": "text", "text": request.prompt}));
-    }
-    input.extend(
-        request
-            .attachments
-            .iter()
-            .map(|attachment| json!({"type": "localImage", "path": attachment.path})),
-    );
     let mut params = json!({
         "threadId": native_thread,
-        "input": input,
+        "input": codex_user_input(&request.prompt, &request.attachments),
         "cwd": request.working_directory,
         "approvalPolicy": "on-request"
     });
@@ -384,6 +418,22 @@ async fn begin(
         }
     }
     Ok(())
+}
+
+fn codex_user_input(
+    prompt: &str,
+    attachments: &[maxx_core::persist::ChatImageAttachment],
+) -> Vec<Value> {
+    let mut input = Vec::new();
+    if !prompt.is_empty() {
+        input.push(json!({"type": "text", "text": prompt}));
+    }
+    input.extend(
+        attachments
+            .iter()
+            .map(|attachment| json!({"type": "localImage", "path": attachment.path})),
+    );
+    input
 }
 
 fn map_missing_session(error: String, request: &TurnRequest) -> String {
@@ -780,6 +830,23 @@ fn codex_elicitation_result(
 #[cfg(test)]
 mod browser_mcp_tests {
     use super::*;
+
+    #[test]
+    fn steering_uses_the_same_structured_input_as_a_new_turn() {
+        let attachment = maxx_core::persist::ChatImageAttachment {
+            id: Uuid::new_v4(),
+            path: "/tmp/example.png".into(),
+            mime_type: "image/png".into(),
+            display_name: "example.png".into(),
+        };
+        assert_eq!(
+            codex_user_input("change course", &[attachment]),
+            vec![
+                json!({"type": "text", "text": "change course"}),
+                json!({"type": "localImage", "path": "/tmp/example.png"}),
+            ]
+        );
+    }
 
     #[test]
     fn launch_settings_scope_browser_authority_through_an_environment_secret() {

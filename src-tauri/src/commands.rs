@@ -2,7 +2,7 @@
 //! surface of the Swift `AppStore`.
 
 use crate::engine::runtime::ActiveTurnInfo;
-use crate::engine::TurnRequest;
+use crate::engine::{SteerRequest, TurnRequest};
 use crate::state::{find_thread, AppState};
 use maxx_core::contract::*;
 use maxx_core::handoff::ContextHandoff;
@@ -608,6 +608,66 @@ pub async fn send_prompt(
     }
     tokio::spawn(state_arc.run_turn(project_id, request));
     Ok(turn_id)
+}
+
+pub struct SteerPromptCommand {
+    pub project_id: Uuid,
+    pub thread_id: Uuid,
+    pub turn_id: Uuid,
+    pub prompt: String,
+    pub image_paths: Vec<String>,
+    pub attachment_ids: Vec<Uuid>,
+    pub annotations: Vec<BrowserAnnotationContext>,
+}
+
+pub async fn steer_prompt(state: Arc<AppState>, request: SteerPromptCommand) -> Result<(), String> {
+    if request.prompt.trim().is_empty()
+        && request.image_paths.is_empty()
+        && request.attachment_ids.is_empty()
+        && request.annotations.is_empty()
+    {
+        return Err("A steering message cannot be empty.".into());
+    }
+    let attachments = load_prompt_attachments(request.image_paths, request.attachment_ids)?;
+    let annotations = validate_browser_annotations(request.annotations)?;
+    let provider_prompt = prompt_with_browser_annotations(&request.prompt, &annotations);
+    {
+        let mut workspace = state.workspace.lock().await;
+        let thread = find_thread(&mut workspace, request.project_id, request.thread_id)
+            .ok_or("Unknown thread")?;
+        if thread.surface == ChatSurface::Terminal {
+            return Err("Use the active terminal to steer this chat.".into());
+        }
+        if thread.last_turn_id != Some(request.turn_id) {
+            return Err("The turn is no longer active.".into());
+        }
+    }
+    state
+        .runtime
+        .steer(SteerRequest {
+            turn_id: request.turn_id,
+            prompt: provider_prompt,
+            attachments: attachments.clone(),
+        })
+        .await?;
+    {
+        let mut workspace = state.workspace.lock().await;
+        let thread = find_thread(&mut workspace, request.project_id, request.thread_id)
+            .ok_or("Unknown thread")?;
+        thread.messages.push(ChatMessage {
+            id: Uuid::new_v4(),
+            role: ChatRole::User,
+            content: request.prompt,
+            attachments,
+            annotations,
+            created_at: AppleDate::now(),
+            source_event_id: None,
+            agent_id: None,
+        });
+        thread.updated_at = AppleDate::now();
+    }
+    state.save().await;
+    Ok(())
 }
 
 pub async fn update_agents(

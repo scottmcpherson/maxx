@@ -1503,6 +1503,44 @@ button.git-environment-row:disabled:hover { background: transparent; }
 }
 .composer-meta span { display: inline-flex; align-items: center; gap: 5px; }
 .composer-context { margin-left: auto; }
+.queued-messages { display: flex; flex-direction: column; gap: 5px; }
+.queued-message {
+  min-height: 40px; padding: 6px 7px 6px 9px;
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid rgba(255,255,255,.075); border-radius: 9px;
+  background: #1d1d1d; color: var(--text-secondary);
+}
+.queued-message-position {
+  width: 19px; height: 19px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border: 1px solid rgba(255,255,255,.1); border-radius: 50%;
+  color: var(--text-faint); font: 10px/1 var(--mono);
+}
+.queued-message-copy {
+  min-width: 0; flex: 1;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.queued-message-copy strong { color: #b8b8b8; font-size: 10px; font-weight: 600; }
+.queued-message-copy > span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-secondary); font-size: 11.5px;
+}
+.queued-message-action {
+  height: 25px; padding: 0 9px; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg-card); color: #d0d0d0;
+  cursor: pointer; font: inherit; font-size: 11px; font-weight: 550;
+}
+.queued-message-action:hover { border-color: var(--border-strong); background: var(--bg-hover); color: #fff; }
+.queued-message-action:disabled { opacity: .45; cursor: default; }
+.queued-message-remove {
+  width: 23px; height: 23px; padding: 0; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-faint); cursor: pointer;
+}
+.queued-message-remove:hover { background: var(--bg-hover); color: var(--text); }
+.queued-message-remove:disabled { opacity: .35; cursor: default; }
 .error-banner { padding: 8px 11px; border-radius: 7px; background: rgba(229,114,111,.09); color: var(--red); font-size: 11.5px; user-select: text; }
 
 .runtime-picker { position: relative; min-width: 0; }
@@ -2095,7 +2133,7 @@ button.git-environment-row:disabled:hover { background: transparent; }
 /* Bottom padding matches the main composer's offset from the pane bottom:
    composer-zone 10px + 7px gap + 15px composer-meta row, so both composer
    boxes bottom-align across the split. */
-.side-thread-composer { flex: 0 0 auto; padding: 8px 12px 32px; }
+.side-thread-composer { flex: 0 0 auto; padding: 8px 12px 32px; display: flex; flex-direction: column; gap: 7px; }
 
 /* ---- Shared Chromium browser pane ---- */
 .browser-shell {

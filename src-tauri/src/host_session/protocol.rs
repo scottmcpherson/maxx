@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_NAME: &str = "maxx-environment";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -72,8 +72,8 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "update_thread"
         | "upload_media"
         | "authorize_image_previews" => Some(Capability::WorkspaceWrite),
-        "send_prompt" | "start_side_thread" | "send_agent_prompt" | "cancel_turn"
-        | "resolve_request" => Some(Capability::AgentRun),
+        "send_prompt" | "steer_prompt" | "start_side_thread" | "send_agent_prompt"
+        | "cancel_turn" | "resolve_request" => Some(Capability::AgentRun),
         "terminal_support" | "terminal_start" | "terminal_status" | "terminal_input"
         | "terminal_resize" | "terminal_read" | "terminal_stop" => {
             Some(Capability::TerminalControl)
@@ -118,6 +118,10 @@ mod tests {
         assert_eq!(
             required_capability("browser_ui_navigate"),
             Some(Capability::BrowserControl)
+        );
+        assert_eq!(
+            required_capability("steer_prompt"),
+            Some(Capability::AgentRun)
         );
         assert_eq!(required_capability("host_connect"), None);
         assert_eq!(

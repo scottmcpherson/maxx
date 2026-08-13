@@ -9,6 +9,7 @@ import { Icons } from "./Icons";
 import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
 import { MentionMenu, useMentionMenu } from "./MentionMenu";
 import { MentionTextarea } from "./MentionTextarea";
+import { QueuedMessages } from "./QueuedMessages";
 import { ThreadTimeline, buildRows } from "./ThreadView";
 
 /**
@@ -29,7 +30,11 @@ export function SideThreadPanel({
 }) {
   const workspace = useAppStore((state) => state.workspace);
   const activeTurns = useAppStore((state) => state.activeTurnByThread);
+  const queuedMessagesByThread = useAppStore((state) => state.queuedMessagesByThread);
+  const sendingMessageByThread = useAppStore((state) => state.sendingMessageByThread);
   const sendAgentPrompt = useAppStore((state) => state.sendAgentPrompt);
+  const retryQueuedMessage = useAppStore((state) => state.retryQueuedMessage);
+  const removeQueuedMessage = useAppStore((state) => state.removeQueuedMessage);
   const cancelActiveTurn = useAppStore((state) => state.cancelActiveTurn);
   const resolveRequest = useAppStore((state) => state.resolveRequest);
 
@@ -41,6 +46,8 @@ export function SideThreadPanel({
   );
   const rows = useMemo(() => buildRows(thread, timeline), [thread, timeline]);
   const isRunning = !!activeTurns[thread.id];
+  const queuedMessages = queuedMessagesByThread[thread.id] ?? [];
+  const queueActionPending = !!sendingMessageByThread[thread.id];
   const currentAgent = thread.agentID ? agentsByID.get(thread.agentID) : undefined;
 
   // Attribute turns to agents: completed turns via the assistant message's
@@ -82,6 +89,7 @@ export function SideThreadPanel({
   }, [thread]);
 
   const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
   const images = useImageAttachments();
@@ -100,15 +108,18 @@ export function SideThreadPanel({
     return record && record.status !== "pending" ? record.status : null;
   };
 
-  const submit = () => {
-    if ((!draft.trim() && images.paths.length === 0) || isRunning || targetAgents.length === 0) return;
-    void sendAgentPrompt(
+  const submit = async () => {
+    if ((!draft.trim() && images.paths.length === 0) || submitting || targetAgents.length === 0) return;
+    setSubmitting(true);
+    const sent = await sendAgentPrompt(
       project.id,
       thread.id,
       targetAgents.map((agent) => agent.id),
       draft.trim(),
       images.paths,
     );
+    setSubmitting(false);
+    if (!sent) return;
     setDraft("");
     images.clear();
     mentionMenu.dismiss();
@@ -156,6 +167,15 @@ export function SideThreadPanel({
       />
 
       <footer className="side-thread-composer">
+        <QueuedMessages
+          messages={queuedMessages}
+          isRunning={isRunning}
+          canSteer={false}
+          actionPending={queueActionPending}
+          onSteer={() => {}}
+          onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
+          onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
+        />
         <div className="composer">
           <MentionMenu menu={mentionMenu} />
           <PendingImageStrip paths={images.paths} onRemove={images.remove} />
@@ -178,7 +198,7 @@ export function SideThreadPanel({
               if (mentionMenu.onKeyDown(event)) return;
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                submit();
+                void submit();
               }
             }}
           />
@@ -186,21 +206,31 @@ export function SideThreadPanel({
             {/* No single "replying to" addressee: any mix of agents can be
                 mentioned in one reply, and the composer already shows them as
                 pills. Unmentioned replies go to whoever spoke last. */}
-            <AttachImagesButton disabled={isRunning} onChoose={() => void images.choose()} />
+            <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
             {isRunning ? (
-              <button
-                className="send-button stop"
-                title="Stop generation"
-                onClick={() => void cancelActiveTurn(thread.id)}
-              >
-                <Icons.stop size={14} />
-              </button>
+              <div className="composer-actions">
+                <button
+                  className="send-button stop"
+                  title="Stop generation"
+                  onClick={() => void cancelActiveTurn(thread.id)}
+                >
+                  <Icons.stop size={14} />
+                </button>
+                <button
+                  className="send-button"
+                  title={submitting ? "Queueing reply" : "Queue reply"}
+                  disabled={submitting || (!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
+                  onClick={() => void submit()}
+                >
+                  <Icons.arrowUp size={16} />
+                </button>
+              </div>
             ) : (
               <button
                 className="send-button"
                 title="Send reply"
                 disabled={(!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
-                onClick={submit}
+                onClick={() => void submit()}
               >
                 <Icons.arrowUp size={16} />
               </button>

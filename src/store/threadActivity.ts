@@ -123,7 +123,9 @@ export interface ActivityStoreSlice {
 
 /**
  * Pure reducer for live runtime events. Shipped path used by appStore —
- * appends events, mirrors interaction records, clears on terminal.
+ * appends events and mirrors interaction records. Busy state remains until the
+ * backend's turn-finished event, which is emitted only after the final
+ * assistant message and workspace snapshot have been persisted.
  */
 export function reduceRuntimeEvent(
   state: ActivityStoreSlice,
@@ -132,13 +134,10 @@ export function reduceRuntimeEvent(
   if (!state.workspace) return state;
 
   let activeTurnByThread = state.activeTurnByThread;
-  if (envelope.event.kind === EventKind.turnTerminal) {
-    activeTurnByThread = clearFinishedTurn(
-      activeTurnByThread,
-      envelope.threadID,
-      envelope.event.turnID,
-    );
-  } else if (activeTurnByThread[envelope.threadID] !== envelope.event.turnID) {
+  if (
+    envelope.event.kind !== EventKind.turnTerminal
+    && activeTurnByThread[envelope.threadID] !== envelope.event.turnID
+  ) {
     // A live event proves its turn is running. Backend-initiated turns (the
     // follow-up responders of a multi-mention chain) never pass through
     // sendPrompt, so this is how the stop button learns about them.

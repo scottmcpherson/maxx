@@ -5,7 +5,7 @@
 
 use super::{
     acp::AcpEngine, claude::ClaudeEngine, codex::CodexEngine, opencode::OpenCodeEngine,
-    pi::PiEngine, DraftReceiver, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+    pi::PiEngine, DraftReceiver, ProviderEngine, ReconciledSessionTurn, SteerRequest, TurnRequest,
 };
 use maxx_core::contract::*;
 use maxx_core::normalize::ProviderEventDraft;
@@ -285,6 +285,21 @@ impl Runtime {
         if let Some(engine) = self.engines.get(&provider) {
             engine.cancel(turn_id).await;
         }
+    }
+
+    pub async fn steer(&self, request: SteerRequest) -> Result<(), String> {
+        let provider = self
+            .live_turns
+            .lock()
+            .await
+            .get(&request.turn_id)
+            .map(|turn| turn.provider)
+            .ok_or("The turn is no longer active.")?;
+        let engine = self
+            .engines
+            .get(&provider)
+            .ok_or_else(|| format!("No adapter for provider {}", provider.raw_value()))?;
+        engine.steer(request).await
     }
 
     pub async fn resolve(

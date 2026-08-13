@@ -5,7 +5,8 @@
 
 use super::process::{JsonLineProcess, LaunchSpec};
 use super::{
-    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
+    yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, SteerRequest,
+    TurnRequest,
 };
 use async_trait::async_trait;
 use maxx_core::contract::*;
@@ -38,6 +39,7 @@ struct SessionState {
     normalizer: NormalizerState,
     session_id: Option<String>,
     current_turn: Option<(Uuid, DraftSender)>,
+    steer_ready_turn: Option<Uuid>,
     pending_commands: HashMap<String, oneshot::Sender<Result<Value, String>>>,
     browser_extension: Option<PiBrowserExtension>,
     interactions: HashMap<Uuid, PendingInteraction>,
@@ -81,6 +83,38 @@ impl ProviderEngine for PiEngine {
                 yield_error(&sink, error).await;
             }
         });
+    }
+
+    async fn steer(&self, request: SteerRequest) -> Result<(), String> {
+        let mut ready = None;
+        for _ in 0..80 {
+            let key = self
+                .session_by_turn
+                .lock()
+                .await
+                .get(&request.turn_id)
+                .copied();
+            if let Some(key) = key {
+                if let Some(session) = self.sessions.lock().await.get(&key).cloned() {
+                    let state = session.state.lock().await;
+                    if state.current_turn.as_ref().map(|(id, _)| *id) == Some(request.turn_id)
+                        && state.steer_ready_turn == Some(request.turn_id)
+                    {
+                        ready = Some(session.clone());
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let session = ready.ok_or("Pi is not ready to accept steering.")?;
+        command(
+            &session,
+            "steer",
+            pi_message_fields(&request.prompt, &request.attachments)?,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn cancel(&self, turn_id: Uuid) {
@@ -502,6 +536,7 @@ async fn begin(
             return Err("Pi already has an active turn in this session.".into());
         }
         state.current_turn = Some((request.turn_id, sink.clone()));
+        state.steer_ready_turn = None;
     }
 
     let had_session = session.state.lock().await.session_id.is_some();
@@ -537,17 +572,33 @@ async fn begin(
     yield_draft(&sink, ProviderEventDraft::SessionUpdated(session_id)).await;
     yield_draft(&sink, ProviderEventDraft::Status("Pi is working…".into())).await;
 
+    command(
+        session,
+        "prompt",
+        pi_message_fields(&request.prompt, &request.attachments)?,
+    )
+    .await?;
+    let mut state = session.state.lock().await;
+    if state.current_turn.as_ref().map(|(id, _)| *id) == Some(request.turn_id) {
+        state.steer_ready_turn = Some(request.turn_id);
+    }
+    Ok(())
+}
+
+fn pi_message_fields(
+    prompt: &str,
+    attachments: &[maxx_core::persist::ChatImageAttachment],
+) -> Result<Map<String, Value>, String> {
     let mut fields = Map::new();
-    fields.insert("message".into(), Value::String(request.prompt.clone()));
-    if !request.attachments.is_empty() {
-        let images = crate::attachments::encode_images(&request.attachments)?
+    fields.insert("message".into(), Value::String(prompt.to_string()));
+    if !attachments.is_empty() {
+        let images = crate::attachments::encode_images(attachments)?
             .into_iter()
             .map(|image| json!({"type": "image", "data": image.data, "mimeType": image.mime_type}))
             .collect();
         fields.insert("images".into(), Value::Array(images));
     }
-    command(session, "prompt", fields).await?;
-    Ok(())
+    Ok(fields)
 }
 
 async fn ensure_process(session: &Arc<PiSession>, request: &TurnRequest) -> Result<(), String> {
@@ -848,6 +899,13 @@ async fn force_cancel(session: &Arc<PiSession>, turn_id: Uuid) {
 mod browser_mcp_tests {
     use super::*;
     use crate::browser_runtime::BrowserProviderAccess;
+
+    #[test]
+    fn steering_uses_pi_message_fields() {
+        let fields = pi_message_fields("change course", &[]).unwrap();
+        assert_eq!(fields.get("message"), Some(&json!("change course")));
+        assert!(!fields.contains_key("images"));
+    }
 
     #[test]
     fn extension_is_private_contains_no_secret_and_is_deleted_on_drop() {

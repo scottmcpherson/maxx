@@ -456,6 +456,21 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             )
             .await,
         ),
+        "steer_prompt" => value(
+            crate::commands::steer_prompt(
+                state.app.clone(),
+                crate::commands::SteerPromptCommand {
+                    project_id: required(&params, "projectId")?,
+                    thread_id: required(&params, "threadId")?,
+                    turn_id: required(&params, "turnId")?,
+                    prompt: required(&params, "prompt")?,
+                    image_paths: optional(&params, "imagePaths")?.unwrap_or_default(),
+                    attachment_ids: optional(&params, "attachmentIds")?.unwrap_or_default(),
+                    annotations: optional(&params, "annotations")?.unwrap_or_default(),
+                },
+            )
+            .await,
+        ),
         "start_side_thread" => value(
             crate::commands::start_side_thread(
                 state.app.clone(),

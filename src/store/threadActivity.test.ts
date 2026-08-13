@@ -350,7 +350,7 @@ describe("reduceRuntimeEvent (shipped store path)", () => {
     expect(second.workspace!.projects[0].threads[0].runtimeEvents).toHaveLength(1);
   });
 
-  it("clears busy on turn.terminal and leaves non-matching turns alone", () => {
+  it("keeps busy through turn.terminal until the persisted finish event arrives", () => {
     const reduced = reduceRuntimeEvent(
       {
         workspace: workspaceWithThread(),
@@ -367,7 +367,10 @@ describe("reduceRuntimeEvent (shipped store path)", () => {
         }),
       },
     );
-    expect(reduced.activeTurnByThread).toEqual({ "thread-2": "turn-2" });
+    expect(reduced.activeTurnByThread).toEqual({
+      "thread-1": "turn-1",
+      "thread-2": "turn-2",
+    });
   });
 
   it("marks a thread busy from a live event for an unknown turn", () => {
