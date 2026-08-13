@@ -15,6 +15,7 @@ import type {
 import { isMenuActionID, type MenuActionID, type MenuActionPayload } from "./menu";
 import type { UpdateStatus } from "./updates";
 import type { VoiceCredentialStatus, VoiceEvent, VoiceSettings } from "./voice/types";
+import type { GitRepositoryStatus } from "./git";
 import {
   ActiveTurnRecord,
   AgentDefinition,
@@ -76,6 +77,12 @@ export const ipc = {
     invokeOnHost<WorkspaceDocument>(hostId, "workspace_snapshot"),
   activeTurns: (hostId?: string | null) =>
     invokeOnHost<ActiveTurnRecord[]>(hostId, "active_turns"),
+  gitStatus: (projectId: string, hostId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus | null>(hostId, "git_status", { projectId }),
+  gitCommit: (projectId: string, message: string, hostId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus>(hostId, "git_commit", { projectId, message }),
+  gitPush: (projectId: string, hostId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus>(hostId, "git_push", { projectId }),
   addProject: (folderPath: string, hostId?: string | null) =>
     invokeOnHost<ChatProject>(hostId, "add_project", { folderPath }),
   removeProject: (projectId: string, hostId?: string | null) =>

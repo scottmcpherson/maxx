@@ -33,6 +33,7 @@ import { MessageMedia } from "./MessageMedia";
 import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
 import { RuntimePicker } from "./RuntimePicker";
 import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
+import { GitEnvironment } from "./GitEnvironment";
 import { SideThreadPanel } from "./SideThreadPanel";
 import { SideThreadResizer } from "./SideThreadResizer";
 import { TerminalView, type TerminalViewHandle } from "./TerminalView";
@@ -343,6 +344,7 @@ export function ThreadView({
             <Icons.chevronDown size={11} />
           </button>
           <div className="thread-header-side end">
+            <GitEnvironment projectID={project.id} hostID={selectedHostID} />
             <SummaryToggle project={project} thread={thread} fits={summarySlotFree} />
             {terminalModeEnabled && (
               <button

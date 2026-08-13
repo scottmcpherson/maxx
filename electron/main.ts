@@ -50,7 +50,8 @@ let tray: Tray | null = null;
 let quitting = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
-  "workspace_snapshot", "active_turns", "add_project", "remove_project", "add_thread",
+  "workspace_snapshot", "active_turns", "git_status", "git_commit", "git_push",
+  "add_project", "remove_project", "add_thread",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
   "start_side_thread", "send_agent_prompt", "cancel_turn", "resolve_request", "provider_health",
@@ -246,6 +247,37 @@ async function runAppSmoke(): Promise<void> {
     title: "Packaged runtime acceptance",
   }, 5_000) as Record<string, JsonValue>;
   const threadId = String(thread.id ?? "");
+  const gitStatus = await runtime!.request("git_status", { projectId }, 15_000) as Record<string, JsonValue> | null;
+  if (!gitStatus || typeof gitStatus.repositoryRoot !== "string" || !Array.isArray(gitStatus.files)) {
+    throw new Error("packaged runtime did not expose Git status for its repository project");
+  }
+  const reloaded = new Promise<void>((resolve) => mainWindow!.webContents.once("did-finish-load", () => resolve()));
+  mainWindow!.webContents.reload();
+  await reloaded;
+  const gitDeadline = Date.now() + 15_000;
+  let gitUI = { trigger: false, changes: false, action: false, counts: "" };
+  while (Date.now() < gitDeadline) {
+    gitUI = await mainWindow!.webContents.executeJavaScript(`(() => {
+      const trigger = document.querySelector('[aria-label="Environment and Git changes"]');
+      if (trigger && trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+      const text = document.querySelector('.git-environment-popover')?.textContent ?? '';
+      return {
+        trigger: Boolean(trigger),
+        changes: text.includes('Changes'),
+        action: text.includes('Commit or push'),
+        counts: document.querySelector('.git-change-counts')?.textContent ?? ''
+      };
+    })()`) as typeof gitUI;
+    if (gitUI.trigger && gitUI.changes && gitUI.action) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!gitUI.trigger || !gitUI.changes || !gitUI.action) {
+    throw new Error(`packaged Git environment UI did not become ready: ${JSON.stringify(gitUI)}`);
+  }
+  const expectedCounts = `+${String(gitStatus.additions)}-${String(gitStatus.deletions)}`;
+  if (gitUI.counts.replaceAll(/\s/g, "") !== expectedCounts) {
+    throw new Error(`packaged Git counts diverged from the runtime: ${JSON.stringify({ gitUI, expectedCounts })}`);
+  }
   const browserTabId = await runtime!.request("browser_ui_open_tab", { threadId, url: null }, 5_000) as string;
   // Human input interrupts the native engine through a sidecar host request.
   // A subsequent command proves that the sidecar input reader remains free to
@@ -290,7 +322,7 @@ async function runAppSmoke(): Promise<void> {
   // catches regressions in the real sidecar transport, not only request bursts.
   await new Promise((resolve) => setTimeout(resolve, 500));
   await runtime!.request("workspace_snapshot", {}, 5_000);
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, runtimeAck: true, annotationPersisted, isolatedWorkspace: true })}\n`);
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, runtimeAck: true, annotationPersisted, isolatedWorkspace: true, gitUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {

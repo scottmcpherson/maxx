@@ -163,6 +163,16 @@ export const Icons = {
   branch: (props: IconProps) => (
     <IconBase {...props}><circle cx="7" cy="5" r="2" /><circle cx="17" cy="7" r="2" /><circle cx="7" cy="19" r="2" /><path d="M7 7v10m2-6h3a5 5 0 0 0 5-5" /></IconBase>
   ),
+  environment: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M4 7h10M18 7h2M4 17h2M10 17h10" />
+      <circle cx="16" cy="7" r="2" />
+      <circle cx="8" cy="17" r="2" />
+    </IconBase>
+  ),
+  commit: (props: IconProps) => (
+    <IconBase {...props}><path d="M3 12h6M15 12h6" /><circle cx="12" cy="12" r="3" /></IconBase>
+  ),
   terminal: (props: IconProps) => (
     <IconBase {...props}><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="m7 9 3 3-3 3m6 0h4" /></IconBase>
   ),

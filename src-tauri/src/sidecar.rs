@@ -285,6 +285,20 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
         }
         "workspace_snapshot" => value(crate::commands::workspace_snapshot(state.app.clone()).await),
         "active_turns" => value(crate::commands::active_turns(state.app.clone()).await),
+        "git_status" => {
+            value(crate::git::git_status(state.app.clone(), required(&params, "projectId")?).await)
+        }
+        "git_commit" => value(
+            crate::git::git_commit(
+                state.app.clone(),
+                required(&params, "projectId")?,
+                required(&params, "message")?,
+            )
+            .await,
+        ),
+        "git_push" => {
+            value(crate::git::git_push(state.app.clone(), required(&params, "projectId")?).await)
+        }
         "add_project" => value(
             crate::commands::add_project(state.app.clone(), required(&params, "folderPath")?).await,
         ),

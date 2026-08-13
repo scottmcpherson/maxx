@@ -243,6 +243,27 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
     case "active_turns":
       result = [];
       break;
+    case "git_status":
+      result = {
+        repositoryRoot: "/Users/scott/Developer/maxx-tauri",
+        branch: "main",
+        detached: false,
+        head: "287770b",
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        additions: 451,
+        deletions: 63,
+        files: [
+          { path: "src/components/GitEnvironment.tsx", status: " M", staged: false, unstaged: true, untracked: false },
+          { path: "src/git.ts", status: "??", staged: false, unstaged: false, untracked: true },
+        ],
+        remotes: ["origin"],
+      };
+      break;
+    case "git_commit":
+    case "git_push":
+      throw new Error("Git mutations require the desktop app");
     case "host_status":
       result = hostStatus;
       break;

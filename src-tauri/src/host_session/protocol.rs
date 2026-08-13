@@ -53,6 +53,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
     match method {
         "workspace_snapshot"
         | "active_turns"
+        | "git_status"
         | "home_folder"
         | "list_folder"
         | "read_media"
@@ -61,6 +62,8 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "list_provider_models"
         | "resolve_media_source" => Some(Capability::WorkspaceRead),
         "create_folder"
+        | "git_commit"
+        | "git_push"
         | "add_project"
         | "remove_project"
         | "add_thread"
@@ -120,6 +123,18 @@ mod tests {
         assert_eq!(
             required_capability("terminal_input"),
             Some(Capability::TerminalControl)
+        );
+        assert_eq!(
+            required_capability("git_status"),
+            Some(Capability::WorkspaceRead)
+        );
+        assert_eq!(
+            required_capability("git_commit"),
+            Some(Capability::WorkspaceWrite)
+        );
+        assert_eq!(
+            required_capability("git_push"),
+            Some(Capability::WorkspaceWrite)
         );
         assert_eq!(required_capability("future_unreviewed_method"), None);
     }

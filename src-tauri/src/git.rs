@@ -1,0 +1,548 @@
+//! Project-scoped Git status and mutation commands.
+//!
+//! The renderer supplies only a project id. The trusted workspace document is
+//! authoritative for the working directory, and every Git invocation uses an
+//! argument vector rather than a shell.
+
+use crate::state::AppState;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use uuid::Uuid;
+
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitChangedFile {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositoryStatus {
+    pub repository_root: String,
+    pub branch: String,
+    pub detached: bool,
+    pub head: String,
+    pub upstream: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub files: Vec<GitChangedFile>,
+    pub remotes: Vec<String>,
+}
+
+impl GitRepositoryStatus {
+    pub fn has_changes(&self) -> bool {
+        !self.files.is_empty()
+    }
+}
+
+async fn project_folder(state: &AppState, project_id: Uuid) -> Result<PathBuf, String> {
+    let folder = state
+        .workspace
+        .lock()
+        .await
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .map(|project| PathBuf::from(&project.folder_path))
+        .ok_or_else(|| "Unknown project".to_string())?;
+    folder
+        .canonicalize()
+        .map_err(|_| "The project folder is no longer available".to_string())
+}
+
+async fn git_output(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .kill_on_drop(true);
+    tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "git {} timed out",
+                args.first().copied().unwrap_or("command")
+            )
+        })?
+        .map_err(|error| format!("Could not run Git: {error}"))
+}
+
+fn output_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
+}
+
+fn safe_command_detail(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 600;
+    let flattened = String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut redacted = flattened;
+    let mut search_from = 0;
+    while let Some(offset) = redacted[search_from..].find("://") {
+        let authority_start = search_from + offset + 3;
+        let authority_end = redacted[authority_start..]
+            .find(['/', '\'', '"'])
+            .map(|offset| authority_start + offset)
+            .unwrap_or(redacted.len());
+        let Some(at_offset) = redacted[authority_start..authority_end].find('@') else {
+            search_from = authority_end.min(redacted.len());
+            continue;
+        };
+        let at = authority_start + at_offset;
+        redacted.replace_range(authority_start..at, "[redacted]");
+        search_from = authority_start + "[redacted]@".len();
+    }
+    let mut characters = redacted.chars();
+    let bounded = characters.by_ref().take(MAX_CHARS).collect::<String>();
+    if characters.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
+fn command_error(action: &str, output: &Output) -> String {
+    let stderr = safe_command_detail(&output.stderr);
+    let stdout = safe_command_detail(&output.stdout);
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    if detail.is_empty() {
+        format!("Git could not {action}")
+    } else {
+        format!("Git could not {action}: {detail}")
+    }
+}
+
+async fn repository_root(folder: &Path) -> Result<Option<PathBuf>, String> {
+    let inside = git_output(
+        folder,
+        &["rev-parse", "--is-inside-work-tree"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    if !inside.status.success() || output_text(&inside.stdout) != "true" {
+        return Ok(None);
+    }
+    let root = git_output(folder, &["rev-parse", "--show-toplevel"], STATUS_TIMEOUT).await?;
+    if !root.status.success() {
+        return Err(command_error("locate the repository", &root));
+    }
+    let path = PathBuf::from(output_text(&root.stdout));
+    path.canonicalize()
+        .map(Some)
+        .map_err(|_| "The Git repository root is no longer available".to_string())
+}
+
+fn parse_changed_files(bytes: &[u8]) -> Vec<GitChangedFile> {
+    let mut fields = bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut files = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.len() < 3 {
+            continue;
+        }
+        let x = field[0] as char;
+        let y = field[1] as char;
+        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        let renamed_or_copied = matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C');
+        if renamed_or_copied {
+            // porcelain v1 -z writes the destination first and the source as
+            // the following NUL-delimited field. The UI presents the current
+            // path, so consume but do not display the source.
+            let _ = fields.next();
+        }
+        let untracked = x == '?' && y == '?';
+        files.push(GitChangedFile {
+            path,
+            status: format!("{x}{y}"),
+            staged: !untracked && x != ' ',
+            unstaged: !untracked && y != ' ',
+            untracked,
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files
+}
+
+fn add_numstat(bytes: &[u8], additions: &mut u64, deletions: &mut u64) {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let mut columns = line.split(|byte| *byte == b'\t');
+        let Some(added) = columns.next() else {
+            continue;
+        };
+        let Some(deleted) = columns.next() else {
+            continue;
+        };
+        *additions += output_text(added).parse::<u64>().unwrap_or(0);
+        *deletions += output_text(deleted).parse::<u64>().unwrap_or(0);
+    }
+}
+
+async fn untracked_text_lines(path: &Path) -> u64 {
+    let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return 1;
+    }
+    if !metadata.is_file() || metadata.len() == 0 {
+        return 0;
+    }
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return 0;
+    };
+    let mut buffer = [0_u8; 32 * 1024];
+    let mut inspected = 0_usize;
+    let mut lines = 0_u64;
+    let mut last = 0_u8;
+    loop {
+        let Ok(read) = file.read(&mut buffer).await else {
+            return 0;
+        };
+        if read == 0 {
+            break;
+        }
+        let binary_end = (8_000_usize.saturating_sub(inspected)).min(read);
+        if buffer[..binary_end].contains(&0) {
+            return 0;
+        }
+        inspected += binary_end;
+        lines += buffer[..read].iter().filter(|byte| **byte == b'\n').count() as u64;
+        last = buffer[read - 1];
+    }
+    lines + u64::from(last != b'\n')
+}
+
+async fn status_for_root(root: &Path) -> Result<GitRepositoryStatus, String> {
+    let porcelain = git_output(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    if !porcelain.status.success() {
+        return Err(command_error("read repository changes", &porcelain));
+    }
+    let files = parse_changed_files(&porcelain.stdout);
+
+    let head_output = git_output(root, &["rev-parse", "--short", "HEAD"], STATUS_TIMEOUT).await?;
+    let head = if head_output.status.success() {
+        output_text(&head_output.stdout)
+    } else {
+        String::new()
+    };
+    let branch_output = git_output(
+        root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    let detached = !branch_output.status.success();
+    let branch = if detached {
+        if head.is_empty() {
+            "No commits".to_string()
+        } else {
+            format!("Detached at {head}")
+        }
+    } else {
+        output_text(&branch_output.stdout)
+    };
+
+    let upstream_output = git_output(
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    let upstream = upstream_output
+        .status
+        .success()
+        .then(|| output_text(&upstream_output.stdout));
+    let (ahead, behind) = if upstream.is_some() && !head.is_empty() {
+        let counts = git_output(
+            root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            STATUS_TIMEOUT,
+        )
+        .await?;
+        if counts.status.success() {
+            let count_text = output_text(&counts.stdout);
+            let mut values = count_text
+                .split_whitespace()
+                .filter_map(|value| value.parse::<u64>().ok());
+            (values.next().unwrap_or(0), values.next().unwrap_or(0))
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    let base = if head.is_empty() { EMPTY_TREE } else { "HEAD" };
+    let tracked = git_output(root, &["diff", "--numstat", base, "--"], STATUS_TIMEOUT).await?;
+    if !tracked.status.success() {
+        return Err(command_error("count repository changes", &tracked));
+    }
+    let mut additions = 0;
+    let mut deletions = 0;
+    add_numstat(&tracked.stdout, &mut additions, &mut deletions);
+    for file in files.iter().filter(|file| file.untracked) {
+        additions += untracked_text_lines(&root.join(&file.path)).await;
+    }
+
+    let remote_output = git_output(root, &["remote"], STATUS_TIMEOUT).await?;
+    let remotes = if remote_output.status.success() {
+        output_text(&remote_output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(GitRepositoryStatus {
+        repository_root: root.to_string_lossy().into_owned(),
+        branch,
+        detached,
+        head,
+        upstream,
+        ahead,
+        behind,
+        additions,
+        deletions,
+        files,
+        remotes,
+    })
+}
+
+pub async fn git_status(
+    state: Arc<AppState>,
+    project_id: Uuid,
+) -> Result<Option<GitRepositoryStatus>, String> {
+    // A removed/moved project can remain visible in a restored workspace long
+    // enough for one poll. Treat it like a non-repository instead of surfacing
+    // a repeating IPC error from the title-bar status refresh.
+    let Ok(folder) = project_folder(&state, project_id).await else {
+        return Ok(None);
+    };
+    let Some(root) = repository_root(&folder).await? else {
+        return Ok(None);
+    };
+    status_for_root(&root).await.map(Some)
+}
+
+pub async fn git_commit(
+    state: Arc<AppState>,
+    project_id: Uuid,
+    message: String,
+) -> Result<GitRepositoryStatus, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Enter a commit message".into());
+    }
+    if message.len() > 10_000 {
+        return Err("The commit message is too long".into());
+    }
+    let folder = project_folder(&state, project_id).await?;
+    let root = repository_root(&folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    commit_root(&root, message).await
+}
+
+async fn commit_root(root: &Path, message: &str) -> Result<GitRepositoryStatus, String> {
+    let before = status_for_root(root).await?;
+    if !before.has_changes() {
+        return Err("There are no changes to commit".into());
+    }
+    let add = git_output(root, &["add", "--all", "--", "."], MUTATION_TIMEOUT).await?;
+    if !add.status.success() {
+        return Err(command_error("stage the project changes", &add));
+    }
+    let commit = git_output(root, &["commit", "-m", message], MUTATION_TIMEOUT).await?;
+    if !commit.status.success() {
+        return Err(command_error("create the commit", &commit));
+    }
+    status_for_root(root).await
+}
+
+pub async fn git_push(
+    state: Arc<AppState>,
+    project_id: Uuid,
+) -> Result<GitRepositoryStatus, String> {
+    let folder = project_folder(&state, project_id).await?;
+    let root = repository_root(&folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    push_root(&root).await
+}
+
+async fn push_root(root: &Path) -> Result<GitRepositoryStatus, String> {
+    let before = status_for_root(root).await?;
+    if before.detached {
+        return Err("Check out a branch before pushing".into());
+    }
+    if before.head.is_empty() {
+        return Err("Create a commit before pushing".into());
+    }
+    let push = if before.upstream.is_some() {
+        git_output(root, &["push"], MUTATION_TIMEOUT).await?
+    } else {
+        let remote = if before.remotes.iter().any(|remote| remote == "origin") {
+            "origin"
+        } else if before.remotes.len() == 1 {
+            &before.remotes[0]
+        } else if before.remotes.is_empty() {
+            return Err("Add a Git remote before pushing".into());
+        } else {
+            return Err("Set an upstream branch before pushing".into());
+        };
+        git_output(
+            root,
+            &["push", "--set-upstream", remote, &before.branch],
+            MUTATION_TIMEOUT,
+        )
+        .await?
+    };
+    if !push.status.success() {
+        return Err(command_error("push the branch", &push));
+    }
+    status_for_root(root).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn fixture(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("maxx-git-{name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output.stderr));
+    }
+
+    fn initialized_repo(name: &str) -> PathBuf {
+        let path = fixture(name);
+        git(&path, &["init", "-b", "main"]);
+        git(&path, &["config", "user.name", "Maxx Test"]);
+        git(&path, &["config", "user.email", "maxx@example.invalid"]);
+        fs::write(path.join("tracked.txt"), "one\ntwo\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "Initial"]);
+        path
+    }
+
+    #[tokio::test]
+    async fn status_counts_tracked_and_untracked_text() {
+        let path = initialized_repo("status");
+        fs::write(path.join("tracked.txt"), "one\nchanged\nthree\n").unwrap();
+        fs::write(path.join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let status = status_for_root(&path).await.unwrap();
+        assert_eq!(status.branch, "main");
+        assert_eq!(status.additions, 4);
+        assert_eq!(status.deletions, 1);
+        assert_eq!(status.files.len(), 2);
+        assert!(status
+            .files
+            .iter()
+            .any(|file| file.path == "new.txt" && file.untracked));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_uses_existing_or_new_upstream_without_force() {
+        let path = initialized_repo("push");
+        let remote = fixture("remote");
+        git(&remote, &["init", "--bare"]);
+        git(
+            &path,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let before = status_for_root(&path).await.unwrap();
+        assert!(before.upstream.is_none());
+
+        let after = push_root(&path).await.unwrap();
+        assert_eq!(after.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(after.ahead, 0);
+        fs::remove_dir_all(path).unwrap();
+        fs::remove_dir_all(remote).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_stages_tracked_and_untracked_changes() {
+        let path = initialized_repo("commit");
+        fs::write(path.join("tracked.txt"), "updated\n").unwrap();
+        fs::write(path.join("new.txt"), "new\n").unwrap();
+
+        let after = commit_root(&path, "Save every project change")
+            .await
+            .unwrap();
+        assert!(after.files.is_empty());
+        let subject = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        assert_eq!(output_text(&subject.stdout), "Save every project change");
+        assert!(path.join("new.txt").exists());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn command_details_are_bounded_flattened_and_redacted() {
+        let unsafe_detail = format!(
+            "fatal:\naccess https://user:secret@example.com/repo {}",
+            "x".repeat(700)
+        );
+        let safe = safe_command_detail(unsafe_detail.as_bytes());
+        assert!(safe.contains("https://[redacted]@example.com/repo"));
+        assert!(!safe.contains("secret"));
+        assert!(!safe.chars().any(char::is_control));
+        assert!(safe.chars().count() <= 601);
+        assert!(safe.ends_with('…'));
+    }
+}

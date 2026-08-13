@@ -3,6 +3,7 @@ pub mod browser_runtime;
 pub mod commands;
 pub mod engine;
 pub mod events;
+pub mod git;
 pub mod host;
 pub mod host_session;
 pub mod media;
