@@ -34,7 +34,6 @@ type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connection
 
 export function SettingsPanel() {
   const workspace = useAppStore((state) => state.workspace);
-  const selectedProjectID = useAppStore((state) => state.selectedProjectID);
   const saveProfiles = useAppStore((state) => state.saveProfiles);
   const saveTitleGenerationRuntime = useAppStore((state) => state.saveTitleGenerationRuntime);
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
@@ -174,9 +173,6 @@ export function SettingsPanel() {
     || shortcut.label.toLowerCase().includes(normalized)
     || shortcut.description.toLowerCase().includes(normalized),
   );
-  const modelCatalogWorkingDirectory = workspace?.projects.find(
-    (project) => project.id === selectedProjectID,
-  )?.folderPath ?? workspace?.projects[0]?.folderPath;
   const titleGenerationRuntime = workspace?.titleGenerationRuntime ?? null;
   const titleRuntimePickerValue = titleGenerationRuntime ?? defaultRuntime;
 
@@ -211,7 +207,6 @@ export function SettingsPanel() {
                     effort={defaultRuntime.effort}
                     speed={defaultRuntime.speed}
                     profiles={workspace?.providerProfiles ?? []}
-                    workingDirectory={modelCatalogWorkingDirectory}
                     placement="bottom"
                     triggerShowsProvider
                     onChange={setDefaultRuntime}
@@ -233,7 +228,6 @@ export function SettingsPanel() {
                     effort={titleRuntimePickerValue.effort}
                     speed={titleRuntimePickerValue.speed}
                     profiles={workspace?.providerProfiles ?? []}
-                    workingDirectory={modelCatalogWorkingDirectory}
                     placement="bottom"
                     triggerShowsProvider
                     inherited={!titleGenerationRuntime}
@@ -257,7 +251,6 @@ export function SettingsPanel() {
                     subtitle={subtitle(profile)}
                     expanded={expandedProfileID === profile.id}
                     pending={pendingProfileIDs.has(profile.id)}
-                    workingDirectory={modelCatalogWorkingDirectory}
                     onToggleExpanded={() => setExpandedProfileID((current) =>
                       current === profile.id ? null : profile.id)}
                     onToggleEnabled={(enabled) => void toggleEnabled(profile, enabled)}

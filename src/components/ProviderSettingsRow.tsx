@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   ProviderHealth,
   ProviderModelOption,
@@ -49,7 +49,7 @@ export function ProviderSettingsRow({
     setExecutablePath(profile.executablePath ?? "");
   }, [profile.executablePath]);
 
-  const loadModels = async () => {
+  const loadModels = useCallback(async () => {
     setModelsLoading(true);
     setModelsError(null);
     try {
@@ -70,13 +70,11 @@ export function ProviderSettingsRow({
     } finally {
       setModelsLoading(false);
     }
-  };
+  }, [profile.provider, profile.id, workingDirectory]);
 
   useEffect(() => {
     if (expanded) void loadModels();
-    // Profile saves invoke a reload after the backend persists the new path.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded]);
+  }, [expanded, loadModels]);
 
   const normalizedPath = executablePath.trim();
   const savedPath = profile.executablePath ?? "";

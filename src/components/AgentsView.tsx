@@ -385,7 +385,6 @@ function AgentEditor({
             effort={draft.effort}
             speed={draft.speed}
             profiles={workspace?.providerProfiles ?? []}
-            workingDirectory={workspace?.projects[0]?.folderPath}
             placement="bottom"
             triggerShowsProvider
             onChange={(next) =>

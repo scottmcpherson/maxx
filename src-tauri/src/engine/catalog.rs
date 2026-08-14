@@ -3,6 +3,7 @@
 use maxx_core::contract::ChatProvider;
 use maxx_core::persist::ProviderProfile;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -119,6 +120,11 @@ async fn discover_models(
     let configuration = super::launch::launch_configuration(profile)?;
     let executable = configuration.executable;
     let env = configuration.environment;
+    let working_directory = resolve_discovery_working_directory(working_directory)?;
+    let working_directory_text = working_directory
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let working_directory = working_directory_text.as_deref();
     match profile.provider {
         ChatProvider::Grok => discover_grok(&executable, &env, working_directory).await,
         ChatProvider::Claude => discover_claude(&executable, &env, working_directory).await,
@@ -127,6 +133,33 @@ async fn discover_models(
         ChatProvider::Pi => discover_pi(&executable, &env, working_directory).await,
         ChatProvider::Codex => discover_codex(&executable, &env).await,
         ChatProvider::Hermes => discover_hermes(&executable, &env, working_directory).await,
+    }
+}
+
+fn resolve_discovery_working_directory(
+    working_directory: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(requested) = working_directory
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = super::launch::expand_tilde(requested);
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => Ok(Some(path)),
+        Ok(_) => Err(format!(
+            "The model discovery working path is not a folder: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "The project folder used for model discovery no longer exists: {}",
+            path.display()
+        )),
+        Err(error) => Err(format!(
+            "Could not access the project folder used for model discovery ({}): {error}",
+            path.display()
+        )),
     }
 }
 
@@ -1119,6 +1152,34 @@ pub async fn run_catalog_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_working_directory_accepts_global_and_existing_contexts() {
+        assert_eq!(resolve_discovery_working_directory(None).unwrap(), None);
+        assert_eq!(
+            resolve_discovery_working_directory(Some("  ")).unwrap(),
+            None
+        );
+
+        let existing = std::env::temp_dir();
+        assert_eq!(
+            resolve_discovery_working_directory(existing.to_str()).unwrap(),
+            Some(existing)
+        );
+    }
+
+    #[test]
+    fn discovery_working_directory_explains_missing_project() {
+        let missing = std::env::temp_dir().join(format!(
+            "maxx-missing-model-catalog-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let error = resolve_discovery_working_directory(missing.to_str())
+            .expect_err("a missing project folder must not be passed to provider CLIs");
+
+        assert!(error.contains("no longer exists"));
+        assert!(error.contains(&missing.to_string_lossy().to_string()));
+    }
 
     #[test]
     fn hermes_parser_reads_session_models_and_marks_current_default() {
