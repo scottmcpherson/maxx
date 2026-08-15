@@ -183,6 +183,7 @@ export function AgentsView() {
         className={`agents-header ${sidebarOpen ? "" : "sidebar-closed"}`}
         onMouseDown={beginWindowDrag}
       >
+        {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
         {inDetail ? (
           <button type="button" className="agents-back" onClick={backToGrid}>
             <Icons.chevronRight size={13} className="back-chevron" />

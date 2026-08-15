@@ -31,6 +31,7 @@ import { beginWindowDrag } from "../windowDrag";
 import { relativeTime } from "../relativeTime";
 import { Icons } from "./Icons";
 import { SidebarUpdateButton } from "./SidebarUpdateButton";
+import { ProjectFolderIcon } from "./ProjectFolderIcon";
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = "maxx.sidebar.collapsed-projects";
 const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-collapsed";
@@ -338,6 +339,7 @@ export function Sidebar() {
           window-anchored (`SidebarToggle`) so it does not ride the collapse. */}
       <div className="sidebar-titlebar" onMouseDown={beginWindowDrag}>
         <span className="traffic-light-spacer" aria-hidden="true" />
+        <span className="window-sidebar-toggle-cutout" aria-hidden="true" />
       </div>
 
       <div className="sidebar-heading-row" onMouseDown={beginWindowDrag}>
@@ -505,6 +507,7 @@ export function Sidebar() {
                       </header>
                     )}
                     {projects.map((project) => {
+                  const remoteProject = !isLocalHost(host.id);
                   const projectVisible = !attentionFilterOpen || attentionProjectIDs.has(project.id);
                   const projectExpanded = attentionFilterOpen
                     ? projectVisible
@@ -527,10 +530,13 @@ export function Sidebar() {
                             disabled={attentionFilterOpen}
                             onClick={() => toggleProject(project.id)}
                           >
-                            <span className="project-folder">
-                              {projectExpanded ? <Icons.folderOpen size={15} /> : <Icons.folder size={15} />}
-                            </span>
+                            <ProjectFolderIcon
+                              expanded={projectExpanded}
+                              remote={remoteProject}
+                              hostName={host.name}
+                            />
                             <span className="project-name" title={project.folderPath}>{projectName(project)}</span>
+                            {remoteProject && <span className="sr-only">Remote project on {host.name}</span>}
                           </button>
                           <span
                             className={`project-header-actions ${openProjectMenuID === project.id ? "is-open" : ""}`}

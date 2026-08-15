@@ -295,8 +295,12 @@ export default function App() {
       */}
       <div className="zoom-surface">
         <div className={`app-shell${browserExpandedActive ? " is-browser-expanded" : ""}`}>
-          {/* Outside every pane: it has to stay put while the sidebar slides. */}
-          <SidebarToggle />
+          {/* Outside every pane: it has to stay put while the sidebar slides.
+              Each underlying titlebar owns a matching no-drag cutout so native
+              hit testing reaches this stationary control. */}
+          <div className="window-sidebar-toggle-region">
+            <SidebarToggle />
+          </div>
           <div
             className={`sidebar-shell ${sidebarOpen ? "is-open" : "is-closed"}`}
             aria-hidden={!sidebarOpen}

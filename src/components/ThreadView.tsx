@@ -46,6 +46,7 @@ import { SideThreadResizer } from "./SideThreadResizer";
 import { TerminalView, type TerminalViewHandle } from "./TerminalView";
 import { HostFolderPicker } from "./HostFolderPicker";
 import { NewThreadContextBar } from "./NewThreadContextBar";
+import { ProjectFolderIcon } from "./ProjectFolderIcon";
 import { createChatTextSelection } from "../sideChat";
 import { TextSelectionPill } from "./TextSelectionPill";
 
@@ -194,6 +195,10 @@ export function ThreadView({
   const project = useMemo(
     () => projectWorkspace?.projects.find((candidate) => candidate.id === selectedProjectID),
     [projectWorkspace, selectedProjectID],
+  );
+  const selectedRemoteHost = useMemo(
+    () => remoteSessions.find((session) => session.host.id === selectedHostID)?.host,
+    [remoteSessions, selectedHostID],
   );
   const thread = useMemo(
     () => project?.threads.find((candidate) => candidate.id === selectedThreadID),
@@ -416,6 +421,7 @@ export function ThreadView({
     <div className="workspace-stage" aria-hidden={browserExpanded} inert={browserExpanded}>
       <main className="thread-view">
         <header className={`thread-header ${sidebarOpen ? "" : "sidebar-closed"}`} onMouseDown={beginWindowDrag}>
+          {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
           <div className="thread-header-side collapsed-titlebar-controls">
             {!sidebarOpen && (
               <>
@@ -426,10 +432,22 @@ export function ThreadView({
               </>
             )}
           </div>
-          <button className="thread-title-button" title={thread.title}>
-            <span>{thread.title}</span>
-            <Icons.chevronDown size={11} />
-          </button>
+          <div
+            className="thread-title-breadcrumb"
+            title={`${projectName(project)} / ${thread.title}`}
+          >
+            {!isChatsProject(project) && (
+              <ProjectFolderIcon
+                remote={Boolean(selectedRemoteHost)}
+                hostName={selectedRemoteHost?.name}
+                className="thread-project-folder"
+              />
+            )}
+            <span className="thread-project-name">{projectName(project)}</span>
+            <span className="thread-title-separator" aria-hidden="true">/</span>
+            <span className="thread-title-text">{thread.title}</span>
+            {selectedRemoteHost && <span className="sr-only">Remote project on {selectedRemoteHost.name}</span>}
+          </div>
           <div className="thread-header-side end">
             <SummaryToggle project={project} thread={thread} hostID={selectedHostID} fits={summarySlotFree} />
             {terminalModeEnabled && !isChatsProject(project) && (
@@ -1150,7 +1168,9 @@ function NewAgentView({
       <header
         className={`new-agent-titlebar ${sidebarOpen ? "" : "sidebar-closed"}`}
         onMouseDown={beginWindowDrag}
-      />
+      >
+        {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
+      </header>
       <div className="new-agent-center">
           <h1 className="new-agent-heading">
             {selectedProject
