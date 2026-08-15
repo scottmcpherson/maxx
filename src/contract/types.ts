@@ -374,6 +374,13 @@ export interface ChatProject {
   threads: ChatThread[];
 }
 
+/** Backend-owned container for chats that are not associated with a project. */
+export const CHATS_PROJECT_ID = "00000000-0000-0000-0000-000000000001";
+
+export function isChatsProject(project: ChatProject): boolean {
+  return project.id === CHATS_PROJECT_ID;
+}
+
 export interface ProviderProfile {
   id: string;
   provider: ChatProvider;
@@ -440,6 +447,7 @@ export interface ProviderHealth {
 }
 
 export function projectName(project: ChatProject): string {
+  if (isChatsProject(project)) return "Chats";
   const parts = project.folderPath.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? project.folderPath;
 }

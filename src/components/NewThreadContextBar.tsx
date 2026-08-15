@@ -20,16 +20,18 @@ export function NewThreadContextBar({
   environment,
   disabled,
   onSelectProject,
+  onClearProject,
   onEnvironmentChange,
   onAddLocalProject,
   onAddRemoteProject,
 }: {
   projects: NewThreadHostedProject[];
   remoteHosts: { id: string; name: string }[];
-  selected: NewThreadHostedProject;
+  selected?: NewThreadHostedProject;
   environment: GitEnvironmentMode;
   disabled: boolean;
   onSelectProject: (project: NewThreadHostedProject) => void;
+  onClearProject: () => void;
   onEnvironmentChange: (environment: GitEnvironmentMode) => void;
   onAddLocalProject: () => void;
   onAddRemoteProject: (host: { id: string; name: string }) => void;
@@ -47,6 +49,7 @@ export function NewThreadContextBar({
   const newBranchRef = useRef<HTMLInputElement>(null);
 
   const reloadGit = async () => {
+    if (!selected) return;
     const [nextStatus, nextBranches] = await Promise.all([
       ipc.gitStatus(selected.project.id, selected.hostId),
       ipc.gitBranches(selected.project.id, selected.hostId),
@@ -61,6 +64,7 @@ export function NewThreadContextBar({
     setBranches(null);
     setOpenMenu(null);
     setGitError(null);
+    if (!selected) return () => { current = false; };
     Promise.all([
       ipc.gitStatus(selected.project.id, selected.hostId),
       ipc.gitBranches(selected.project.id, selected.hostId),
@@ -74,7 +78,7 @@ export function NewThreadContextBar({
       setBranches(null);
     });
     return () => { current = false; };
-  }, [selected.hostId, selected.project.id]);
+  }, [selected?.hostId, selected?.project.id]);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -110,6 +114,7 @@ export function NewThreadContextBar({
   }, [branchSearch, branches?.branches]);
 
   const chooseBranch = async (branch: string) => {
+    if (!selected) return;
     setGitBusy(true);
     setGitError(null);
     try {
@@ -124,7 +129,7 @@ export function NewThreadContextBar({
   };
 
   const createBranch = async () => {
-    if (!newBranch.trim()) return;
+    if (!selected || !newBranch.trim()) return;
     setGitBusy(true);
     setGitError(null);
     try {
@@ -140,7 +145,7 @@ export function NewThreadContextBar({
     }
   };
 
-  const remote = selected.hostId !== "local";
+  const remote = selected?.hostId !== undefined && selected.hostId !== "local";
   const locationLabel = environment === "worktree"
     ? remote ? "New remote worktree" : "New worktree"
     : remote ? "Remote" : "Local";
@@ -150,17 +155,31 @@ export function NewThreadContextBar({
     <div className="new-agent-context-row" ref={rootRef}>
       <div className="new-agent-context-controls">
         <div className="new-agent-context-control">
-          <button
-            type="button"
-            className={`new-agent-context-button${openMenu === "project" ? " is-active" : ""}`}
-            aria-label="Choose project"
-            aria-expanded={openMenu === "project"}
-            disabled={disabled}
-            onClick={() => setOpenMenu((current) => current === "project" ? null : "project")}
-          >
-            <Icons.folder size={15} />
-            <span>{projectName(selected.project)}</span>
-          </button>
+          <div className={`new-agent-project-chip${selected ? " has-project" : ""}`}>
+            {selected && (
+              <button
+                type="button"
+                className="new-agent-project-clear"
+                aria-label={`Remove ${projectName(selected.project)} project`}
+                title="Create chat without a project"
+                disabled={disabled}
+                onClick={onClearProject}
+              >
+                <Icons.close size={12} />
+              </button>
+            )}
+            <button
+              type="button"
+              className={`new-agent-context-button${openMenu === "project" ? " is-active" : ""}`}
+              aria-label="Choose project"
+              aria-expanded={openMenu === "project"}
+              disabled={disabled}
+              onClick={() => setOpenMenu((current) => current === "project" ? null : "project")}
+            >
+              <Icons.folder size={15} />
+              <span>{selected ? projectName(selected.project) : "Choose project"}</span>
+            </button>
+          </div>
           {openMenu === "project" && (
             <div className="new-agent-context-menu new-agent-project-menu" role="menu" aria-label="Projects">
               <label className="new-agent-menu-search">
@@ -175,7 +194,7 @@ export function NewThreadContextBar({
               </label>
               <div className="new-agent-menu-scroll">
                 {filteredProjects.map((item) => {
-                  const checked = item.project.id === selected.project.id && item.hostId === selected.hostId;
+                  const checked = item.project.id === selected?.project.id && item.hostId === selected.hostId;
                   return (
                     <button
                       type="button"
@@ -214,7 +233,7 @@ export function NewThreadContextBar({
           )}
         </div>
 
-        {status && (
+        {selected && status && (
           <div className="new-agent-context-control">
             <button
               type="button"
@@ -255,7 +274,7 @@ export function NewThreadContextBar({
           </div>
         )}
 
-        {branches && (
+        {selected && branches && (
           <div className="new-agent-context-control">
             <button
               type="button"
@@ -323,7 +342,7 @@ export function NewThreadContextBar({
           </div>
         )}
       </div>
-      {remote && (
+      {selected && remote && (
         <span className="new-agent-remote-host">
           {selected.hostName}<i aria-label="Connected" />
         </span>

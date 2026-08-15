@@ -71,6 +71,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "add_project"
         | "remove_project"
         | "add_thread"
+        | "add_chat"
         | "add_thread_with_runtime"
         | "remove_thread"
         | "update_thread"

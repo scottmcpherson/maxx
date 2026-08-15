@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { ipc } from "../ipc";
-import { projectName } from "../contract/types";
+import { CHATS_PROJECT_ID, isChatsProject, projectName } from "../contract/types";
 import type { ChatThread } from "../contract/types";
 import {
   attachRemote,
@@ -34,6 +34,7 @@ import { SidebarUpdateButton } from "./SidebarUpdateButton";
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = "maxx.sidebar.collapsed-projects";
 const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-collapsed";
+const CHATS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.chats-section-collapsed";
 
 interface ThreadMenuTarget {
   projectID: string;
@@ -65,6 +66,14 @@ function loadProjectsSectionCollapsed(): boolean {
   }
 }
 
+function loadChatsSectionCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(CHATS_SECTION_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 export function Sidebar() {
   const workspace = useAppStore((state) => state.workspace);
   const remoteSessions = useAppStore((state) => state.remoteSessions);
@@ -89,6 +98,7 @@ export function Sidebar() {
   const toggleAttentionFilter = useAppStore((state) => state.toggleAttentionFilter);
   const [collapsedProjectIDs, setCollapsedProjectIDs] = useState(loadCollapsedProjectIDs);
   const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(loadProjectsSectionCollapsed);
+  const [chatsSectionCollapsed, setChatsSectionCollapsed] = useState(loadChatsSectionCollapsed);
   const [pinnedThreadIDs, setPinnedThreadIDs] = useState(loadPinnedThreadIDs);
   const [openProjectMenuID, setOpenProjectMenuID] = useState<string | null>(null);
   const [threadMenu, setThreadMenu] = useState<ThreadMenuTarget | null>(null);
@@ -113,7 +123,8 @@ export function Sidebar() {
     }
     return next;
   }, [hostStatus?.name, remoteSessions, workspace]);
-  const visibleProjects = hostedProjects(catalog);
+  const visibleProjects = hostedProjects(catalog).filter(({ project }) => !isChatsProject(project));
+  const chatsProject = catalog.local.projects.find(isChatsProject);
   const combinedWorkspace = mergedWorkspace(catalog);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuRef = useRef<HTMLDivElement>(null);
@@ -156,6 +167,17 @@ export function Sidebar() {
       // The section still collapses for the current session when storage is unavailable.
     }
   }, [projectsSectionCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CHATS_SECTION_COLLAPSED_STORAGE_KEY,
+        String(chatsSectionCollapsed),
+      );
+    } catch {
+      // The section still collapses for the current session when storage is unavailable.
+    }
+  }, [chatsSectionCollapsed]);
 
   useEffect(() => {
     if (!openProjectMenuID) return;
@@ -306,6 +328,9 @@ export function Sidebar() {
     [pinnedItems],
   );
   const projectsExpanded = attentionFilterOpen || !projectsSectionCollapsed;
+  const chatsVisible = !attentionFilterOpen || attentionProjectIDs.has(CHATS_PROJECT_ID);
+  const chatsExpanded = attentionFilterOpen || !chatsSectionCollapsed;
+  const chatThreads = chatsProject?.threads.filter((thread) => !thread.parentThreadID) ?? [];
 
   return (
     <aside className="sidebar">
@@ -340,7 +365,7 @@ export function Sidebar() {
       </div>
 
       <nav className="sidebar-nav" aria-label="Main navigation">
-        <button className="nav-row" onClick={() => startNewThread()}>
+        <button className="nav-row" onClick={() => startNewThread(null, LOCAL_HOST_ID)}>
           <Icons.compose size={15} />
           <span>New chat</span>
           <kbd>⌘N</kbd>
@@ -543,7 +568,8 @@ export function Sidebar() {
                             <button
                               type="button"
                               className="icon-button"
-                              title="New agent in this project"
+                              title="New chat in this project"
+                              aria-label={`New chat in ${projectName(project)}`}
                               onClick={() => startNewThread(project.id, host.id)}
                             >
                               <Icons.compose size={15} />
@@ -620,6 +646,78 @@ export function Sidebar() {
               </div>
             </div>
           </div>
+
+          {chatsProject && chatThreads.length > 0 && (
+            <section
+              className={`chats-section sidebar-filter-block ${chatsVisible ? "" : "is-filtered-out"}`}
+              aria-hidden={!chatsVisible}
+            >
+              <div className="sidebar-filter-block-inner" inert={!chatsVisible}>
+                <header className="repositories-header chats-header">
+                  <button
+                    type="button"
+                    className="repositories-disclosure"
+                    aria-expanded={chatsExpanded}
+                    aria-controls="sidebar-chats"
+                    title={attentionFilterOpen ? "Chats are expanded while filtering" : undefined}
+                    disabled={attentionFilterOpen}
+                    onClick={() => setChatsSectionCollapsed((collapsed) => !collapsed)}
+                  >
+                    <span>Chats</span>
+                    <Icons.chevronRight
+                      size={11}
+                      className={`repositories-chevron ${chatsExpanded ? "is-expanded" : ""}`}
+                    />
+                  </button>
+                </header>
+                <div
+                  className={`projects-reveal ${chatsExpanded ? "is-expanded" : ""}`}
+                  id="sidebar-chats"
+                  aria-hidden={!chatsExpanded}
+                  inert={!chatsExpanded}
+                >
+                  <div className="projects-reveal-inner">
+                    <ul className="thread-list chats-thread-list">
+                      {chatThreads.map((thread) => {
+                        const pinned = pinnedThreadIDSet.has(thread.id);
+                        const threadVisible = attentionFilterOpen
+                          ? attentionThreadIDs.has(thread.id)
+                          : !pinned;
+                        return (
+                          <li
+                            key={thread.id}
+                            className={`thread-list-item ${threadVisible ? "" : "is-filtered-out"}`}
+                            aria-hidden={!threadVisible}
+                          >
+                            <div className="thread-list-item-inner" inert={!threadVisible}>
+                              <ThreadRow
+                                thread={thread}
+                                selected={thread.id === selectedThreadID}
+                                activity={threadActivity(thread, activeTurns)}
+                                unseen={Boolean(unseenThreads[thread.id]) && thread.id !== selectedThreadID}
+                                pinned={pinned}
+                                onSelect={() => {
+                                  const reason = attentionReasons.get(thread.id);
+                                  if (attentionFilterOpen && reason) {
+                                    setStickyAttention({ threadID: thread.id, reason });
+                                  }
+                                  selectThread(CHATS_PROJECT_ID, thread.id, LOCAL_HOST_ID);
+                                }}
+                                onRename={() => openRenameDialog(CHATS_PROJECT_ID, thread.id)}
+                                onContextMenu={(event) => openThreadMenu(event, CHATS_PROJECT_ID, thread, pinned)}
+                                onTogglePin={() => updateThreadPin(thread.id, !pinned)}
+                                onDelete={() => void removeThread(CHATS_PROJECT_ID, thread.id)}
+                              />
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
         </div>
       </section>
 

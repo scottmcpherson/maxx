@@ -573,7 +573,9 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 }
 .pinned-section { margin-bottom: 8px; min-width: 0; }
 .thread-list.pinned-thread-list,
-.projects-list { padding-right: 7px; padding-left: 7px; min-width: 0; }
+.projects-list,
+.thread-list.chats-thread-list { padding-right: 7px; padding-left: 7px; min-width: 0; }
+.chats-header { margin-top: 7px; }
 .sidebar-empty { color: var(--text-faint); padding: 9px; line-height: 1.45; }
 .empty-project-cta {
   width: 100%; border: 0; background: transparent; color: var(--text-faint);
@@ -1742,6 +1744,24 @@ button.git-environment-row:disabled:hover { background: transparent; }
 }
 .new-agent-context-controls { min-width: 0; display: flex; align-items: center; gap: 2px; }
 .new-agent-context-control { position: relative; }
+.new-agent-project-chip { display: flex; align-items: center; border-radius: 9px; }
+.new-agent-project-chip.has-project:hover,
+.new-agent-project-chip.has-project:focus-within { background: rgba(255,255,255,.075); }
+.new-agent-project-chip.has-project .new-agent-context-button:hover,
+.new-agent-project-chip.has-project .new-agent-context-button.is-active { background: transparent; }
+.new-agent-project-clear {
+  width: 0; height: 24px; padding: 0; overflow: hidden;
+  display: grid; place-items: center; flex: 0 0 auto;
+  border: 0; border-radius: 50%; background: transparent; color: #aaa; cursor: pointer;
+  opacity: 0; transform: scale(.8);
+  transition: width .12s ease, opacity .1s ease, transform .12s ease, margin-left .12s ease;
+}
+.new-agent-project-chip.has-project:hover .new-agent-project-clear,
+.new-agent-project-clear:focus-visible {
+  width: 24px; margin-left: 4px; opacity: 1; transform: scale(1);
+}
+.new-agent-project-clear:hover { background: rgba(255,255,255,.1); color: #eee; }
+.new-agent-project-clear:disabled { cursor: default; }
 .new-agent-context-button {
   max-width: 220px; min-height: 30px; padding: 4px 8px; display: flex; align-items: center; gap: 7px;
   border: 0; border-radius: 9px; background: transparent; color: #c7c7c7; font: inherit; cursor: pointer;

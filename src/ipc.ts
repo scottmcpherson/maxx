@@ -112,6 +112,19 @@ export const ipc = {
     title: string,
     hostId?: string | null,
   ) => invokeOnHost<ChatThread>(hostId, "add_thread", { projectId, provider, model, title }),
+  addChat: (
+    provider: ChatProvider,
+    model: string,
+    title: string,
+    effort?: string | null,
+    speed?: string | null,
+  ) => invokeOnHost<ChatThread>("local", "add_chat", {
+    provider,
+    model,
+    title,
+    effort: effort || null,
+    speed: speed || null,
+  }),
   addThreadWithRuntime: (
     projectId: string,
     provider: ChatProvider,

@@ -347,6 +347,17 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             )
             .await,
         ),
+        "add_chat" => value(
+            crate::commands::add_chat(
+                state.app.clone(),
+                required(&params, "provider")?,
+                required(&params, "model")?,
+                required(&params, "title")?,
+                optional(&params, "effort")?,
+                optional(&params, "speed")?,
+            )
+            .await,
+        ),
         "add_thread_with_runtime" => value(
             crate::commands::add_thread_with_runtime(
                 state.app.clone(),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceDocument } from "../contract/types";
+import { CHATS_PROJECT_ID, type WorkspaceDocument } from "../contract/types";
 import type { BrowserAnnotation } from "../browser";
 import { LOCAL_HOST_ID } from "../host/session";
 import { ipc } from "../ipc";
@@ -10,6 +10,8 @@ const originalRefresh = useAppStore.getState().refresh;
 function seedThreadPanels(threadID: string | null = "thread-a") {
   useAppStore.setState({
     workspace: null,
+    remoteSessions: [],
+    selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: "project",
     selectedThreadID: threadID,
     browserOpen: true,
@@ -22,6 +24,9 @@ function seedThreadPanels(threadID: string | null = "thread-a") {
 
 afterEach(() => {
   useAppStore.setState({
+    workspace: null,
+    remoteSessions: [],
+    selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: null,
     selectedThreadID: null,
     browserOpen: false,
@@ -514,6 +519,83 @@ describe("thread-scoped panels", () => {
 
     useAppStore.getState().consumeBrowserReveal("tab-a");
     expect(useAppStore.getState().pendingBrowserReveal).toBeNull();
+  });
+});
+
+describe("optional project chats", () => {
+  it("starts without a project when explicitly requested from the top-level button", () => {
+    useAppStore.setState({
+      workspace: sampleWorkspace("/tmp/project"),
+      selectedHostID: "mini",
+      selectedProjectID: "project",
+      selectedThreadID: "thread-a",
+    });
+
+    useAppStore.getState().startNewThread(null);
+
+    expect(useAppStore.getState()).toMatchObject({
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: null,
+      selectedThreadID: null,
+    });
+  });
+
+  it("keeps the current project for contextual command-n creation", () => {
+    useAppStore.setState({
+      workspace: sampleWorkspace("/tmp/project"),
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: "project",
+      selectedThreadID: "thread-a",
+    });
+
+    useAppStore.getState().startNewThread();
+
+    expect(useAppStore.getState()).toMatchObject({
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: "project",
+      selectedThreadID: null,
+    });
+  });
+
+  it("creates and sends a projectless chat through the Chats owner", async () => {
+    const thread = {
+      ...sampleWorkspace("/tmp/project").projects[0].threads[0],
+      id: "chat-without-project",
+    };
+    useAppStore.setState({
+      workspace: sampleWorkspace("/tmp/project"),
+      selectedHostID: LOCAL_HOST_ID,
+      selectedProjectID: null,
+      selectedThreadID: null,
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+    const add = vi.spyOn(ipc, "addChat").mockResolvedValue(thread);
+    const send = vi.spyOn(ipc, "sendPrompt").mockResolvedValue("turn-projectless");
+
+    await expect(useAppStore.getState().createThreadAndSend(
+      null,
+      "codex",
+      "Default",
+      "A chat without a project",
+      [],
+    )).resolves.toBe(true);
+
+    expect(add).toHaveBeenCalledWith(
+      "codex", "Default", "A chat without a project", null, null,
+    );
+    expect(send).toHaveBeenCalledWith(
+      CHATS_PROJECT_ID,
+      "chat-without-project",
+      "A chat without a project",
+      [],
+      LOCAL_HOST_ID,
+      [],
+    );
+    expect(useAppStore.getState()).toMatchObject({
+      selectedProjectID: CHATS_PROJECT_ID,
+      selectedThreadID: "chat-without-project",
+      activeTurnByThread: { "chat-without-project": "turn-projectless" },
+    });
   });
 });
 

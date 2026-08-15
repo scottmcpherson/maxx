@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ChatProject, ChatThread, EventKind, projectName, providerDisplayName } from "../contract/types";
+import { ChatProject, ChatThread, EventKind, isChatsProject, projectName, providerDisplayName } from "../contract/types";
 import { useAppStore } from "../store/appStore";
 import { summaryToggleAction, summaryToggleActive } from "../summary";
 import { beginWindowDrag } from "../windowDrag";
@@ -41,7 +41,9 @@ function SummaryBody({
           <span className="context-value">{thread.model || "Default"}</span>
         </div>
       </section>
-      <GitEnvironment projectID={project.id} hostID={hostID} threadID={thread.id} />
+      {!isChatsProject(project) && (
+        <GitEnvironment projectID={project.id} hostID={hostID} threadID={thread.id} />
+      )}
       <section className="context-section">
         <h3>On This Thread</h3>
         <div className="context-row">

@@ -66,6 +66,11 @@ pub fn chat_images_dir() -> PathBuf {
     workspace_path().with_file_name("chat-images")
 }
 
+/// Stable non-repository working directory for chats without a project.
+pub fn chats_dir() -> PathBuf {
+    workspace_path().with_file_name("chats")
+}
+
 impl AppState {
     pub fn load(browser: Arc<BrowserRuntime>, events: Arc<dyn EventSink>) -> Self {
         let persistence = WorkspacePersistence::new(workspace_path());

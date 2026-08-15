@@ -56,7 +56,7 @@ let quitting = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
   "workspace_snapshot", "active_turns", "git_status", "git_branches", "git_checkout", "git_create_branch", "git_commit", "git_push",
-  "add_project", "remove_project", "add_thread",
+  "add_project", "remove_project", "add_thread", "add_chat",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
   "create_side_chat", "start_side_thread", "send_agent_prompt", "steer_prompt", "cancel_turn", "resolve_request", "provider_health",
@@ -254,6 +254,22 @@ async function runAppSmoke(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!state.bridge || !state.newChat || !state.projects) throw new Error(`packaged renderer did not become ready: ${JSON.stringify(state)}`);
+  const emptyChatDeadline = Date.now() + 10_000;
+  let emptyChatUI = { heading: "", chooseProject: false, environment: false, branch: false };
+  while (Date.now() < emptyChatDeadline) {
+    emptyChatUI = await mainWindow!.webContents.executeJavaScript(`(() => ({
+      heading: document.querySelector('.new-agent-heading')?.textContent?.trim() ?? '',
+      chooseProject: Boolean(document.querySelector('[aria-label="Choose project"]')),
+      environment: Boolean(document.querySelector('[aria-label="Choose where to work"]')),
+      branch: Boolean(document.querySelector('[aria-label="Choose branch"]'))
+    }))()`) as typeof emptyChatUI;
+    if (emptyChatUI.heading && emptyChatUI.chooseProject) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (emptyChatUI.heading !== "What should we work on?" || !emptyChatUI.chooseProject
+    || emptyChatUI.environment || emptyChatUI.branch) {
+    throw new Error(`empty projectless composer did not render correctly: ${JSON.stringify(emptyChatUI)}`);
+  }
   const voiceWorklet = await mainWindow!.webContents.executeJavaScript(`(async () => {
     const context = new AudioContext();
     try {
@@ -273,8 +289,8 @@ async function runAppSmoke(): Promise<void> {
   const projectId = String(project.id ?? "");
   const thread = await runtime!.request("add_thread", {
     projectId,
-    provider: "codex",
-    model: "default",
+    provider: "hermes",
+    model: HERMES_SMOKE_MODEL,
     title: "Packaged runtime acceptance",
   }, 5_000) as Record<string, JsonValue>;
   const threadId = String(thread.id ?? "");
@@ -375,6 +391,9 @@ async function runAppSmoke(): Promise<void> {
   const persisted = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   const persistedProject = (persisted.projects as Array<Record<string, JsonValue>>).find((value) => value.id === projectId);
   const persistedThread = (persistedProject?.threads as Array<Record<string, JsonValue>> | undefined)?.find((value) => value.id === threadId);
+  if (persistedThread?.provider !== "hermes" || persistedThread.model !== HERMES_SMOKE_MODEL) {
+    throw new Error(`packaged runtime acceptance did not use local Qwen: ${JSON.stringify({ provider: persistedThread?.provider, model: persistedThread?.model })}`);
+  }
   const messages = persistedThread?.messages as Array<Record<string, JsonValue>> | undefined;
   const annotationPersisted = messages?.some((message) => Array.isArray(message.annotations) && message.annotations.length === 1) === true;
   if (!turnId || !annotationPersisted) throw new Error("packaged runtime did not acknowledge and persist the annotated prompt");
@@ -384,7 +403,109 @@ async function runAppSmoke(): Promise<void> {
   // catches regressions in the real sidecar transport, not only request bursts.
   await new Promise((resolve) => setTimeout(resolve, 500));
   await runtime!.request("workspace_snapshot", {}, 5_000);
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, annotationPersisted, isolatedWorkspace: true, gitUI })}\n`);
+  const projectless = await runtime!.request("add_chat", {
+    provider: "codex",
+    model: "default",
+    title: "Projectless smoke chat",
+    effort: null,
+    speed: null,
+  }, 5_000) as Record<string, JsonValue>;
+  const projectlessThreadId = String(projectless.id ?? "");
+  const projectlessReload = new Promise<void>((resolve) => mainWindow!.webContents.once("did-finish-load", () => resolve()));
+  mainWindow!.webContents.reload();
+  await projectlessReload;
+  const projectlessDeadline = Date.now() + 10_000;
+  let projectlessUI = { chats: false, row: false, collapsed: false, pinned: false, renamed: false, deleted: false };
+  while (Date.now() < projectlessDeadline) {
+    projectlessUI = await mainWindow!.webContents.executeJavaScript(`(() => ({
+      chats: Array.from(document.querySelectorAll('.repositories-disclosure')).some((button) => button.textContent?.trim() === 'Chats'),
+      row: Boolean(document.querySelector('[aria-label="Projectless smoke chat"]')),
+      collapsed: false,
+      pinned: false,
+      renamed: false,
+      deleted: false
+    }))()`) as typeof projectlessUI;
+    if (projectlessUI.chats && projectlessUI.row) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!projectlessUI.chats || !projectlessUI.row) {
+    throw new Error(`projectless Chats section did not render: ${JSON.stringify(projectlessUI)}`);
+  }
+  await mainWindow!.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.repositories-disclosure'))
+    .find((button) => button.textContent?.trim() === 'Chats')?.click()`);
+  const collapseDeadline = Date.now() + 5_000;
+  while (Date.now() < collapseDeadline) {
+    projectlessUI.collapsed = await mainWindow!.webContents.executeJavaScript(`(() => {
+      const disclosure = Array.from(document.querySelectorAll('.repositories-disclosure'))
+        .find((button) => button.textContent?.trim() === 'Chats');
+      return disclosure?.getAttribute('aria-expanded') === 'false'
+        && document.querySelector('#sidebar-chats')?.getAttribute('aria-hidden') === 'true';
+    })()`);
+    if (projectlessUI.collapsed) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await mainWindow!.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.repositories-disclosure'))
+    .find((button) => button.textContent?.trim() === 'Chats')?.click()`);
+  const expandDeadline = Date.now() + 5_000;
+  while (Date.now() < expandDeadline) {
+    const expanded = await mainWindow!.webContents.executeJavaScript(`(() => {
+      const disclosure = Array.from(document.querySelectorAll('.repositories-disclosure'))
+        .find((button) => button.textContent?.trim() === 'Chats');
+      return disclosure?.getAttribute('aria-expanded') === 'true'
+        && document.querySelector('#sidebar-chats')?.getAttribute('aria-hidden') === 'false';
+    })()`);
+    if (expanded) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await mainWindow!.webContents.executeJavaScript(
+    `document.querySelector('[aria-label="Pin Projectless smoke chat"]')?.click()`,
+  );
+  const pinDeadline = Date.now() + 5_000;
+  while (Date.now() < pinDeadline) {
+    projectlessUI.pinned = await mainWindow!.webContents.executeJavaScript(
+      `Boolean(document.querySelector('[aria-label="Unpin Projectless smoke chat"]'))`,
+    );
+    if (projectlessUI.pinned) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await mainWindow!.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('[aria-label="Projectless smoke chat"]');
+    row?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  })()`);
+  await mainWindow!.webContents.executeJavaScript(`(() => {
+    const input = document.querySelector('[aria-label="Chat name"]');
+    if (!(input instanceof HTMLInputElement)) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    setter?.call(input, 'Renamed projectless smoke chat');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.closest('form')?.requestSubmit();
+    return true;
+  })()`);
+  const renameDeadline = Date.now() + 5_000;
+  while (Date.now() < renameDeadline) {
+    projectlessUI.renamed = await mainWindow!.webContents.executeJavaScript(
+      `Boolean(document.querySelector('[aria-label="Renamed projectless smoke chat"]'))`,
+    );
+    if (projectlessUI.renamed) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await mainWindow!.webContents.executeJavaScript(
+    `document.querySelector('[aria-label="Delete Renamed projectless smoke chat"]')?.click()`,
+  );
+  const deleteDeadline = Date.now() + 5_000;
+  while (Date.now() < deleteDeadline) {
+    const afterDelete = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
+    const chats = (afterDelete.projects as Array<Record<string, JsonValue>>)
+      .find((value) => value.id === "00000000-0000-0000-0000-000000000001");
+    const threads = chats?.threads as Array<Record<string, JsonValue>> | undefined;
+    projectlessUI.deleted = !threads?.some((value) => value.id === projectlessThreadId);
+    if (projectlessUI.deleted) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!projectlessUI.collapsed || !projectlessUI.pinned || !projectlessUI.renamed || !projectlessUI.deleted) {
+    throw new Error(`projectless chat behaviors failed: ${JSON.stringify(projectlessUI)}`);
+  }
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, emptyChatUI, gitUI, projectlessUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {

@@ -10,6 +10,7 @@ import {
   ChatProject,
   ChatThread,
   ProviderProfile,
+  isChatsProject,
   projectName,
   RuntimeInteractionDecision,
 } from "../contract/types";
@@ -431,7 +432,7 @@ export function ThreadView({
           </button>
           <div className="thread-header-side end">
             <SummaryToggle project={project} thread={thread} hostID={selectedHostID} fits={summarySlotFree} />
-            {terminalModeEnabled && (
+            {terminalModeEnabled && !isChatsProject(project) && (
               <button
                 className={`icon-button terminal-surface-toggle${terminalSurface ? " is-active" : ""}`}
                 title={
@@ -637,7 +638,7 @@ export function ThreadView({
             </div>
           </div>
           <div className="composer-meta">
-            <span><Icons.branch size={12} />{project ? projectName(project) : "Project"}</span>
+            <span>{isChatsProject(project) ? <Icons.compose size={12} /> : <Icons.branch size={12} />}{projectName(project)}</span>
             <span>{thread.providerSessionID ? `Session ${thread.providerSessionID.slice(0, 12)}` : "This Mac"}</span>
             {contextUsed ? (
               <span
@@ -1080,26 +1081,27 @@ function NewAgentView({
   const addProject = useAppStore((state) => state.addProject);
   const hostStatus = useAppStore((state) => state.hostStatus);
   const terminalModeEnabled = useAppStore((state) => state.terminalModeEnabled);
+  const setNewThreadProject = useAppStore((state) => state.setNewThreadProject);
   const error = useAppStore((state) => state.error);
   const hosted = [
-    ...projects.map((project) => ({ project, hostId: "local", hostName: hostStatus?.name ?? "This Mac" })),
+    ...projects.filter((project) => !isChatsProject(project)).map((project) => ({
+      project,
+      hostId: "local",
+      hostName: hostStatus?.name ?? "This Mac",
+    })),
     ...remotes.flatMap((session) =>
-      session.workspace.projects.map((project) => ({
+      session.workspace.projects.filter((project) => !isChatsProject(project)).map((project) => ({
         project,
         hostId: session.host.id,
         hostName: session.host.name,
       })),
     ),
   ];
-  const initialProject = hosted.find((item) => item.project.id === initialProjectID && item.hostId === initialHostID)
-    ?? hosted.find((item) => item.project.id === initialProjectID)
-    ?? hosted.find((item) => item.hostId === initialHostID)
-    ?? hosted[0];
-  const [selectionKey, setSelectionKey] = useState(
-    initialProject ? `${initialProject.hostId}:${initialProject.project.id}` : "",
-  );
-  const selectedProject = hosted.find((item) => `${item.hostId}:${item.project.id}` === selectionKey) ?? hosted[0];
-  const projectID = selectedProject?.project.id ?? "";
+  const selectedProject = hosted.find((item) =>
+    item.project.id === initialProjectID && item.hostId === initialHostID,
+  ) ?? hosted.find((item) => item.project.id === initialProjectID);
+  const projectID = selectedProject?.project.id ?? null;
+  const selectedContextHostID = selectedProject?.hostId ?? "local";
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
   const dictation = useDictation({
@@ -1114,22 +1116,13 @@ function NewAgentView({
   const images = useImageAttachments();
 
   useEffect(() => textRef.current?.focus(), []);
-  useEffect(() => {
-    if (initialProjectID) {
-      const next = hosted.find((item) => item.project.id === initialProjectID && item.hostId === initialHostID)
-        ?? hosted.find((item) => item.project.id === initialProjectID);
-      if (next) setSelectionKey(`${next.hostId}:${next.project.id}`);
-      setEnvironment("current");
-    }
-  }, [initialHostID, initialProjectID, setEnvironment]);
-
   const addLocalProject = async () => {
     const folder = await ipc.openProjectDialog();
     if (folder) await addProject(folder, "local");
   };
 
   const submit = async () => {
-    if (!projectID || (!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending) return;
+    if ((!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending) return;
     const prompt = draft.trim();
     const imagePaths = surface === "terminal" ? [] : images.paths;
     dictation.clear();
@@ -1144,6 +1137,7 @@ function NewAgentView({
       runtime.speed,
       surface,
       environment,
+      selectedContextHostID,
     );
     setSending(false);
     if (created) images.clear();
@@ -1157,15 +1151,12 @@ function NewAgentView({
         className={`new-agent-titlebar ${sidebarOpen ? "" : "sidebar-closed"}`}
         onMouseDown={beginWindowDrag}
       />
-      {hosted.length === 0 ? (
-        <div className="empty-workspace-copy">
-          <div className="empty-logo">M</div>
-          <h1>Open a project to start</h1>
-          <p>Use the plus button beside Repositories to choose a working folder.</p>
-        </div>
-      ) : (
-        <div className="new-agent-center">
-          <h1 className="new-agent-heading">What should we work on in <span>{projectName(selectedProject.project)}</span>?</h1>
+      <div className="new-agent-center">
+          <h1 className="new-agent-heading">
+            {selectedProject
+              ? <>What should we work on in <span>{projectName(selectedProject.project)}</span>?</>
+              : "What should we work on?"}
+          </h1>
           {surface === "gui" && <DictationStatus dictation={dictation} />}
           <div className="new-agent-composer-shell">
             <NewThreadContextBar
@@ -1175,8 +1166,11 @@ function NewAgentView({
               environment={environment}
               disabled={sending}
               onSelectProject={(item) => {
-                setSelectionKey(`${item.hostId}:${item.project.id}`);
-                setEnvironment("current");
+                setNewThreadProject(item.project.id, item.hostId);
+              }}
+              onClearProject={() => {
+                setNewThreadProject(null, "local");
+                setSurface("gui");
               }}
               onEnvironmentChange={setEnvironment}
               onAddLocalProject={() => void addLocalProject()}
@@ -1211,19 +1205,19 @@ function NewAgentView({
                   effort={runtime.effort}
                   speed={runtime.speed}
                   profiles={
-                    selectedProject.hostId === "local"
+                    selectedContextHostID === "local"
                       ? profiles
-                      : remotes.find((session) => session.host.id === selectedProject.hostId)
+                      : remotes.find((session) => session.host.id === selectedContextHostID)
                           ?.workspace.providerProfiles ?? profiles
                   }
-                  hostId={selectedProject.hostId}
-                  workingDirectory={selectedProject.project.folderPath}
+                  hostId={selectedContextHostID}
+                  workingDirectory={selectedProject?.project.folderPath}
                   placement="bottom"
                   onChange={setRuntime}
                 />
               </div>
               <div className="composer-actions">
-                {terminalModeEnabled && (
+                {terminalModeEnabled && selectedProject && (
                   <button
                     className={`icon-button new-chat-terminal-toggle${surface === "terminal" ? " is-active" : ""}`}
                     title={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
@@ -1250,7 +1244,7 @@ function NewAgentView({
                     shortcut={dictationShortcut}
                   />
                 )}
-                <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || !projectID || sending} onClick={() => void submit()}>
+                <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
                   {sending ? <span className="mini-spinner" /> : <Icons.arrowUp size={16} />}
                 </button>
               </div>
@@ -1264,7 +1258,6 @@ function NewAgentView({
               : "Enter to send · Shift+Enter for a new line"}
           </p>
         </div>
-      )}
       {addingOnHost && createPortal(
         <div className="host-folder-overlay">
           <HostFolderPicker

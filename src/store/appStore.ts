@@ -33,6 +33,7 @@ import type {
 } from "../keyboardShortcuts";
 import {
   AgentDefinition,
+  CHATS_PROJECT_ID,
   ChatProvider,
   ChatTextSelection,
   ChatSurface,
@@ -44,6 +45,7 @@ import {
   TitleGenerationRuntime,
   TurnFinishedEnvelope,
   WorkspaceDocument,
+  isChatsProject,
 } from "../contract/types";
 import {
   clearFinishedTurn,
@@ -70,7 +72,6 @@ import {
   attachRemote,
   detachRemote,
   emptyCatalog,
-  findHostedProject,
   isLocalHost,
   LOCAL_HOST_ID,
   mergedWorkspace,
@@ -142,7 +143,9 @@ interface AppStoreState {
   selectThread: (projectID: string, threadID: string, hostID?: string) => void;
   addProject: (folderPath: string, hostID?: string) => Promise<void>;
   removeProject: (projectID: string, hostID?: string) => Promise<void>;
-  startNewThread: (projectID?: string, hostID?: string) => void;
+  /** Undefined keeps the current project; null explicitly starts without one. */
+  startNewThread: (projectID?: string | null, hostID?: string) => void;
+  setNewThreadProject: (projectID: string | null, hostID?: string) => void;
   connectHost: (address: string, code: string) => Promise<void>;
   disconnectHost: (hostID: string) => Promise<void>;
   markHostDisconnected: (hostID: string) => void;
@@ -150,7 +153,7 @@ interface AppStoreState {
   stopHostListen: () => Promise<void>;
   refreshHostStatus: () => Promise<void>;
   addThread: (
-    projectID: string,
+    projectID: string | null,
     provider: ChatProvider,
     model: string,
     title?: string,
@@ -170,7 +173,7 @@ interface AppStoreState {
     speed?: string | null,
   ) => Promise<void>;
   createThreadAndSend: (
-    projectID: string,
+    projectID: string | null,
     provider: ChatProvider,
     model: string,
     prompt: string,
@@ -179,6 +182,7 @@ interface AppStoreState {
     speed?: string | null,
     surface?: ChatSurface,
     environment?: GitEnvironmentMode,
+    hostID?: string,
   ) => Promise<boolean>;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
   createSideChat: (projectID: string, parentThreadID: string) => Promise<ChatThread | null>;
@@ -630,21 +634,23 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
   startNewThread: (projectID, hostID) => {
     const state = get();
+    const currentProject = state.workspace?.projects.find((project) => project.id === state.selectedProjectID)
+      ?? state.remoteSessions
+        .find((session) => session.host.id === state.selectedHostID)
+        ?.workspace.projects.find((project) => project.id === state.selectedProjectID);
+    const explicitWithoutProject = projectID === null;
+    const contextualProjectID = projectID === undefined && currentProject && !isChatsProject(currentProject)
+      ? currentProject.id
+      : null;
+    const requestedProjectID = typeof projectID === "string" ? projectID : contextualProjectID;
     const resolvedHostID = routeHostId(
-      hostID ?? (projectID
-        ? hostForProject(state.remoteSessions, state.workspace, projectID, state.selectedHostID)
-        : state.selectedHostID),
+      hostID ?? (requestedProjectID
+        ? hostForProject(state.remoteSessions, state.workspace, requestedProjectID, state.selectedHostID)
+        : LOCAL_HOST_ID),
     );
-    const catalog = catalogFromState(state);
-    const resolvedProjectID =
-      projectID
-      ?? (resolvedHostID === LOCAL_HOST_ID ? state.selectedProjectID : null)
-      ?? findHostedProject(catalog, resolvedHostID, state.selectedProjectID ?? "")?.id
-      ?? state.workspace?.projects[0]?.id
-      ?? null;
     set({
       selectedHostID: resolvedHostID,
-      selectedProjectID: resolvedProjectID,
+      selectedProjectID: explicitWithoutProject ? null : requestedProjectID,
       selectedThreadID: null,
       newThreadRuntime: { ...get().defaultRuntime },
       newThreadSurface: "gui",
@@ -657,6 +663,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       summaryPopoverOpen: false,
     });
   },
+
+  setNewThreadProject: (projectID, hostID) => set({
+    selectedHostID: routeHostId(hostID ?? (projectID ? get().selectedHostID : LOCAL_HOST_ID)),
+    selectedProjectID: projectID,
+    newThreadEnvironment: "current",
+  }),
 
   addProject: async (folderPath, hostID) => {
     try {
@@ -710,25 +722,28 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     environment = "current",
   ) => {
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
-      const thread =
-        effort || speed || surface === "terminal" || environment === "worktree"
+      const hostID = projectID
+        ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
+        : LOCAL_HOST_ID;
+      const thread = projectID
+        ? effort || speed || surface === "terminal" || environment === "worktree"
           ? await ipc.addThreadWithRuntime(
-              projectID,
-              provider,
-              model,
-              title,
-              effort,
-              speed,
-              surface,
-              hostID,
-              environment === "worktree",
-            )
-          : await ipc.addThread(projectID, provider, model, title, hostID);
+            projectID,
+            provider,
+            model,
+            title,
+            effort,
+            speed,
+            surface,
+            hostID,
+            environment === "worktree",
+          )
+          : await ipc.addThread(projectID, provider, model, title, hostID)
+        : await ipc.addChat(provider, model, title, effort, speed);
       await get().refresh();
       set({
         selectedHostID: hostID,
-        selectedProjectID: projectID,
+        selectedProjectID: projectID ?? CHATS_PROJECT_ID,
         selectedThreadID: thread.id,
         openSideThreadID: null,
         browserOpen: false,
@@ -756,6 +771,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     await get().refresh();
     if (get().selectedThreadID === threadID) {
       set({
+        ...(projectID === CHATS_PROJECT_ID ? { selectedProjectID: null } : {}),
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
         newThreadSurface: "gui",
@@ -807,6 +823,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     speed = null,
     surface = "gui",
     environment = "current",
+    requestedHostID,
   ) => {
     if (!prompt.trim() && (surface === "terminal" || imagePaths.length === 0)) return false;
     const title = prompt.trim().split("\n")[0].slice(0, 64) || "Image attachment";
@@ -822,10 +839,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     );
     if (!thread) return false;
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      const hostID = projectID
+        ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
+        : routeHostId(requestedHostID ?? LOCAL_HOST_ID);
+      const ownerProjectID = projectID ?? CHATS_PROJECT_ID;
       const prepared = await uploadImagesForHost(hostID, surface === "terminal" ? [] : imagePaths);
       const turnID = await ipc.sendPrompt(
-        projectID,
+        ownerProjectID,
         thread.id,
         prompt.trim(),
         prepared.imagePaths,

@@ -13,6 +13,30 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub const CHATS_PROJECT_ID: Uuid = Uuid::from_u128(1);
+
+fn insert_projectless_chat(
+    workspace: &mut WorkspaceDocument,
+    folder_path: &std::path::Path,
+    thread: ChatThread,
+) {
+    let folder_path = folder_path.to_string_lossy().into_owned();
+    if let Some(chats) = workspace
+        .projects
+        .iter_mut()
+        .find(|project| project.id == CHATS_PROJECT_ID)
+    {
+        chats.folder_path = folder_path;
+        chats.threads.push(thread);
+    } else {
+        workspace.projects.push(ChatProject {
+            id: CHATS_PROJECT_ID,
+            folder_path,
+            threads: vec![thread],
+        });
+    }
+}
+
 pub async fn workspace_snapshot(state: Arc<AppState>) -> Result<WorkspaceDocument, String> {
     Ok(state.workspace.lock().await.clone())
 }
@@ -42,6 +66,9 @@ pub async fn add_project(state: Arc<AppState>, folder_path: String) -> Result<Ch
 }
 
 pub async fn remove_project(state: Arc<AppState>, project_id: Uuid) -> Result<(), String> {
+    if project_id == CHATS_PROJECT_ID {
+        return Err("The Chats section is not a project".into());
+    }
     let removed_threads = {
         let mut workspace = state.workspace.lock().await;
         let removed = workspace
@@ -71,6 +98,30 @@ pub async fn remove_project(state: Arc<AppState>, project_id: Uuid) -> Result<()
         crate::attachments::prune_images(&workspace);
     }
     Ok(())
+}
+
+/// Add a chat whose working directory is not a user project or Git repository.
+pub async fn add_chat(
+    state: Arc<AppState>,
+    provider: ChatProvider,
+    model: String,
+    title: String,
+    effort: Option<String>,
+    speed: Option<String>,
+) -> Result<ChatThread, String> {
+    let folder_path = crate::state::chats_dir();
+    std::fs::create_dir_all(&folder_path)
+        .map_err(|error| format!("Could not create the Chats working directory: {error}"))?;
+    let mut thread = ChatThread::new(title, provider, model);
+    thread.effort = effort.filter(|value| !value.trim().is_empty());
+    thread.speed =
+        speed.filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("normal"));
+    {
+        let mut workspace = state.workspace.lock().await;
+        insert_projectless_chat(&mut workspace, &folder_path, thread.clone());
+    }
+    state.save().await;
+    Ok(thread)
 }
 
 pub async fn add_thread(
@@ -1395,6 +1446,30 @@ pub async fn provider_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectless_chats_share_one_non_project_owner() {
+        let mut workspace = WorkspaceDocument::default();
+        let first = ChatThread::new("First".into(), ChatProvider::Codex, "Default".into());
+        let second = ChatThread::new("Second".into(), ChatProvider::Claude, "Default".into());
+
+        insert_projectless_chat(
+            &mut workspace,
+            std::path::Path::new("/tmp/maxx-chats"),
+            first,
+        );
+        insert_projectless_chat(
+            &mut workspace,
+            std::path::Path::new("/tmp/maxx-chats"),
+            second,
+        );
+
+        assert_eq!(workspace.projects.len(), 1);
+        let chats = &workspace.projects[0];
+        assert_eq!(chats.id, CHATS_PROJECT_ID);
+        assert_eq!(chats.folder_path, "/tmp/maxx-chats");
+        assert_eq!(chats.threads.len(), 2);
+    }
 
     fn browser_annotation(id: &str, selector: &str) -> BrowserAnnotationContext {
         BrowserAnnotationContext {
