@@ -37,7 +37,8 @@ const smokeUserData = process.argv.find((argument) => argument.startsWith("--bro
 const BEST_BUY_BENCHMARK = "https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat335400050008&id=pcat17071&qp=brand_facet%3DBrand%7EBambu+Lab%5Estorepickupstores_facet%3DStore+Availability+-+In+Store+Pickup%7E885&st=categoryid%24pcmcat335400050008";
 const HERMES_SMOKE_MODEL = "custom:vllm-spark:unsloth/Qwen3.6-35B-A3B-NVFP4";
 
-if (smokeMode) app.setPath("userData", smokeUserData || path.join(app.getPath("temp"), `maxx-browser-smoke-${process.pid}`));
+if (development) app.setPath("userData", path.join(app.getPath("appData"), `${app.getName()}-dev`));
+else if (smokeMode) app.setPath("userData", smokeUserData || path.join(app.getPath("temp"), `maxx-browser-smoke-${process.pid}`));
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "maxx-media", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } },

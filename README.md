@@ -25,12 +25,19 @@ screenshots as the live page.
 
 ```sh
 pnpm install
-pnpm dev                  # Vite renderer
-pnpm dev:desktop          # Electron shell (run Vite separately)
+pnpm dev                  # Build the Rust sidecar and launch Vite + Electron
+pnpm dev:renderer         # Vite renderer only
+pnpm dev:desktop          # Electron shell only (requires Vite and the sidecar)
 pnpm test                 # frontend unit tests
 cargo test --manifest-path src-tauri/Cargo.toml --workspace
 pnpm build                # renderer + Electron main/preload
 ```
+
+`pnpm dev` is the normal desktop development workflow. Renderer edits use
+Vite/React Fast Refresh. Changes to the Electron main process require restarting
+the command; Rust changes require rebuilding the sidecar and restarting it. The
+development app uses separate application data, so it can run alongside a
+packaged Maxx instance without changing that instance's workspace or session.
 
 Build and launch the actual macOS application with:
 
