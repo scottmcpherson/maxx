@@ -30,6 +30,7 @@ import { ContextRail, SummaryToggle } from "./ThreadSummary";
 import { Icons } from "./Icons";
 import { MentionMenu, useMentionMenu } from "./MentionMenu";
 import { MentionTextarea } from "./MentionTextarea";
+import { SlashCommandMenu, useSlashCommandMenu } from "./SlashCommandMenu";
 import { MessageMedia } from "./MessageMedia";
 import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
 import { RuntimePicker } from "./RuntimePicker";
@@ -194,6 +195,14 @@ export function ThreadView({
   const { draft, setDraft } = dictation;
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
+  const slashCommandMenu = useSlashCommandMenu({
+    provider: thread?.provider ?? "codex",
+    profileId: thread?.providerInstanceID,
+    workingDirectory: project?.folderPath,
+    hostId: selectedHostID,
+    textareaRef: draftRef,
+    setDraft,
+  });
   const images = useImageAttachments();
   const [submitting, setSubmitting] = useState(false);
   const focusAfterNewThreadRef = useRef(selectedThreadID === null);
@@ -319,6 +328,7 @@ export function ThreadView({
     images.clear();
     clearBrowserAnnotations(thread.id);
     mentionMenu.dismiss();
+    slashCommandMenu.dismiss();
     requestAnimationFrame(() => draftRef.current?.focus());
   };
   const changedFiles = new Set(
@@ -440,6 +450,7 @@ export function ThreadView({
             onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
           />
           <div className="composer">
+            <SlashCommandMenu menu={slashCommandMenu} />
             <MentionMenu menu={mentionMenu} />
             <BrowserAnnotationPills
               annotations={[...browserAnnotations]}
@@ -455,16 +466,26 @@ export function ThreadView({
               rows={1}
               value={draft}
               aria-label="Send follow-up"
-              placeholder={agents.length > 0 ? "Send follow-up · @agent for a side thread" : "Send follow-up"}
+              aria-controls={slashCommandMenu.open ? "composer-slash-menu" : undefined}
+              aria-expanded={slashCommandMenu.open}
+              placeholder={agents.length > 0 ? "Send follow-up · / commands · @ agents" : "Send follow-up · / for commands and skills"}
               onChange={(event) => {
                 setDraft(event.target.value);
                 mentionMenu.refresh();
+                slashCommandMenu.refresh();
               }}
-              onClick={mentionMenu.refresh}
+              onClick={() => {
+                mentionMenu.refresh();
+                slashCommandMenu.refresh();
+              }}
               onKeyUp={(event) => {
-                if (event.key.startsWith("Arrow")) mentionMenu.refresh();
+                if (event.key.startsWith("Arrow")) {
+                  mentionMenu.refresh();
+                  slashCommandMenu.refresh();
+                }
               }}
               onKeyDown={(event) => {
+                if (slashCommandMenu.onKeyDown(event)) return;
                 if (mentionMenu.onKeyDown(event)) return;
                 // Escape abandons the utterance in flight rather than keeping
                 // a half-transcribed sentence in the draft.

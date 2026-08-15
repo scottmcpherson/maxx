@@ -249,6 +249,46 @@ pub async fn list_provider_models(
     )
 }
 
+pub async fn list_provider_commands(
+    state: Arc<AppState>,
+    provider: ChatProvider,
+    profile_id: Option<Uuid>,
+    working_directory: Option<String>,
+) -> Result<crate::engine::command_catalog::ProviderCommandCatalog, String> {
+    let mut profile = {
+        let workspace = state.workspace.lock().await;
+        let profile = if let Some(id) = profile_id {
+            workspace
+                .provider_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .cloned()
+        } else {
+            workspace
+                .provider_profiles
+                .iter()
+                .find(|profile| profile.provider == provider && profile.is_enabled)
+                .cloned()
+                .or_else(|| {
+                    workspace
+                        .provider_profiles
+                        .iter()
+                        .find(|profile| profile.provider == provider)
+                        .cloned()
+                })
+        };
+        profile.unwrap_or_else(|| ProviderProfile::default_for(provider))
+    };
+    profile.provider = provider;
+    Ok(
+        crate::engine::command_catalog::resolve_commands_for_profile(
+            &profile,
+            working_directory.as_deref(),
+        )
+        .await,
+    )
+}
+
 pub async fn update_profiles(
     state: Arc<AppState>,
     profiles: Vec<ProviderProfile>,

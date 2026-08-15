@@ -8,6 +8,7 @@ pub mod acp;
 pub mod catalog;
 pub mod claude;
 pub mod codex;
+pub mod command_catalog;
 pub mod jsonrpc;
 pub mod launch;
 pub mod opencode;

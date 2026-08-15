@@ -330,6 +330,27 @@ export interface ProviderModelOption {
   effortLevels?: string[];
 }
 
+export type ProviderCommandKind = "command" | "skill" | "prompt";
+
+export interface ProviderCommandOption {
+  id: string;
+  name: string;
+  invocation: string;
+  displayName: string;
+  description?: string;
+  kind: ProviderCommandKind;
+  source: string;
+  scope?: string;
+  argumentHint?: string;
+  provider: ChatProvider;
+}
+
+export interface ProviderCommandCatalog {
+  items: ProviderCommandOption[];
+  source: "live" | "unavailable";
+  error?: string;
+}
+
 export type ProviderModelCatalogSource = "live" | "unavailable";
 
 export interface ProviderModelCatalog {

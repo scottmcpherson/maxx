@@ -522,6 +522,15 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             )
             .await,
         ),
+        "list_provider_commands" => value(
+            crate::commands::list_provider_commands(
+                state.app.clone(),
+                required(&params, "provider")?,
+                optional(&params, "profileId")?,
+                optional(&params, "workingDirectory")?,
+            )
+            .await,
+        ),
         "resolve_media_source" => value(
             crate::media::resolve_media_source(
                 state.app.clone(),

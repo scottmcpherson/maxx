@@ -2031,6 +2031,57 @@ button.git-environment-row:disabled:hover { background: transparent; }
 .mention-menu-row:hover, .mention-menu-row.active { background: var(--bg-active); color: var(--text); }
 .mention-menu-name { flex: 0 0 auto; }
 .mention-menu-provider { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 10.5px; text-align: right; }
+.slash-command-menu {
+  position: absolute; left: 10px; right: 10px; bottom: calc(100% + 7px); z-index: 42;
+  max-height: 322px; overflow-y: auto; padding: 6px;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 12px;
+  box-shadow: 0 14px 38px rgba(0,0,0,.48);
+}
+.slash-command-menu-header {
+  position: sticky; top: -6px; z-index: 1; height: 30px; padding: 0 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--bg-raised); color: var(--text-faint);
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .055em;
+}
+.slash-command-menu-row {
+  width: 100%; min-height: 48px; padding: 5px 8px; border: 0; border-radius: 8px;
+  display: grid; grid-template-columns: 26px minmax(0,1fr) auto; align-items: center; gap: 9px;
+  background: transparent; color: var(--text-dim); cursor: pointer; text-align: left; font: inherit;
+}
+.slash-command-menu-row:hover, .slash-command-menu-row.active {
+  background: var(--bg-active); color: var(--text);
+}
+.slash-command-menu-icon {
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 7px; background: rgba(255,255,255,.055); color: var(--text-secondary);
+}
+.slash-command-menu-icon.skill { color: #c4b7ff; background: rgba(133,111,255,.14); }
+.slash-command-menu-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.slash-command-menu-copy strong {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); font-size: 12.5px; font-weight: 550;
+}
+.slash-command-menu-copy small {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-faint); font-size: 10.5px;
+}
+.slash-command-menu-meta {
+  max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-faint); font-size: 10.5px; text-transform: capitalize;
+}
+.slash-command-menu-state {
+  min-height: 48px; width: 100%; padding: 8px; border: 0; border-radius: 8px;
+  display: flex; align-items: center; gap: 9px; background: transparent;
+  color: var(--text-secondary); font: inherit; font-size: 11.5px; text-align: left;
+}
+.slash-command-menu-state.error { cursor: pointer; color: var(--red); }
+.slash-command-menu-state.error:hover { background: var(--bg-active); }
+.slash-command-menu-state > span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.slash-command-menu-state strong { color: var(--text); font-size: 11.5px; font-weight: 550; }
+.slash-command-menu-state small {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-faint); font-size: 10.5px;
+}
 .mention-token { color: #b8aaff; font-weight: 550; cursor: default; }
 .user-bubble .mention-token { color: #cfc4ff; }
 /* Composer mirror: the textarea's text is transparent (caret kept) and this

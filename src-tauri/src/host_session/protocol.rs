@@ -60,6 +60,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "load_media"
         | "provider_health"
         | "list_provider_models"
+        | "list_provider_commands"
         | "resolve_media_source" => Some(Capability::WorkspaceRead),
         "create_folder"
         | "git_commit"
@@ -139,6 +140,10 @@ mod tests {
         assert_eq!(
             required_capability("git_push"),
             Some(Capability::WorkspaceWrite)
+        );
+        assert_eq!(
+            required_capability("list_provider_commands"),
+            Some(Capability::WorkspaceRead)
         );
         assert_eq!(required_capability("future_unreviewed_method"), None);
     }

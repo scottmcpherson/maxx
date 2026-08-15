@@ -24,6 +24,7 @@ import {
   ChatThread,
   ChatSurface,
   ProviderHealth,
+  ProviderCommandCatalog,
   ProviderModelCatalog,
   ProviderProfile,
   RuntimeEventEnvelope,
@@ -250,6 +251,17 @@ export const ipc = {
     hostId?: string | null,
   ) =>
     invokeOnHost<ProviderModelCatalog>(hostId, "list_provider_models", {
+      provider,
+      profileId: profileId ?? null,
+      workingDirectory: workingDirectory ?? null,
+    }),
+  listProviderCommands: (
+    provider: ChatProvider,
+    profileId?: string,
+    workingDirectory?: string,
+    hostId?: string | null,
+  ) =>
+    invokeOnHost<ProviderCommandCatalog>(hostId, "list_provider_commands", {
       provider,
       profileId: profileId ?? null,
       workingDirectory: workingDirectory ?? null,

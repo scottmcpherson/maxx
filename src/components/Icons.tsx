@@ -182,6 +182,13 @@ export const Icons = {
       <path d="M7.5 15h9" />
     </IconBase>
   ),
+  sparkles: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="m12 3 1.35 4.15L17.5 8.5l-4.15 1.35L12 14l-1.35-4.15L6.5 8.5l4.15-1.35L12 3Z" />
+      <path d="m18.5 14 .75 2.25L21.5 17l-2.25.75L18.5 20l-.75-2.25L15.5 17l2.25-.75.75-2.25Z" />
+      <path d="m5 13 .6 1.9 1.9.6-1.9.6L5 18l-.6-1.9-1.9-.6 1.9-.6L5 13Z" />
+    </IconBase>
+  ),
   files: (props: IconProps) => (
     <IconBase {...props}><path d="M7 3.5h8l3 3v14H7z" /><path d="M15 3.5v4h3M4 7v13h10" /></IconBase>
   ),
