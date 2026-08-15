@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-universal:
+    name: macOS universal
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.20.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME must match package.json version v$VERSION." >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Run tests
+        run: |
+          pnpm test
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/maxx-release.keychain-db"
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_PASSWORD" || -z "$APPLE_SIGNING_IDENTITY" ]]; then
+            echo "Apple signing secrets are not configured." >&2
+            exit 1
+          fi
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -p codesigning -v "$KEYCHAIN_PATH" | grep -F "Developer ID Application: $APPLE_SIGNING_IDENTITY"
+          echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build, sign, and notarize
+        env:
+          CSC_NAME: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$APPLE_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" || -z "$APPLE_TEAM_ID" ]]; then
+            echo "Apple notarization secrets are not configured." >&2
+            exit 1
+          fi
+          pnpm build
+          pnpm build:runtime:universal
+          pnpm exec electron-builder --mac dmg zip --universal --publish never
+
+      - name: Verify signed local artifact
+        run: |
+          set -euo pipefail
+          APP="release/mac-universal/Maxx.app"
+          test -d "$APP"
+          lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q arm64
+          lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q x86_64
+          lipo -archs "$APP/Contents/Resources/bin/maxx-runtime" | grep -q arm64
+          lipo -archs "$APP/Contents/Resources/bin/maxx-runtime" | grep -q x86_64
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            release/*.dmg
+            release/*.dmg.blockmap
+            release/*.zip
+            release/*.zip.blockmap
+            release/latest-mac.yml
+          )
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Maxx $VERSION" \
+              --generate-notes \
+              "${ASSETS[@]}"
+          fi
+
+      - name: Download and verify published DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DOWNLOAD_DIR="$RUNNER_TEMP/downloaded-release"
+          MOUNT_POINT="$RUNNER_TEMP/maxx-dmg"
+          mkdir -p "$DOWNLOAD_DIR" "$MOUNT_POINT"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "*.dmg" --dir "$DOWNLOAD_DIR"
+          DMG="$(find "$DOWNLOAD_DIR" -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$DMG"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          trap 'hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true' EXIT
+          APP="$MOUNT_POINT/Maxx.app"
+          test -d "$APP"
+          lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q arm64
+          lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q x86_64
+          lipo -archs "$APP/Contents/Resources/bin/maxx-runtime" | grep -q arm64
+          lipo -archs "$APP/Contents/Resources/bin/maxx-runtime" | grep -q x86_64
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          "$APP/Contents/MacOS/Maxx" --app-smoke
+          hdiutil detach "$MOUNT_POINT" -force
+          trap - EXIT
