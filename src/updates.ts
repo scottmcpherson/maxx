@@ -4,9 +4,16 @@
 export type UpdateStatus =
   | { state: "checking" }
   | { state: "upToDate"; version: string }
-  | { state: "available"; version: string; notes: string | null }
-  | { state: "unconfigured"; detail: string }
+  | { state: "available"; version: string; notes: string | null; date: string | null }
+  | { state: "downloading"; version: string; percent: number | null }
+  | { state: "ready"; version: string }
+  | { state: "unavailable"; detail: string }
   | { state: "failed"; message: string };
+
+export type ActionableUpdateStatus = Extract<
+  UpdateStatus,
+  { state: "available" | "downloading" | "ready" }
+>;
 
 export type UpdateStatusTone = "info" | "good" | "warning";
 
@@ -21,8 +28,14 @@ export function describeUpdateStatus(status: UpdateStatus): string {
       return `Maxx ${status.version} is up to date.`;
     case "available":
       return `Maxx ${status.version} is available.`;
-    case "unconfigured":
-      return `Updates are not configured. ${status.detail}`;
+    case "downloading":
+      return status.percent === null
+        ? `Downloading Maxx ${status.version}…`
+        : `Downloading Maxx ${status.version}… ${status.percent}%`;
+    case "ready":
+      return `Maxx ${status.version} is ready to install.`;
+    case "unavailable":
+      return status.detail;
     case "failed":
       return `Update check failed. ${status.message}`;
   }
@@ -31,8 +44,9 @@ export function describeUpdateStatus(status: UpdateStatus): string {
 export function updateStatusTone(status: UpdateStatus): UpdateStatusTone {
   switch (status.state) {
     case "available":
+    case "ready":
       return "good";
-    case "unconfigured":
+    case "unavailable":
     case "failed":
       return "warning";
     default:
@@ -42,5 +56,9 @@ export function updateStatusTone(status: UpdateStatus): UpdateStatusTone {
 
 /** `checking` is a spinner state — it is replaced, not timed out. */
 export function isSettledUpdateStatus(status: UpdateStatus): boolean {
-  return status.state !== "checking";
+  return status.state !== "checking" && status.state !== "downloading";
+}
+
+export function shouldShowUpdateButton(status: UpdateStatus | null): status is ActionableUpdateStatus {
+  return status?.state === "available" || status?.state === "downloading" || status?.state === "ready";
 }

@@ -708,6 +708,14 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
   flex-direction: column;
   gap: 2px;
 }
+.sidebar-update-button {
+  color: var(--link);
+  background: color-mix(in srgb, var(--link) 10%, transparent);
+}
+.sidebar-update-button:hover { background: color-mix(in srgb, var(--link) 16%, transparent); }
+.sidebar-update-button small { margin-left: auto; color: currentColor; font-size: 10.5px; opacity: .72; }
+.sidebar-update-button:disabled { cursor: default; opacity: .82; }
+.sidebar-update-button.is-downloading > svg { animation: spin .85s linear infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   .bell-dot,

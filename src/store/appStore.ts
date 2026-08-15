@@ -230,6 +230,8 @@ interface AppStoreState {
   clearBrowserAnnotations: (threadID: string) => void;
   setUpdateStatus: (status: UpdateStatus | null) => void;
   checkForUpdates: () => Promise<void>;
+  installUpdate: () => Promise<void>;
+  restartToInstallUpdate: () => Promise<void>;
   setDefaultRuntime: (selection: RuntimeSelection) => void;
   setNewThreadRuntime: (selection: RuntimeSelection) => void;
   setNewThreadSurface: (surface: ChatSurface) => void;
@@ -1163,6 +1165,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     } catch (error) {
       set({ updateStatus: { state: "failed", message: String(error) } });
     }
+  },
+  installUpdate: async () => {
+    const status = await ipc.installUpdate();
+    if (status) set({ updateStatus: status });
+  },
+  restartToInstallUpdate: async () => {
+    set({ updateStatus: await ipc.restartToInstallUpdate() });
   },
   setDefaultRuntime: (selection) => {
     const defaultRuntime = persistDefaultRuntime(selection);

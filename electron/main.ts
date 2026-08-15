@@ -21,6 +21,7 @@ import { BrowserManager } from "./browser-manager.js";
 import { ChromeImporter } from "./chrome-importer.js";
 import type { BrowserAnnotationSelection, BrowserEngineContext, BrowserOperation, BrowserViewBounds, JsonValue } from "./contracts.js";
 import { SidecarClient } from "./sidecar-client.js";
+import { MaxxUpdater } from "./updater.js";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(sourceDirectory, "..");
@@ -47,6 +48,7 @@ let browser: BrowserManager | null = null;
 let runtime: SidecarClient | null = null;
 let chromeImporter: ChromeImporter | null = null;
 let tray: Tray | null = null;
+let updater: MaxxUpdater | null = null;
 let quitting = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
@@ -104,6 +106,8 @@ function installMenu(toggleSidebar?: string | null, toggleBrowser?: string | nul
   const template: Electron.MenuItemConstructorOptions[] = [
     { role: "appMenu", submenu: [
       { label: "About Maxx", role: "about" }, { type: "separator" },
+      { label: "Check for Updates…", click: () => void updater?.checkForUpdates(true) },
+      { type: "separator" },
       { label: "Settings…", accelerator: "CommandOrControl+,", click: () => send("settings") },
       { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" },
       { type: "separator" }, { role: "quit" },
@@ -238,7 +242,10 @@ async function runAppSmoke(): Promise<void> {
   if (!state.bridge || !state.newChat || !state.projects) throw new Error(`packaged renderer did not become ready: ${JSON.stringify(state)}`);
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
-  const project = await runtime!.request("add_project", { folderPath: runtimeWorkingDirectory() }, 5_000) as Record<string, JsonValue>;
+  // Exercise Git-backed UI against the caller's checkout. A packaged app's
+  // resources directory happens to sit under this repository in local builds,
+  // but it lives on a read-only, non-Git volume after mounting a downloaded DMG.
+  const project = await runtime!.request("add_project", { folderPath: process.cwd() }, 5_000) as Record<string, JsonValue>;
   const projectId = String(project.id ?? "");
   const thread = await runtime!.request("add_thread", {
     projectId,
@@ -690,7 +697,33 @@ function registerIPC(): void {
         installMenu(typeof params.toggleSidebar === "string" ? params.toggleSidebar : null, typeof params.toggleBrowser === "string" ? params.toggleBrowser : null);
         return null;
       case "check_for_updates":
-        return { state: "unavailable", message: "Updates are unavailable in local builds." };
+        return await updater?.checkForUpdates(true) ?? {
+          state: "unavailable",
+          detail: "Updates are available in signed release builds.",
+        };
+      case "install_update":
+        if (mainWindow) {
+          const confirmation = await dialog.showMessageBox(mainWindow, {
+            type: "info",
+            title: "Install Maxx Update",
+            message: "Install the available Maxx update?",
+            detail: "Maxx will download the signed update and relaunch when it is ready.",
+            buttons: ["Later", "Install and Relaunch"],
+            defaultId: 1,
+            cancelId: 0,
+            noLink: true,
+          });
+          if (confirmation.response === 0) return null;
+        }
+        return await updater?.downloadAndInstall() ?? {
+          state: "failed",
+          message: "The updater is not ready.",
+        };
+      case "restart_to_install_update":
+        return updater?.restartToInstall() ?? {
+          state: "failed",
+          message: "The updater is not ready.",
+        };
       default: {
         if (!RUNTIME_METHODS.has(method)) throw new Error(`IPC method is not allowed: ${method}`);
         if (!runtime) throw new Error("Maxx runtime is not ready");
@@ -751,6 +784,13 @@ else {
     });
     if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(path.join(projectDirectory, "src-tauri", "icons", "128x128.png")));
     await createWindow();
+    updater = new MaxxUpdater(
+      (status) => emitRenderer("updater://status", status),
+      () => { quitting = true; },
+      app.isPackaged,
+      app.getVersion(),
+    );
+    await updater.initialize();
     app.on("activate", () => { if (!mainWindow) void createWindow(); else mainWindow.show(); });
   }).catch((error) => { dialog.showErrorBox("Maxx could not start", String(error)); app.quit(); });
   app.on("before-quit", () => { quitting = true; browser?.shutdown(); runtime?.shutdown(); });

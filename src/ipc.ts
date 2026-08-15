@@ -370,6 +370,8 @@ export const ipc = {
 
   /** Same check the "Check for Updates…" menu item runs. */
   checkForUpdates: () => invoke<UpdateStatus>("check_for_updates"),
+  installUpdate: () => invoke<UpdateStatus | null>("install_update"),
+  restartToInstallUpdate: () => invoke<UpdateStatus>("restart_to_install_update"),
 
   /**
    * Rebinds the key equivalents of the two remappable View items. AppKit owns

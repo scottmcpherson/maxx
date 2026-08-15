@@ -288,6 +288,12 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
     case "check_for_updates":
       result = { state: "upToDate", version: "0.1.0" };
       break;
+    case "install_update":
+      result = { state: "downloading", version: "0.2.0", percent: 0 };
+      break;
+    case "restart_to_install_update":
+      result = { state: "ready", version: "0.2.0" };
+      break;
     case "update_profiles":
       localWorkspace = { ...localWorkspace, providerProfiles: params.profiles as ProviderProfile[] };
       result = localWorkspace.providerProfiles;
@@ -426,13 +432,24 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
 export function installBrowserPreviewBridge(): void {
   if (!import.meta.env.DEV || typeof window.maxx !== "undefined") return;
 
+  const simulatedUpdateVersion = new URLSearchParams(window.location.search).get("update");
+
   window.maxx = {
     invoke,
     listen: (event, callback) => {
+      const callbackUnknown = callback as (payload: unknown) => void;
       const eventListeners = listeners.get(event) ?? new Set();
-      eventListeners.add(callback as (payload: unknown) => void);
+      eventListeners.add(callbackUnknown);
       listeners.set(event, eventListeners);
-      return () => eventListeners.delete(callback as (payload: unknown) => void);
+      if (event === "updater://status" && simulatedUpdateVersion) {
+        queueMicrotask(() => callbackUnknown({
+          state: "available",
+          version: simulatedUpdateVersion,
+          notes: null,
+          date: new Date().toISOString(),
+        }));
+      }
+      return () => eventListeners.delete(callbackUnknown);
     },
     mediaURL: () => "",
   };

@@ -29,6 +29,7 @@ pkill -f "$RUNTIME_BINARY_PATTERN" >/dev/null 2>&1 || true
 
 cd "$ROOT_DIR"
 cargo build --release --manifest-path src-tauri/Cargo.toml
+node script/stage_runtime.mjs
 "$ROOT_DIR/node_modules/.bin/tsc" --noEmit
 "$ROOT_DIR/node_modules/.bin/vite" build
 "$ROOT_DIR/node_modules/.bin/tsc" -p electron/tsconfig.json

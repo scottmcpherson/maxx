@@ -139,6 +139,9 @@ export const Icons = {
   arrowDown: (props: IconProps) => (
     <IconBase {...props}><path d="M12 5v14m-5-5 5 5 5-5" /></IconBase>
   ),
+  download: (props: IconProps) => (
+    <IconBase {...props}><path d="M12 4v11m-4-4 4 4 4-4" /><path d="M5 20h14" /></IconBase>
+  ),
   stop: (props: IconProps) => (
     <IconBase {...props}><rect x="7.5" y="7.5" width="9" height="9" rx="1.5" fill="currentColor" stroke="none" /></IconBase>
   ),

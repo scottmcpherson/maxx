@@ -4,6 +4,7 @@
 # Frontend build and test output
 /dist/
 /dist-electron/
+/build/
 /release/
 /.pnpm-store/
 /coverage/

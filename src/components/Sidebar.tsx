@@ -30,6 +30,7 @@ import { threadActivity } from "../store/threadActivity";
 import { beginWindowDrag } from "../windowDrag";
 import { relativeTime } from "../relativeTime";
 import { Icons } from "./Icons";
+import { SidebarUpdateButton } from "./SidebarUpdateButton";
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = "maxx.sidebar.collapsed-projects";
 const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-collapsed";
@@ -623,6 +624,7 @@ export function Sidebar() {
       </section>
 
       <nav className="sidebar-footer" aria-label="Settings">
+        <SidebarUpdateButton />
         <button
           className={`nav-row ${settingsOpen ? "active" : ""}`}
           onClick={() => setSettingsOpen(true)}

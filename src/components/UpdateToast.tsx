@@ -23,6 +23,7 @@ export function UpdateToast() {
   }, [setUpdateStatus, status]);
 
   if (!status) return null;
+  if (status.state === "available" || status.state === "downloading" || status.state === "ready") return null;
 
   return (
     <div className={`update-toast tone-${updateStatusTone(status)}`} role="status" aria-live="polite">
