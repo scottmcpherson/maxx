@@ -35,12 +35,13 @@ export const Icons = {
     <IconBase {...props}><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></IconBase>
   ),
   folder: (props: IconProps) => (
-    <IconBase {...props}><path d="M3.5 7.5h6l2-2h9v13h-17z" /></IconBase>
+    <IconBase {...props}>
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </IconBase>
   ),
   folderOpen: (props: IconProps) => (
     <IconBase {...props}>
-      <path d="M3.5 12.5V6h6l2 2h8v2" />
-      <path d="M3.5 12.5h4l2-3h11l-2 9h-15z" />
+      <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
     </IconBase>
   ),
   plus: (props: IconProps) => (

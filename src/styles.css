@@ -593,7 +593,7 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
   display: flex; align-items: center; gap: 6px;
   border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer;
 }
-.project-folder { color: var(--sidebar-meta); display: flex; flex: 0 0 auto; }
+.project-folder { color: var(--sidebar-text); display: flex; flex: 0 0 auto; }
 .project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sidebar-text); }
 .project-header-actions {
   display: flex; align-items: center; gap: 0;
@@ -1744,21 +1744,25 @@ button.git-environment-row:disabled:hover { background: transparent; }
 }
 .new-agent-context-controls { min-width: 0; display: flex; align-items: center; gap: 2px; }
 .new-agent-context-control { position: relative; }
-.new-agent-project-chip { display: flex; align-items: center; border-radius: 9px; }
+.new-agent-project-chip { position: relative; display: flex; align-items: center; border-radius: 9px; }
 .new-agent-project-chip.has-project:hover,
 .new-agent-project-chip.has-project:focus-within { background: rgba(255,255,255,.075); }
 .new-agent-project-chip.has-project .new-agent-context-button:hover,
 .new-agent-project-chip.has-project .new-agent-context-button.is-active { background: transparent; }
+.new-agent-project-chip.has-project > .new-agent-context-button > svg { transition: opacity .1s ease; }
+.new-agent-project-chip.has-project:hover > .new-agent-context-button > svg,
+.new-agent-project-clear:focus-visible + .new-agent-context-button > svg { opacity: 0; }
 .new-agent-project-clear {
-  width: 0; height: 24px; padding: 0; overflow: hidden;
-  display: grid; place-items: center; flex: 0 0 auto;
+  position: absolute; z-index: 1; top: 50%; left: 3px;
+  width: 24px; height: 24px; padding: 0;
+  display: grid; place-items: center;
   border: 0; border-radius: 50%; background: transparent; color: #aaa; cursor: pointer;
-  opacity: 0; transform: scale(.8);
-  transition: width .12s ease, opacity .1s ease, transform .12s ease, margin-left .12s ease;
+  opacity: 0; pointer-events: none; transform: translateY(-50%) scale(.8);
+  transition: opacity .1s ease, transform .12s ease;
 }
 .new-agent-project-chip.has-project:hover .new-agent-project-clear,
 .new-agent-project-clear:focus-visible {
-  width: 24px; margin-left: 4px; opacity: 1; transform: scale(1);
+  opacity: 1; pointer-events: auto; transform: translateY(-50%) scale(1);
 }
 .new-agent-project-clear:hover { background: rgba(255,255,255,.1); color: #eee; }
 .new-agent-project-clear:disabled { cursor: default; }
