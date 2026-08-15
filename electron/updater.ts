@@ -46,7 +46,7 @@ export class MaxxUpdater {
   async initialize(): Promise<void> {
     if (!this.packaged) return;
 
-    const electronUpdater = await import("electron-updater");
+    const electronUpdater = (await import("electron-updater")).default;
     const updater = electronUpdater.autoUpdater;
     this.updater = updater;
     updater.autoDownload = false;

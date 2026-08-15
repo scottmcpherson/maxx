@@ -1,7 +1,7 @@
 {
   "name": "maxx",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A native desktop workspace for multi-provider AI agents with a shared Chromium browser.",
   "author": "Scott McPherson",
   "type": "module",

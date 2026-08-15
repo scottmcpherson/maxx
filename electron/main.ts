@@ -78,6 +78,16 @@ function emitRenderer(event: string, payload: JsonValue): void {
   if (window && !window.isDestroyed()) window.webContents.send(`maxx:event:${event}`, payload);
 }
 
+async function initializeUpdater(): Promise<void> {
+  updater = new MaxxUpdater(
+    (status) => emitRenderer("updater://status", status),
+    () => { quitting = true; },
+    app.isPackaged,
+    app.getVersion(),
+  );
+  await updater.initialize();
+}
+
 function runtimeExecutable(): string {
   if (app.isPackaged) return path.join(process.resourcesPath, "bin", "maxx-runtime");
   return path.join(projectDirectory, "src-tauri", "target", "debug", "maxx");
@@ -744,7 +754,10 @@ else {
   app.whenReady().then(async () => {
     if (appSmoke) {
       let exitCode = 0;
-      try { await runAppSmoke(); }
+      try {
+        await initializeUpdater();
+        await runAppSmoke();
+      }
       catch (error) { process.stderr.write(`MAXX_APP_SMOKE_FAILED ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); exitCode = 1; }
       browser?.shutdown();
       browser = null;
@@ -784,13 +797,7 @@ else {
     });
     if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(path.join(projectDirectory, "src-tauri", "icons", "128x128.png")));
     await createWindow();
-    updater = new MaxxUpdater(
-      (status) => emitRenderer("updater://status", status),
-      () => { quitting = true; },
-      app.isPackaged,
-      app.getVersion(),
-    );
-    await updater.initialize();
+    await initializeUpdater();
     app.on("activate", () => { if (!mainWindow) void createWindow(); else mainWindow.show(); });
   }).catch((error) => { dialog.showErrorBox("Maxx could not start", String(error)); app.quit(); });
   app.on("before-quit", () => { quitting = true; browser?.shutdown(); runtime?.shutdown(); });
