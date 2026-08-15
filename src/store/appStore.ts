@@ -78,6 +78,7 @@ import {
 } from "../host/session";
 import { uploadImagesForHost } from "../host/mediaUpload";
 import type { QueuedMessage } from "../messageQueue";
+import type { GitEnvironmentMode } from "../git";
 
 let listenersStarted = false;
 const initialDefaultRuntime = loadDefaultRuntime();
@@ -123,6 +124,8 @@ interface AppStoreState {
   newThreadRuntime: RuntimeSelection;
   /** Surface selected for the next chat. Reset after leaving the composer. */
   newThreadSurface: ChatSurface;
+  /** Repository environment selected for the next chat. */
+  newThreadEnvironment: GitEnvironmentMode;
   keyboardShortcuts: KeyboardShortcutBindings;
   /** Non-fatal notices emitted by provider runtimes, hidden from chat by default. */
   showProviderDiagnostics: boolean;
@@ -151,6 +154,7 @@ interface AppStoreState {
     effort?: string | null,
     speed?: string | null,
     surface?: ChatSurface,
+    environment?: GitEnvironmentMode,
   ) => Promise<ChatThread | null>;
   removeThread: (projectID: string, threadID: string) => Promise<void>;
   renameThread: (projectID: string, threadID: string, title: string) => Promise<boolean>;
@@ -171,6 +175,7 @@ interface AppStoreState {
     effort?: string | null,
     speed?: string | null,
     surface?: ChatSurface,
+    environment?: GitEnvironmentMode,
   ) => Promise<boolean>;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
   drainPromptQueue: (threadID: string) => Promise<boolean>;
@@ -228,6 +233,7 @@ interface AppStoreState {
   setDefaultRuntime: (selection: RuntimeSelection) => void;
   setNewThreadRuntime: (selection: RuntimeSelection) => void;
   setNewThreadSurface: (surface: ChatSurface) => void;
+  setNewThreadEnvironment: (environment: GitEnvironmentMode) => void;
   setKeyboardShortcut: (command: KeyboardShortcutCommand, binding: KeyboardShortcutBinding) => void;
   resetKeyboardShortcut: (command: KeyboardShortcutCommand) => void;
   setShowProviderDiagnostics: (visible: boolean) => void;
@@ -373,6 +379,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   defaultRuntime: { ...initialDefaultRuntime },
   newThreadRuntime: { ...initialDefaultRuntime },
   newThreadSurface: "gui",
+  newThreadEnvironment: "current",
   keyboardShortcuts: loadKeyboardShortcuts(),
   showProviderDiagnostics: loadShowProviderDiagnostics(),
   terminalModeEnabled: loadTerminalModeEnabled(),
@@ -621,6 +628,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       selectedThreadID: null,
       newThreadRuntime: { ...get().defaultRuntime },
       newThreadSurface: "gui",
+      newThreadEnvironment: "current",
       settingsOpen: false,
       agentsOpen: false,
       renamingThread: null,
@@ -641,6 +649,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
         newThreadSurface: "gui",
+        newThreadEnvironment: "current",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -662,6 +671,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
         newThreadSurface: "gui",
+        newThreadEnvironment: "current",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -677,11 +687,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     effort = null,
     speed = null,
     surface = "gui",
+    environment = "current",
   ) => {
     try {
       const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       const thread =
-        effort || speed || surface === "terminal"
+        effort || speed || surface === "terminal" || environment === "worktree"
           ? await ipc.addThreadWithRuntime(
               projectID,
               provider,
@@ -691,6 +702,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               speed,
               surface,
               hostID,
+              environment === "worktree",
             )
           : await ipc.addThread(projectID, provider, model, title, hostID);
       await get().refresh();
@@ -702,6 +714,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         browserOpen: false,
         summaryPopoverOpen: false,
         newThreadSurface: "gui",
+        newThreadEnvironment: "current",
       });
       return thread;
     } catch (error) {
@@ -726,6 +739,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         selectedThreadID: null,
         newThreadRuntime: { ...get().defaultRuntime },
         newThreadSurface: "gui",
+        newThreadEnvironment: "current",
         openSideThreadID: null,
         browserOpen: false,
         summaryPopoverOpen: false,
@@ -772,10 +786,20 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     effort = null,
     speed = null,
     surface = "gui",
+    environment = "current",
   ) => {
     if (!prompt.trim() && (surface === "terminal" || imagePaths.length === 0)) return false;
     const title = prompt.trim().split("\n")[0].slice(0, 64) || "Image attachment";
-    const thread = await get().addThread(projectID, provider, model, title, effort, speed, surface);
+    const thread = await get().addThread(
+      projectID,
+      provider,
+      model,
+      title,
+      effort,
+      speed,
+      surface,
+      environment,
+    );
     if (!thread) return false;
     try {
       const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
@@ -1156,6 +1180,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     set({ newThreadRuntime });
   },
   setNewThreadSurface: (surface) => set({ newThreadSurface: surface }),
+  setNewThreadEnvironment: (environment) => set({ newThreadEnvironment: environment }),
   setKeyboardShortcut: (command, binding) => {
     const keyboardShortcuts = {
       ...get().keyboardShortcuts,

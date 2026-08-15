@@ -9,9 +9,11 @@ const REFRESH_INTERVAL_MS = 2_500;
 export function GitEnvironment({
   projectID,
   hostID,
+  threadID,
 }: {
   projectID: string;
   hostID?: string | null;
+  threadID?: string | null;
 }) {
   const [status, setStatus] = useState<GitRepositoryStatus | null>(null);
   const [open, setOpen] = useState(false);
@@ -28,7 +30,7 @@ export function GitEnvironment({
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
     try {
-      const next = await ipc.gitStatus(projectID, hostID);
+      const next = await ipc.gitStatus(projectID, hostID, threadID);
       if (generation === refreshGeneration.current) {
         setStatus(next);
       }
@@ -37,7 +39,7 @@ export function GitEnvironment({
         setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
       }
     }
-  }, [hostID, projectID]);
+  }, [hostID, projectID, threadID]);
 
   useEffect(() => {
     busyRef.current = busy;
@@ -103,12 +105,12 @@ export function GitEnvironment({
     setError(null);
     setNotice(null);
     try {
-      let next = await ipc.gitCommit(projectID, message, hostID);
+      let next = await ipc.gitCommit(projectID, message, hostID, threadID);
       setStatus(next);
       setMessage("");
       setNotice("Commit created");
       if (pushAfter) {
-        next = await ipc.gitPush(projectID, hostID);
+        next = await ipc.gitPush(projectID, hostID, threadID);
         setStatus(next);
         setNotice("Committed and pushed");
       }
@@ -133,7 +135,7 @@ export function GitEnvironment({
     setError(null);
     setNotice(null);
     try {
-      const next = await ipc.gitPush(projectID, hostID);
+      const next = await ipc.gitPush(projectID, hostID, threadID);
       setStatus(next);
       setNotice("Branch pushed");
     } catch (operationError) {

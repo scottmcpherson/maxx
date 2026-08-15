@@ -145,7 +145,7 @@ const remoteHost: RemoteHostStatus = {
 let hostStatus: HostStatus = {
   id: "browser-preview",
   name: "This Mac",
-  protocolVersion: 2,
+  protocolVersion: 4,
   listening: true,
   bindAddress: "127.0.0.1:7422",
   shareAddress: "this-mac.tailnet.ts.net:7422",
@@ -261,6 +261,12 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
         remotes: ["origin"],
       };
       break;
+    case "git_branches":
+      result = { current: "main", branches: ["main", "codex/new-chat-context"] };
+      break;
+    case "git_checkout":
+    case "git_create_branch":
+      throw new Error("Git mutations require the desktop app");
     case "git_commit":
     case "git_push":
       throw new Error("Git mutations require the desktop app");

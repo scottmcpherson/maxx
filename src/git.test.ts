@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { gitCanPush, gitFileStatusLabel, gitPrimaryAction, type GitRepositoryStatus } from "./git";
+import {
+  gitCanPush,
+  gitFileStatusLabel,
+  gitPrimaryAction,
+  threadWorkingDirectory,
+  type GitRepositoryStatus,
+} from "./git";
 
 function status(overrides: Partial<GitRepositoryStatus> = {}): GitRepositoryStatus {
   return {
@@ -53,5 +59,13 @@ describe("gitCanPush", () => {
     expect(gitCanPush(status({ upstream: null, remotes: [] }))).toBe(false);
     expect(gitCanPush(status({ upstream: null, remotes: ["fork", "company"] }))).toBe(false);
     expect(gitCanPush(status({ upstream: null, remotes: ["fork"] }))).toBe(true);
+  });
+});
+
+describe("threadWorkingDirectory", () => {
+  it("uses an isolated worktree only for threads that own one", () => {
+    expect(threadWorkingDirectory("/repo", {})).toBe("/repo");
+    expect(threadWorkingDirectory("/repo", { workingDirectory: "/worktrees/chat/repo" }))
+      .toBe("/worktrees/chat/repo");
   });
 });

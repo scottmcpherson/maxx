@@ -298,7 +298,11 @@ impl TerminalBroker {
                     profile.id = thread.instance_id();
                     profile
                 });
-            (thread, project.folder_path.clone(), profile)
+            let folder_path = thread
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| project.folder_path.clone());
+            (thread, folder_path, profile)
         };
         let session_id = thread
             .provider_session_id
@@ -612,7 +616,11 @@ impl TerminalBroker {
                     profile.id = thread.instance_id();
                     profile
                 });
-            (thread, project.folder_path.clone(), profile)
+            let folder_path = thread
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| project.folder_path.clone());
+            (thread, folder_path, profile)
         };
         let session = self.sessions.lock().await.get(&thread_id).cloned();
         if let Some(session) = &session {

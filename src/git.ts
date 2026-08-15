@@ -20,6 +20,20 @@ export interface GitRepositoryStatus {
   remotes: string[];
 }
 
+export interface GitBranchList {
+  current: string | null;
+  branches: string[];
+}
+
+export type GitEnvironmentMode = "current" | "worktree";
+
+export function threadWorkingDirectory(
+  projectFolder: string,
+  thread: { workingDirectory?: string | null },
+): string {
+  return thread.workingDirectory || projectFolder;
+}
+
 export type GitPrimaryAction = "commit" | "push" | "none";
 
 export function gitCanPush(status: GitRepositoryStatus): boolean {

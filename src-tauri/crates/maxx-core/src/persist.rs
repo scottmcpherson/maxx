@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,6 +158,14 @@ pub struct ChatThread {
     /// Which first-class conversation surface should own this thread.
     #[serde(default)]
     pub surface: ChatSurface,
+    /// Thread-scoped working directory. Present only when the chat owns an
+    /// isolated Git worktree; ordinary chats use their project's folder.
+    #[serde(
+        rename = "workingDirectory",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub working_directory: Option<String>,
     #[serde(
         rename = "providerSessionID",
         skip_serializing_if = "Option::is_none",
@@ -228,6 +236,7 @@ impl ChatThread {
             effort: None,
             speed: None,
             surface: ChatSurface::Gui,
+            working_directory: None,
             provider_session_id: None,
             provider_resume_cursor: None,
             last_turn_id: None,

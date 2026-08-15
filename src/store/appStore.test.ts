@@ -36,6 +36,7 @@ afterEach(() => {
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadSurface: "gui",
+    newThreadEnvironment: "current",
     terminalModeEnabled: false,
   });
   vi.restoreAllMocks();
@@ -78,7 +79,7 @@ describe("terminal chat creation", () => {
     )).resolves.toBe(true);
 
     expect(add).toHaveBeenCalledWith(
-      "project", "codex", "Default", "Continue in the terminal", null, null, "terminal", LOCAL_HOST_ID,
+      "project", "codex", "Default", "Continue in the terminal", null, null, "terminal", LOCAL_HOST_ID, false,
     );
     expect(upload).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledWith(
@@ -90,6 +91,50 @@ describe("terminal chat creation", () => {
     await expect(useAppStore.getState().createThreadAndSend(
       "project", "codex", "Default", "", ["/tmp/image.png"], null, null, "terminal",
     )).resolves.toBe(false);
+  });
+});
+
+describe("worktree chat creation", () => {
+  it("asks the owning remote host to create the worktree before the first turn", async () => {
+    const local = sampleWorkspace("/tmp/local", "local-project");
+    const remote = sampleWorkspace("/srv/repo", "remote-project");
+    useAppStore.setState({
+      workspace: local,
+      remoteSessions: [{
+        host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+        workspace: remote,
+      }],
+      selectedHostID: "mini",
+      selectedProjectID: "remote-project",
+      selectedThreadID: null,
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+    const thread = {
+      ...remote.projects[0].threads[0],
+      id: "worktree-thread",
+      workingDirectory: "/data/Maxx/worktrees/worktree-thread/repo",
+    };
+    const add = vi.spyOn(ipc, "addThreadWithRuntime").mockResolvedValue(thread);
+    const send = vi.spyOn(ipc, "sendPrompt").mockResolvedValue("turn-worktree");
+
+    await expect(useAppStore.getState().createThreadAndSend(
+      "remote-project",
+      "codex",
+      "Default",
+      "Make an isolated change",
+      [],
+      null,
+      null,
+      "gui",
+      "worktree",
+    )).resolves.toBe(true);
+
+    expect(add).toHaveBeenCalledWith(
+      "remote-project", "codex", "Default", "Make an isolated change", null, null, "gui", "mini", true,
+    );
+    expect(send).toHaveBeenCalledWith(
+      "remote-project", "worktree-thread", "Make an isolated change", [], "mini", [],
+    );
   });
 });
 

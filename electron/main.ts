@@ -50,7 +50,7 @@ let tray: Tray | null = null;
 let quitting = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
-  "workspace_snapshot", "active_turns", "git_status", "git_commit", "git_push",
+  "workspace_snapshot", "active_turns", "git_status", "git_branches", "git_checkout", "git_create_branch", "git_commit", "git_push",
   "add_project", "remove_project", "add_thread",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",

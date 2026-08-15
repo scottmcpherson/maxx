@@ -1,4 +1,4 @@
-//! Project-scoped Git status and mutation commands.
+//! Project- and thread-scoped Git status and mutation commands.
 //!
 //! The renderer supplies only a project id. The trusted workspace document is
 //! authoritative for the working directory, and every Git invocation uses an
@@ -44,25 +44,110 @@ pub struct GitRepositoryStatus {
     pub remotes: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchList {
+    pub current: Option<String>,
+    pub branches: Vec<String>,
+}
+
 impl GitRepositoryStatus {
     pub fn has_changes(&self) -> bool {
         !self.files.is_empty()
     }
 }
 
-async fn project_folder(state: &AppState, project_id: Uuid) -> Result<PathBuf, String> {
-    let folder = state
+async fn working_folder(
+    state: &AppState,
+    project_id: Uuid,
+    thread_id: Option<Uuid>,
+) -> Result<PathBuf, String> {
+    let folder: PathBuf = state
         .workspace
         .lock()
         .await
         .projects
         .iter()
         .find(|project| project.id == project_id)
-        .map(|project| PathBuf::from(&project.folder_path))
+        .map(|project| {
+            thread_id
+                .and_then(|id| project.threads.iter().find(|thread| thread.id == id))
+                .and_then(|thread| thread.working_directory.as_deref())
+                .unwrap_or(&project.folder_path)
+                .into()
+        })
         .ok_or_else(|| "Unknown project".to_string())?;
     folder
         .canonicalize()
         .map_err(|_| "The project folder is no longer available".to_string())
+}
+
+async fn create_worktree_at(
+    project_folder: &Path,
+    worktree_root: &Path,
+) -> Result<PathBuf, String> {
+    let project_folder = project_folder
+        .canonicalize()
+        .map_err(|_| "The project folder is no longer available".to_string())?;
+    let repository = repository_root(&project_folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    let relative_project = project_folder
+        .strip_prefix(&repository)
+        .map_err(|_| "The project folder is outside its Git repository".to_string())?;
+    let head = git_output(
+        &repository,
+        &["rev-parse", "--verify", "HEAD"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    if !head.status.success() {
+        return Err("Create an initial commit before starting a worktree".into());
+    }
+    let parent = worktree_root
+        .parent()
+        .ok_or_else(|| "Could not choose a worktree location".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("Could not create the worktree folder: {error}"))?;
+    let target = worktree_root
+        .to_str()
+        .ok_or_else(|| "The worktree path is not valid UTF-8".to_string())?;
+    let output = git_output(
+        &repository,
+        &["worktree", "add", "--detach", target, "HEAD"],
+        MUTATION_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(command_error("create the worktree", &output));
+    }
+    let working_directory = worktree_root.join(relative_project);
+    working_directory
+        .canonicalize()
+        .map_err(|_| "Git created the worktree without the project folder".to_string())
+}
+
+pub async fn create_thread_worktree(
+    state: &AppState,
+    project_id: Uuid,
+    thread_id: Uuid,
+) -> Result<String, String> {
+    let project_folder = working_folder(state, project_id, None).await?;
+    let repository = repository_root(&project_folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    let repository_name = repository
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "Could not determine the repository name".to_string())?;
+    let worktree_root = crate::state::workspace_path()
+        .with_file_name("worktrees")
+        .join(thread_id.to_string())
+        .join(repository_name);
+    create_worktree_at(&project_folder, &worktree_root)
+        .await
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 async fn git_output(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Output, String> {
@@ -157,6 +242,72 @@ async fn repository_root(folder: &Path) -> Result<Option<PathBuf>, String> {
     path.canonicalize()
         .map(Some)
         .map_err(|_| "The Git repository root is no longer available".to_string())
+}
+
+async fn branches_for_root(root: &Path) -> Result<GitBranchList, String> {
+    let output = git_output(
+        root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(command_error("list branches", &output));
+    }
+    let mut branches = output_text(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    branches.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    let current_output = git_output(
+        root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    let current = current_output
+        .status
+        .success()
+        .then(|| output_text(&current_output.stdout));
+    Ok(GitBranchList { current, branches })
+}
+
+async fn checkout_root(root: &Path, branch: &str) -> Result<GitBranchList, String> {
+    let before = branches_for_root(root).await?;
+    if !before.branches.iter().any(|candidate| candidate == branch) {
+        return Err("Choose a branch that exists in this repository".into());
+    }
+    if before.current.as_deref() == Some(branch) {
+        return Ok(before);
+    }
+    let output = git_output(root, &["switch", branch], MUTATION_TIMEOUT).await?;
+    if !output.status.success() {
+        return Err(command_error("check out the branch", &output));
+    }
+    branches_for_root(root).await
+}
+
+async fn create_branch_root(root: &Path, branch: &str) -> Result<GitBranchList, String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("Enter a branch name".into());
+    }
+    let validation = git_output(
+        root,
+        &["check-ref-format", "--branch", branch],
+        STATUS_TIMEOUT,
+    )
+    .await?;
+    if !validation.status.success() {
+        return Err("Enter a valid Git branch name".into());
+    }
+    let output = git_output(root, &["switch", "-c", branch], MUTATION_TIMEOUT).await?;
+    if !output.status.success() {
+        return Err(command_error("create the branch", &output));
+    }
+    branches_for_root(root).await
 }
 
 fn parse_changed_files(bytes: &[u8]) -> Vec<GitChangedFile> {
@@ -352,11 +503,12 @@ async fn status_for_root(root: &Path) -> Result<GitRepositoryStatus, String> {
 pub async fn git_status(
     state: Arc<AppState>,
     project_id: Uuid,
+    thread_id: Option<Uuid>,
 ) -> Result<Option<GitRepositoryStatus>, String> {
     // A removed/moved project can remain visible in a restored workspace long
     // enough for one poll. Treat it like a non-repository instead of surfacing
     // a repeating IPC error from the title-bar status refresh.
-    let Ok(folder) = project_folder(&state, project_id).await else {
+    let Ok(folder) = working_folder(&state, project_id, thread_id).await else {
         return Ok(None);
     };
     let Some(root) = repository_root(&folder).await? else {
@@ -365,9 +517,47 @@ pub async fn git_status(
     status_for_root(&root).await.map(Some)
 }
 
+pub async fn git_branches(
+    state: Arc<AppState>,
+    project_id: Uuid,
+) -> Result<Option<GitBranchList>, String> {
+    let Ok(folder) = working_folder(&state, project_id, None).await else {
+        return Ok(None);
+    };
+    let Some(root) = repository_root(&folder).await? else {
+        return Ok(None);
+    };
+    branches_for_root(&root).await.map(Some)
+}
+
+pub async fn git_checkout(
+    state: Arc<AppState>,
+    project_id: Uuid,
+    branch: String,
+) -> Result<GitBranchList, String> {
+    let folder = working_folder(&state, project_id, None).await?;
+    let root = repository_root(&folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    checkout_root(&root, &branch).await
+}
+
+pub async fn git_create_branch(
+    state: Arc<AppState>,
+    project_id: Uuid,
+    branch: String,
+) -> Result<GitBranchList, String> {
+    let folder = working_folder(&state, project_id, None).await?;
+    let root = repository_root(&folder)
+        .await?
+        .ok_or_else(|| "This project is not a Git repository".to_string())?;
+    create_branch_root(&root, &branch).await
+}
+
 pub async fn git_commit(
     state: Arc<AppState>,
     project_id: Uuid,
+    thread_id: Option<Uuid>,
     message: String,
 ) -> Result<GitRepositoryStatus, String> {
     let message = message.trim();
@@ -377,7 +567,7 @@ pub async fn git_commit(
     if message.len() > 10_000 {
         return Err("The commit message is too long".into());
     }
-    let folder = project_folder(&state, project_id).await?;
+    let folder = working_folder(&state, project_id, thread_id).await?;
     let root = repository_root(&folder)
         .await?
         .ok_or_else(|| "This project is not a Git repository".to_string())?;
@@ -403,8 +593,9 @@ async fn commit_root(root: &Path, message: &str) -> Result<GitRepositoryStatus, 
 pub async fn git_push(
     state: Arc<AppState>,
     project_id: Uuid,
+    thread_id: Option<Uuid>,
 ) -> Result<GitRepositoryStatus, String> {
-    let folder = project_folder(&state, project_id).await?;
+    let folder = working_folder(&state, project_id, thread_id).await?;
     let root = repository_root(&folder)
         .await?
         .ok_or_else(|| "This project is not a Git repository".to_string())?;
@@ -529,6 +720,63 @@ mod tests {
             .unwrap();
         assert_eq!(output_text(&subject.stdout), "Save every project change");
         assert!(path.join("new.txt").exists());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worktree_is_detached_and_preserves_a_project_subdirectory() {
+        let path = initialized_repo("worktree-source");
+        fs::create_dir_all(path.join("packages/app")).unwrap();
+        fs::write(path.join("packages/app/project.txt"), "project\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-m", "Add project folder"]);
+        let destination_parent = fixture("worktree-parent");
+        let destination = destination_parent.join("checkout");
+
+        let working_directory = create_worktree_at(&path.join("packages/app"), &destination)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            working_directory,
+            destination.join("packages/app").canonicalize().unwrap()
+        );
+        assert!(working_directory.join("project.txt").is_file());
+        let status = status_for_root(&destination).await.unwrap();
+        assert!(status.detached);
+        assert!(path.join("packages/app/project.txt").is_file());
+
+        git(
+            &path,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                destination.to_str().unwrap(),
+            ],
+        );
+        fs::remove_dir_all(destination_parent).unwrap();
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn branches_can_be_listed_checked_out_and_created() {
+        let path = initialized_repo("branches");
+        git(&path, &["branch", "existing"]);
+
+        let listed = branches_for_root(&path).await.unwrap();
+        assert_eq!(listed.current.as_deref(), Some("main"));
+        assert_eq!(listed.branches, vec!["existing", "main"]);
+
+        let checked_out = checkout_root(&path, "existing").await.unwrap();
+        assert_eq!(checked_out.current.as_deref(), Some("existing"));
+
+        let created = create_branch_root(&path, "feature/new-chat").await.unwrap();
+        assert_eq!(created.current.as_deref(), Some("feature/new-chat"));
+        assert!(created
+            .branches
+            .iter()
+            .any(|branch| branch == "feature/new-chat"));
         fs::remove_dir_all(path).unwrap();
     }
 

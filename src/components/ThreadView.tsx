@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
@@ -21,6 +22,9 @@ import { useAppStore } from "../store/appStore";
 import { showsPinnedSummary } from "../summary";
 import { beginWindowDrag } from "../windowDrag";
 import { ipc } from "../ipc";
+import {
+  threadWorkingDirectory,
+} from "../git";
 import { useDictation } from "../voice/useDictation";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentHoverCard } from "./AgentHoverCard";
@@ -40,6 +44,8 @@ import { GitEnvironment } from "./GitEnvironment";
 import { SideThreadPanel } from "./SideThreadPanel";
 import { SideThreadResizer } from "./SideThreadResizer";
 import { TerminalView, type TerminalViewHandle } from "./TerminalView";
+import { HostFolderPicker } from "./HostFolderPicker";
+import { NewThreadContextBar } from "./NewThreadContextBar";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
@@ -363,7 +369,7 @@ export function ThreadView({
             <Icons.chevronDown size={11} />
           </button>
           <div className="thread-header-side end">
-            <GitEnvironment projectID={project.id} hostID={selectedHostID} />
+            <GitEnvironment projectID={project.id} hostID={selectedHostID} threadID={thread.id} />
             <SummaryToggle project={project} thread={thread} fits={summarySlotFree} />
             {terminalModeEnabled && (
               <button
@@ -510,7 +516,7 @@ export function ThreadView({
                 speed={thread.speed}
                 profiles={projectWorkspace?.providerProfiles ?? workspace.providerProfiles}
                 hostId={selectedHostID}
-                workingDirectory={project?.folderPath}
+                workingDirectory={threadWorkingDirectory(project.folderPath, thread)}
                 disabled={isRunning}
                 onChange={(next) => {
                   if (selectedProjectID) {
@@ -982,10 +988,14 @@ function NewAgentView({
   const setRuntime = useAppStore((state) => state.setNewThreadRuntime);
   const surface = useAppStore((state) => state.newThreadSurface);
   const setSurface = useAppStore((state) => state.setNewThreadSurface);
+  const environment = useAppStore((state) => state.newThreadEnvironment);
+  const setEnvironment = useAppStore((state) => state.setNewThreadEnvironment);
+  const addProject = useAppStore((state) => state.addProject);
+  const hostStatus = useAppStore((state) => state.hostStatus);
   const terminalModeEnabled = useAppStore((state) => state.terminalModeEnabled);
   const error = useAppStore((state) => state.error);
   const hosted = [
-    ...projects.map((project) => ({ project, hostId: "local", hostName: "This Mac" })),
+    ...projects.map((project) => ({ project, hostId: "local", hostName: hostStatus?.name ?? "This Mac" })),
     ...remotes.flatMap((session) =>
       session.workspace.projects.map((project) => ({
         project,
@@ -994,12 +1004,15 @@ function NewAgentView({
       })),
     ),
   ];
-  const [projectID, setProjectID] = useState(
-    initialProjectID
-      ?? hosted.find((item) => item.hostId === initialHostID)?.project.id
-      ?? hosted[0]?.project.id
-      ?? "",
+  const initialProject = hosted.find((item) => item.project.id === initialProjectID && item.hostId === initialHostID)
+    ?? hosted.find((item) => item.project.id === initialProjectID)
+    ?? hosted.find((item) => item.hostId === initialHostID)
+    ?? hosted[0];
+  const [selectionKey, setSelectionKey] = useState(
+    initialProject ? `${initialProject.hostId}:${initialProject.project.id}` : "",
   );
+  const selectedProject = hosted.find((item) => `${item.hostId}:${item.project.id}` === selectionKey) ?? hosted[0];
+  const projectID = selectedProject?.project.id ?? "";
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
   const dictation = useDictation({
@@ -1009,13 +1022,24 @@ function NewAgentView({
   });
   const { draft, setDraft } = dictation;
   const [sending, setSending] = useState(false);
+  const [addingOnHost, setAddingOnHost] = useState<{ id: string; name: string } | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const images = useImageAttachments();
 
   useEffect(() => textRef.current?.focus(), []);
   useEffect(() => {
-    if (initialProjectID) setProjectID(initialProjectID);
-  }, [initialProjectID]);
+    if (initialProjectID) {
+      const next = hosted.find((item) => item.project.id === initialProjectID && item.hostId === initialHostID)
+        ?? hosted.find((item) => item.project.id === initialProjectID);
+      if (next) setSelectionKey(`${next.hostId}:${next.project.id}`);
+      setEnvironment("current");
+    }
+  }, [initialHostID, initialProjectID, setEnvironment]);
+
+  const addLocalProject = async () => {
+    const folder = await ipc.openProjectDialog();
+    if (folder) await addProject(folder, "local");
+  };
 
   const submit = async () => {
     if (!projectID || (!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending) return;
@@ -1032,6 +1056,7 @@ function NewAgentView({
       runtime.effort,
       runtime.speed,
       surface,
+      environment,
     );
     setSending(false);
     if (created) images.clear();
@@ -1053,19 +1078,24 @@ function NewAgentView({
         </div>
       ) : (
         <div className="new-agent-center">
-          <div className="new-agent-context-row">
-            <select aria-label="Project" value={projectID} onChange={(event) => setProjectID(event.target.value)}>
-              {hosted.map((item) => (
-                <option key={`${item.hostId}:${item.project.id}`} value={item.project.id}>
-                  {item.hostName} — {projectName(item.project)}
-                </option>
-              ))}
-            </select>
-            <span>›</span>
-            <span>{hosted.find((item) => item.project.id === projectID)?.hostName ?? "This Mac"}</span>
-          </div>
+          <h1 className="new-agent-heading">What should we work on in <span>{projectName(selectedProject.project)}</span>?</h1>
           {surface === "gui" && <DictationStatus dictation={dictation} />}
-          <div className="new-agent-composer">
+          <div className="new-agent-composer-shell">
+            <NewThreadContextBar
+              projects={hosted}
+              remoteHosts={remotes.map((session) => session.host)}
+              selected={selectedProject}
+              environment={environment}
+              disabled={sending}
+              onSelectProject={(item) => {
+                setSelectionKey(`${item.hostId}:${item.project.id}`);
+                setEnvironment("current");
+              }}
+              onEnvironmentChange={setEnvironment}
+              onAddLocalProject={() => void addLocalProject()}
+              onAddRemoteProject={setAddingOnHost}
+            />
+            <div className="new-agent-composer">
             {surface === "gui" && <PendingImageStrip paths={images.paths} onRemove={images.remove} />}
             <textarea
               ref={textRef}
@@ -1094,13 +1124,13 @@ function NewAgentView({
                   effort={runtime.effort}
                   speed={runtime.speed}
                   profiles={
-                    hosted.find((item) => item.project.id === projectID)?.hostId === "local"
+                    selectedProject.hostId === "local"
                       ? profiles
-                      : remotes.find((session) => session.host.id === hosted.find((item) => item.project.id === projectID)?.hostId)
+                      : remotes.find((session) => session.host.id === selectedProject.hostId)
                           ?.workspace.providerProfiles ?? profiles
                   }
-                  hostId={hosted.find((item) => item.project.id === projectID)?.hostId}
-                  workingDirectory={hosted.find((item) => item.project.id === projectID)?.project.folderPath}
+                  hostId={selectedProject.hostId}
+                  workingDirectory={selectedProject.project.folderPath}
                   placement="bottom"
                   onChange={setRuntime}
                 />
@@ -1138,6 +1168,7 @@ function NewAgentView({
                 </button>
               </div>
             </div>
+            </div>
           </div>
           {error && <div className="error-banner">{error}</div>}
           <p className="new-agent-hint">
@@ -1146,6 +1177,21 @@ function NewAgentView({
               : "Enter to send · Shift+Enter for a new line"}
           </p>
         </div>
+      )}
+      {addingOnHost && createPortal(
+        <div className="host-folder-overlay">
+          <HostFolderPicker
+            hostId={addingOnHost.id}
+            hostName={addingOnHost.name}
+            onSelect={(folder) => {
+              const hostID = addingOnHost.id;
+              setAddingOnHost(null);
+              void addProject(folder, hostID);
+            }}
+            onCancel={() => setAddingOnHost(null)}
+          />
+        </div>,
+        document.body,
       )}
     </main>
   );

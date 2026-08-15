@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_NAME: &str = "maxx-environment";
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -54,6 +54,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "workspace_snapshot"
         | "active_turns"
         | "git_status"
+        | "git_branches"
         | "home_folder"
         | "list_folder"
         | "read_media"
@@ -63,6 +64,8 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "list_provider_commands"
         | "resolve_media_source" => Some(Capability::WorkspaceRead),
         "create_folder"
+        | "git_checkout"
+        | "git_create_branch"
         | "git_commit"
         | "git_push"
         | "add_project"
@@ -132,6 +135,18 @@ mod tests {
         assert_eq!(
             required_capability("git_status"),
             Some(Capability::WorkspaceRead)
+        );
+        assert_eq!(
+            required_capability("git_branches"),
+            Some(Capability::WorkspaceRead)
+        );
+        assert_eq!(
+            required_capability("git_checkout"),
+            Some(Capability::WorkspaceWrite)
+        );
+        assert_eq!(
+            required_capability("git_create_branch"),
+            Some(Capability::WorkspaceWrite)
         );
         assert_eq!(
             required_capability("git_commit"),

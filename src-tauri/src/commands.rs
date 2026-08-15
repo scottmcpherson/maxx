@@ -191,11 +191,16 @@ pub async fn add_thread_with_runtime(
     effort: Option<String>,
     speed: Option<String>,
     surface: Option<ChatSurface>,
+    worktree: Option<bool>,
 ) -> Result<ChatThread, String> {
     let mut thread = ChatThread::new(title, provider, model);
     thread.effort = effort.filter(|v| !v.trim().is_empty());
     thread.speed = speed.filter(|v| !v.trim().is_empty() && !v.eq_ignore_ascii_case("normal"));
     thread.surface = surface.unwrap_or_default();
+    if worktree.unwrap_or(false) {
+        thread.working_directory =
+            Some(crate::git::create_thread_worktree(&state, project_id, thread.id).await?);
+    }
     {
         let mut workspace = state.workspace.lock().await;
         let project = workspace
@@ -543,7 +548,7 @@ pub async fn send_prompt(
     let title_message = prompt.clone();
     let (request, title_job) = {
         let mut workspace = state.workspace.lock().await;
-        let folder_path = workspace
+        let project_folder = workspace
             .projects
             .iter()
             .find(|p| p.id == project_id)
@@ -553,6 +558,7 @@ pub async fn send_prompt(
         let configured_title_runtime = workspace.title_generation_runtime.clone();
         let agent_names = agent_name_map(&workspace.agents);
         let thread = find_thread(&mut workspace, project_id, thread_id).ok_or("Unknown thread")?;
+        let folder_path = thread.working_directory.clone().unwrap_or(project_folder);
         let is_first_user_message = !thread
             .messages
             .iter()
@@ -975,7 +981,7 @@ pub async fn start_side_thread(
     let turn_id = Uuid::new_v4();
     let (request, thread_snapshot, rest, folder_path) = {
         let mut workspace = state.workspace.lock().await;
-        let folder_path = workspace
+        let project_folder = workspace
             .projects
             .iter()
             .find(|p| p.id == project_id)
@@ -989,6 +995,7 @@ pub async fn start_side_thread(
 
         let parent =
             find_thread(&mut workspace, project_id, parent_thread_id).ok_or("Unknown thread")?;
+        let folder_path = parent.working_directory.clone().unwrap_or(project_folder);
         if parent.parent_thread_id.is_some() {
             return Err("Side threads cannot branch further".into());
         }
@@ -1024,6 +1031,7 @@ pub async fn start_side_thread(
             agent.model.clone(),
         );
         thread.parent_thread_id = Some(parent_thread_id);
+        thread.working_directory = parent.working_directory.clone();
         thread.anchor_message_id = Some(anchor_id);
         thread.agent_id = Some(agent.id);
         thread.context_seed = seed;
@@ -1085,7 +1093,7 @@ pub async fn send_agent_prompt(
     let turn_id = Uuid::new_v4();
     let (request, rest, folder_path) = {
         let mut workspace = state.workspace.lock().await;
-        let folder_path = workspace
+        let project_folder = workspace
             .projects
             .iter()
             .find(|p| p.id == project_id)
@@ -1097,6 +1105,7 @@ pub async fn send_agent_prompt(
         let agent_names = agent_name_map(&workspace.agents);
         let profiles = workspace.provider_profiles.clone();
         let thread = find_thread(&mut workspace, project_id, thread_id).ok_or("Unknown thread")?;
+        let folder_path = thread.working_directory.clone().unwrap_or(project_folder);
         if thread.surface == ChatSurface::Terminal {
             return Err("@agent side threads are unavailable in terminal mode.".into());
         }

@@ -13,10 +13,18 @@ APP_BINARY="$APP_BUNDLE/Contents/MacOS/Maxx"
 RUNTIME_BINARY="$APP_BUNDLE/Contents/Resources/bin/maxx-runtime"
 APP_BINARY_PATTERN="${APP_BINARY//./\.}"
 RUNTIME_BINARY_PATTERN="${RUNTIME_BINARY//./\.}"
+ANY_MAXX_APP_PATTERN='/Maxx\.app/Contents/MacOS/Maxx$'
 
-# Stop only the app and runtime produced by this workspace. A separately
-# installed Maxx and unrelated Electron/Chromium processes remain untouched.
-pkill -f "$APP_BINARY_PATTERN" >/dev/null 2>&1 || true
+# Electron's single-instance lock is shared by every Maxx bundle. Leaving a
+# build from another checkout alive makes macOS foreground that older app
+# instead of this freshly built bundle, so replace the active Maxx instance.
+pkill -TERM -f "$ANY_MAXX_APP_PATTERN" >/dev/null 2>&1 || true
+for _ in {1..30}; do
+  if ! pgrep -f "$ANY_MAXX_APP_PATTERN" >/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
 pkill -f "$RUNTIME_BINARY_PATTERN" >/dev/null 2>&1 || true
 
 cd "$ROOT_DIR"

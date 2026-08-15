@@ -53,7 +53,11 @@ fn resolve_media_path(
         .find(|thread| thread.id == thread_id)
         .ok_or_else(|| "Unknown thread".to_string())?;
 
-    let project_root = PathBuf::from(&project.folder_path)
+    let working_directory = thread
+        .working_directory
+        .as_deref()
+        .unwrap_or(&project.folder_path);
+    let project_root = PathBuf::from(working_directory)
         .canonicalize()
         .map_err(|_| "The project folder is unavailable".to_string())?;
     let mut roots = vec![project_root.clone()];
@@ -66,7 +70,7 @@ fn resolve_media_path(
                 let session_root = home
                     .join(".grok")
                     .join("sessions")
-                    .join(encoded_path_component(&project.folder_path))
+                    .join(encoded_path_component(working_directory))
                     .join(session_id);
                 if let Ok(canonical) = session_root.canonicalize() {
                     roots.push(canonical);

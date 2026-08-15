@@ -270,6 +270,8 @@ export interface ChatThread {
   speed?: string | null;
   /** The first-class conversation surface currently owning this thread. */
   surface?: ChatSurface;
+  /** Isolated Git worktree owned by this chat. Absent means the project folder. */
+  workingDirectory?: string;
   providerSessionID?: string;
   lastTurnID?: string;
   messages: ChatMessage[];

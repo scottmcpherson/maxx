@@ -15,7 +15,7 @@ import type {
 import { isMenuActionID, type MenuActionID, type MenuActionPayload } from "./menu";
 import type { UpdateStatus } from "./updates";
 import type { VoiceCredentialStatus, VoiceEvent, VoiceSettings } from "./voice/types";
-import type { GitRepositoryStatus } from "./git";
+import type { GitBranchList, GitRepositoryStatus } from "./git";
 import {
   ActiveTurnRecord,
   AgentDefinition,
@@ -78,12 +78,18 @@ export const ipc = {
     invokeOnHost<WorkspaceDocument>(hostId, "workspace_snapshot"),
   activeTurns: (hostId?: string | null) =>
     invokeOnHost<ActiveTurnRecord[]>(hostId, "active_turns"),
-  gitStatus: (projectId: string, hostId?: string | null) =>
-    invokeOnHost<GitRepositoryStatus | null>(hostId, "git_status", { projectId }),
-  gitCommit: (projectId: string, message: string, hostId?: string | null) =>
-    invokeOnHost<GitRepositoryStatus>(hostId, "git_commit", { projectId, message }),
-  gitPush: (projectId: string, hostId?: string | null) =>
-    invokeOnHost<GitRepositoryStatus>(hostId, "git_push", { projectId }),
+  gitStatus: (projectId: string, hostId?: string | null, threadId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus | null>(hostId, "git_status", { projectId, threadId: threadId || null }),
+  gitBranches: (projectId: string, hostId?: string | null) =>
+    invokeOnHost<GitBranchList | null>(hostId, "git_branches", { projectId }),
+  gitCheckout: (projectId: string, branch: string, hostId?: string | null) =>
+    invokeOnHost<GitBranchList>(hostId, "git_checkout", { projectId, branch }),
+  gitCreateBranch: (projectId: string, branch: string, hostId?: string | null) =>
+    invokeOnHost<GitBranchList>(hostId, "git_create_branch", { projectId, branch }),
+  gitCommit: (projectId: string, message: string, hostId?: string | null, threadId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus>(hostId, "git_commit", { projectId, threadId: threadId || null, message }),
+  gitPush: (projectId: string, hostId?: string | null, threadId?: string | null) =>
+    invokeOnHost<GitRepositoryStatus>(hostId, "git_push", { projectId, threadId: threadId || null }),
   addProject: (folderPath: string, hostId?: string | null) =>
     invokeOnHost<ChatProject>(hostId, "add_project", { folderPath }),
   removeProject: (projectId: string, hostId?: string | null) =>
@@ -104,6 +110,7 @@ export const ipc = {
     speed?: string | null,
     surface: ChatSurface = "gui",
     hostId?: string | null,
+    worktree = false,
   ) =>
     invokeOnHost<ChatThread>(hostId, "add_thread_with_runtime", {
       projectId,
@@ -113,6 +120,7 @@ export const ipc = {
       effort: effort || null,
       speed: speed || null,
       surface,
+      worktree,
     }),
   removeThread: (projectId: string, threadId: string, hostId?: string | null) =>
     invokeOnHost<void>(hostId, "remove_thread", { projectId, threadId }),
