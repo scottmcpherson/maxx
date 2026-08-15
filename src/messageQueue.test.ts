@@ -11,6 +11,7 @@ function queued(overrides: Partial<QueuedMessage> = {}): QueuedMessage {
     prompt: "  Check   this next\nplease ",
     imagePaths: [],
     annotations: [],
+    textSelections: [],
     ...overrides,
   } as QueuedMessage;
 }
@@ -30,6 +31,7 @@ describe("message queue presentation", () => {
       prompt: "",
       imagePaths: ["one.png", "two.png"],
       annotations: [{}, {}] as never[],
-    }))).toBe("2 images · 2 browser selections");
+      textSelections: [{ id: "selection", text: "context" }],
+    }))).toBe("2 images · 3 selections");
   });
 });

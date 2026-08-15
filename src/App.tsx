@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { shouldShowBrowserContent, MIN_BROWSER_WIDTH } from "./browser";
 import { AgentsView } from "./components/AgentsView";
-import { BrowserPane } from "./components/BrowserPane";
+import { SidePanel } from "./components/SidePanel";
 import { BrowserResizer, useBrowserWidth } from "./components/BrowserResizer";
 import { Sidebar } from "./components/Sidebar";
 import { SidebarResizer, useSidebarWidth } from "./components/SidebarResizer";
@@ -336,7 +336,7 @@ export default function App() {
             {/* Closing keeps the native webview alive until the shell reaches
                 zero width. Overlays hide it without tearing down the page. */}
             {browserPresent && browserThreadID && (
-              <BrowserPane
+              <SidePanel
                 key={browserThreadID}
                 threadID={browserThreadID}
                 showContent={browserVisible}

@@ -227,11 +227,17 @@ export interface ChatMessage {
   content: string;
   attachments?: ChatImageAttachment[];
   annotations?: BrowserAnnotation[];
+  textSelections?: ChatTextSelection[];
   createdAt: number;
   /** First runtime event that contributed to an assistant message. */
   sourceEventID?: string;
   /** Agent that produced this message (assistant messages in agent threads). */
   agentID?: string;
+}
+
+export interface ChatTextSelection {
+  id: string;
+  text: string;
 }
 
 export interface ChatImageAttachment {

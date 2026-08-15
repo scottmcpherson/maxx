@@ -1,6 +1,7 @@
-//! Provider-native terminal sessions. Rust owns the PTY and process lifecycle;
+//! Interactive terminal sessions. Rust owns the PTY and process lifecycle;
 //! renderers consume bounded, cursor-addressed output through long polling so
-//! the same contract works locally and over a paired Maxx host.
+//! both provider-native terminals and project shells work locally or over a
+//! paired Maxx host.
 
 use crate::browser_runtime::{BrowserRuntime, BrowserSessionScope};
 use crate::engine::{launch, TurnRequest};
@@ -342,7 +343,7 @@ impl TerminalBroker {
         let baseline_turn_ids =
             baseline?.map(|turns| turns.into_iter().map(|turn| turn.native_id).collect());
         release?;
-        let mut launch = terminal_launch(
+        let launch = terminal_launch(
             &profile,
             &thread,
             &folder_path,
@@ -350,41 +351,6 @@ impl TerminalBroker {
             browser_access.as_deref(),
         )?;
 
-        let pty = native_pty_system();
-        let pair = pty
-            .openpty(PtySize {
-                rows: rows.unwrap_or(DEFAULT_ROWS).clamp(2, 500),
-                cols: cols.unwrap_or(DEFAULT_COLS).clamp(2, 500),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|error| format!("Could not create terminal: {error}"))?;
-        let mut command = CommandBuilder::new(&launch.executable);
-        command.args(&launch.arguments);
-        command.cwd(&folder_path);
-        for (key, value) in &launch.environment {
-            command.env(key, value);
-        }
-        // CommandBuilder starts with its own copy of the parent environment,
-        // independently of `launch.environment`. Remove the automation-facing
-        // color suppression from that final child environment as well.
-        command.env_remove("NO_COLOR");
-        let child = pair.slave.spawn_command(command).map_err(|error| {
-            format!(
-                "Could not start {} terminal: {error}",
-                thread.provider.display_name()
-            )
-        })?;
-        drop(pair.slave);
-        let killer = child.clone_killer();
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| format!("Could not read terminal output: {error}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| format!("Could not write terminal input: {error}"))?;
         let temporary_removal_paths = if thread.provider == ChatProvider::Hermes {
             launch
                 .temporary_resources
@@ -397,82 +363,17 @@ impl TerminalBroker {
         } else {
             Vec::new()
         };
-        let session = Arc::new(TerminalSession {
+        let session = spawn_terminal_session(
             thread_id,
-            browser_available: support.browser_available,
-            started_at: AppleDate::now(),
+            &folder_path,
+            thread.provider.display_name(),
+            support.browser_available,
             baseline_turn_ids,
-            submitted_inputs: AtomicU64::new(0),
-            master: StdMutex::new(pair.master),
-            writer: StdMutex::new(writer),
-            killer: StdMutex::new(killer),
-            output: StdMutex::new(OutputBuffer::default()),
-            notify: Notify::new(),
-            temporary_resources: StdMutex::new(std::mem::take(&mut launch.temporary_resources)),
+            launch,
             temporary_removal_paths,
-        });
-
-        let reader_session = session.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name(format!("maxx-terminal-{thread_id}"))
-            .spawn(move || {
-                let mut buffer = vec![0u8; 32 * 1024];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            reader_session
-                                .output
-                                .lock()
-                                .expect("terminal output mutex poisoned")
-                                .push(buffer[..read].to_vec());
-                            reader_session.notify.notify_waiters();
-                        }
-                        Err(error) => {
-                            log::debug!("terminal reader ended: {error}");
-                            break;
-                        }
-                    }
-                }
-            })
-        {
-            let _ = session
-                .killer
-                .lock()
-                .expect("terminal killer mutex poisoned")
-                .kill();
-            return Err(format!("Could not start terminal reader: {error}"));
-        }
-
-        let waiter_session = session.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name(format!("maxx-terminal-waiter-{thread_id}"))
-            .spawn(move || {
-                let mut child = child;
-                if let Err(error) = child.wait() {
-                    log::warn!("could not wait for terminal process: {error}");
-                }
-                waiter_session.cleanup_temporary_resources();
-                // Some CLIs detach short-lived shutdown helpers that can
-                // recreate their private home after the parent exits. Retry
-                // only app-owned removal paths; restored user files remain
-                // strictly one-shot.
-                if !waiter_session.temporary_removal_paths.is_empty() {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    waiter_session.retry_temporary_removals();
-                    std::thread::sleep(std::time::Duration::from_millis(1_500));
-                    waiter_session.retry_temporary_removals();
-                }
-                waiter_session.mark_exited();
-            })
-        {
-            let _ = session
-                .killer
-                .lock()
-                .expect("terminal killer mutex poisoned")
-                .kill();
-            return Err(format!("Could not start terminal process waiter: {error}"));
-        }
+            rows,
+            cols,
+        )?;
 
         {
             let mut workspace = state.workspace.lock().await;
@@ -490,6 +391,59 @@ impl TerminalBroker {
         sessions.insert(thread_id, session.clone());
         state.save().await;
         Ok(session.status())
+    }
+
+    pub async fn start_shell(
+        &self,
+        state: Arc<AppState>,
+        project_id: Uuid,
+        thread_id: Uuid,
+        session_id: Uuid,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<TerminalStatus, String> {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(existing) = sessions.get(&session_id).cloned() {
+            if existing.status().state == TerminalProcessState::Running {
+                return Ok(existing.status());
+            }
+            sessions.remove(&session_id);
+        }
+        let folder_path = {
+            let workspace = state.workspace.lock().await;
+            let project = workspace
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .ok_or("Unknown project")?;
+            let thread = project
+                .threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .ok_or("Unknown thread")?;
+            thread
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| project.folder_path.clone())
+        };
+        let launch = shell_launch();
+        let session = spawn_terminal_session(
+            session_id,
+            &folder_path,
+            "shell",
+            false,
+            None,
+            launch,
+            Vec::new(),
+            rows,
+            cols,
+        )?;
+        sessions.insert(session_id, session.clone());
+        Ok(session.status())
+    }
+
+    pub async fn stop_shell(&self, session_id: Uuid) {
+        self.terminate(session_id).await;
     }
 
     pub async fn status(&self, thread_id: Uuid) -> Option<TerminalStatus> {
@@ -696,6 +650,7 @@ impl TerminalBroker {
                         content: turn.user_content,
                         attachments: Vec::new(),
                         annotations: Vec::new(),
+                        text_selections: Vec::new(),
                         created_at: turn.started_at,
                         source_event_id: None,
                         agent_id: None,
@@ -708,6 +663,7 @@ impl TerminalBroker {
                         content: turn.assistant_content,
                         attachments: Vec::new(),
                         annotations: Vec::new(),
+                        text_selections: Vec::new(),
                         created_at: turn.started_at,
                         source_event_id: None,
                         agent_id: None,
@@ -791,11 +747,150 @@ impl TerminalBroker {
     }
 }
 
+fn spawn_terminal_session(
+    session_id: Uuid,
+    cwd: &str,
+    label: &str,
+    browser_available: bool,
+    baseline_turn_ids: Option<HashSet<String>>,
+    mut launch: TerminalLaunch,
+    temporary_removal_paths: Vec<PathBuf>,
+    rows: Option<u16>,
+    cols: Option<u16>,
+) -> Result<Arc<TerminalSession>, String> {
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(PtySize {
+            rows: rows.unwrap_or(DEFAULT_ROWS).clamp(2, 500),
+            cols: cols.unwrap_or(DEFAULT_COLS).clamp(2, 500),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("Could not create terminal: {error}"))?;
+    let mut command = CommandBuilder::new(&launch.executable);
+    command.args(&launch.arguments);
+    command.cwd(cwd);
+    for (key, value) in &launch.environment {
+        command.env(key, value);
+    }
+    // CommandBuilder starts with its own copy of the parent environment,
+    // independently of `launch.environment`. Remove automation-facing color
+    // suppression from the final child environment as well.
+    command.env_remove("NO_COLOR");
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("Could not start {label} terminal: {error}"))?;
+    drop(pair.slave);
+    let killer = child.clone_killer();
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("Could not read terminal output: {error}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("Could not write terminal input: {error}"))?;
+    let session = Arc::new(TerminalSession {
+        thread_id: session_id,
+        browser_available,
+        started_at: AppleDate::now(),
+        baseline_turn_ids,
+        submitted_inputs: AtomicU64::new(0),
+        master: StdMutex::new(pair.master),
+        writer: StdMutex::new(writer),
+        killer: StdMutex::new(killer),
+        output: StdMutex::new(OutputBuffer::default()),
+        notify: Notify::new(),
+        temporary_resources: StdMutex::new(std::mem::take(&mut launch.temporary_resources)),
+        temporary_removal_paths,
+    });
+
+    let reader_session = session.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name(format!("maxx-terminal-{session_id}"))
+        .spawn(move || {
+            let mut buffer = vec![0u8; 32 * 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        reader_session
+                            .output
+                            .lock()
+                            .expect("terminal output mutex poisoned")
+                            .push(buffer[..read].to_vec());
+                        reader_session.notify.notify_waiters();
+                    }
+                    Err(error) => {
+                        log::debug!("terminal reader ended: {error}");
+                        break;
+                    }
+                }
+            }
+        })
+    {
+        let _ = session
+            .killer
+            .lock()
+            .expect("terminal killer mutex poisoned")
+            .kill();
+        return Err(format!("Could not start terminal reader: {error}"));
+    }
+
+    let waiter_session = session.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name(format!("maxx-terminal-waiter-{session_id}"))
+        .spawn(move || {
+            let mut child = child;
+            if let Err(error) = child.wait() {
+                log::warn!("could not wait for terminal process: {error}");
+            }
+            waiter_session.cleanup_temporary_resources();
+            // Some CLIs detach short-lived shutdown helpers that can recreate
+            // private homes after the parent exits. Retry only app-owned
+            // removal paths; restored user files remain strictly one-shot.
+            if !waiter_session.temporary_removal_paths.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                waiter_session.retry_temporary_removals();
+                std::thread::sleep(std::time::Duration::from_millis(1_500));
+                waiter_session.retry_temporary_removals();
+            }
+            waiter_session.mark_exited();
+        })
+    {
+        let _ = session
+            .killer
+            .lock()
+            .expect("terminal killer mutex poisoned")
+            .kill();
+        return Err(format!("Could not start terminal process waiter: {error}"));
+    }
+    Ok(session)
+}
+
 struct TerminalLaunch {
     executable: String,
     arguments: Vec<String>,
     environment: HashMap<String, String>,
     temporary_resources: Vec<TemporaryResource>,
+}
+
+fn shell_launch() -> TerminalLaunch {
+    let executable = std::env::var("SHELL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".into());
+    let mut environment = HashMap::new();
+    environment.insert("TERM".into(), "xterm-256color".into());
+    environment.insert("COLORTERM".into(), "truecolor".into());
+    environment.insert("TERM_PROGRAM".into(), "Maxx".into());
+    TerminalLaunch {
+        executable,
+        arguments: vec!["-l".into()],
+        environment,
+        temporary_resources: Vec::new(),
+    }
 }
 
 impl Drop for TerminalLaunch {
@@ -1486,6 +1581,22 @@ mod tests {
             maxx_core::persist::ChatThread::new("terminal".into(), provider, "Default".into());
         thread.provider_session_id = Some("native-session".into());
         terminal_launch(&profile, &thread, "/tmp", "native-session", None).unwrap()
+    }
+
+    #[test]
+    fn project_shell_is_interactive_and_color_capable() {
+        let launch = shell_launch();
+        assert!(!launch.executable.is_empty());
+        assert_eq!(launch.arguments, vec!["-l"]);
+        assert_eq!(
+            launch.environment.get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            launch.environment.get("COLORTERM").map(String::as_str),
+            Some("truecolor")
+        );
+        assert!(launch.temporary_resources.is_empty());
     }
 
     #[test]

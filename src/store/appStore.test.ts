@@ -14,6 +14,7 @@ function seedThreadPanels(threadID: string | null = "thread-a") {
     selectedThreadID: threadID,
     browserOpen: true,
     pendingBrowserReveal: null,
+    pendingSideChatRequest: null,
     openSideThreadID: "side-thread",
     summaryPopoverOpen: true,
   });
@@ -25,6 +26,7 @@ afterEach(() => {
     selectedThreadID: null,
     browserOpen: false,
     pendingBrowserReveal: null,
+    pendingSideChatRequest: null,
     openSideThreadID: null,
     summaryPopoverOpen: false,
     browserAnnotationsByThread: {},
@@ -91,6 +93,61 @@ describe("terminal chat creation", () => {
     await expect(useAppStore.getState().createThreadAndSend(
       "project", "codex", "Default", "", ["/tmp/image.png"], null, null, "terminal",
     )).resolves.toBe(false);
+  });
+});
+
+describe("side chats", () => {
+  it("creates a provider-backed child and refreshes the workspace", async () => {
+    const workspace = sampleWorkspace("/tmp/project");
+    const child = {
+      ...workspace.projects[0].threads[0],
+      id: "side-chat",
+      title: "Side chat",
+      parentThreadID: "thread-a",
+    };
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({
+      workspace,
+      remoteSessions: [],
+      selectedHostID: LOCAL_HOST_ID,
+      refresh,
+    });
+    const create = vi.spyOn(ipc, "createSideChat").mockResolvedValue(child);
+
+    await expect(useAppStore.getState().createSideChat("project", "thread-a")).resolves.toEqual(child);
+    expect(create).toHaveBeenCalledWith("project", "thread-a", LOCAL_HOST_ID);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("sends attached text selections through the ordinary provider queue", async () => {
+    const workspace = sampleWorkspace("/tmp/project");
+    useAppStore.setState({
+      workspace,
+      remoteSessions: [],
+      selectedHostID: LOCAL_HOST_ID,
+      refresh: vi.fn().mockResolvedValue(undefined),
+    });
+    const send = vi.spyOn(ipc, "sendPrompt").mockResolvedValue("side-turn");
+    const selections = [{ id: "selection", text: "quoted parent text" }];
+
+    await expect(useAppStore.getState().sendSideChatPrompt(
+      "project", "side-chat", "Explain this", [], selections,
+    )).resolves.toBe(true);
+    expect(send).toHaveBeenCalledWith(
+      "project", "side-chat", "Explain this", [], LOCAL_HOST_ID, [], [], selections,
+    );
+    expect(useAppStore.getState().activeTurnByThread["side-chat"]).toBe("side-turn");
+  });
+
+  it("opens the right panel when a primary selection requests a side chat", () => {
+    useAppStore.setState({ selectedThreadID: "thread-a", browserOpen: false, pendingSideChatRequest: null });
+    const request = {
+      id: "request",
+      parentThreadID: "thread-a",
+      selection: { id: "selection", text: "quoted parent text" },
+    };
+    useAppStore.getState().requestSideChat(request);
+    expect(useAppStore.getState()).toMatchObject({ browserOpen: true, pendingSideChatRequest: request });
   });
 });
 
@@ -513,7 +570,7 @@ describe("browser annotations", () => {
     const send = vi.spyOn(ipc, "sendPrompt").mockResolvedValue("turn-a");
 
     await expect(useAppStore.getState().sendPrompt("", [], [selected])).resolves.toBe(true);
-    expect(send).toHaveBeenCalledWith("project", "thread-a", "", [], LOCAL_HOST_ID, [], [selected]);
+    expect(send).toHaveBeenCalledWith("project", "thread-a", "", [], LOCAL_HOST_ID, [], [selected], []);
     expect(refresh).toHaveBeenCalledOnce();
   });
 
@@ -534,7 +591,7 @@ describe("browser annotations", () => {
 
     await expect(useAppStore.getState().sendPrompt("change this", [], [selected])).resolves.toBe(true);
     expect(send).toHaveBeenCalledWith(
-      "local-project", "thread-a", "change this", [], LOCAL_HOST_ID, [], [selected],
+      "local-project", "thread-a", "change this", [], LOCAL_HOST_ID, [], [selected], [],
     );
   });
 

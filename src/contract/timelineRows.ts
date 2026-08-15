@@ -1,11 +1,11 @@
-import { AgentDefinition, ChatImageAttachment, ChatThread, EventKind } from "./types";
+import { AgentDefinition, ChatImageAttachment, ChatTextSelection, ChatThread, EventKind } from "./types";
 import { TimelineItem } from "./timeline";
 import { isProviderDiagnostic } from "../providerDiagnostics";
 import type { BrowserAnnotation } from "../browser";
 
 /** One rendered line of a thread transcript, in chronological order. */
 export type TimelineRow =
-  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[]; annotations: BrowserAnnotation[] }
+  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[]; annotations: BrowserAnnotation[]; textSelections: ChatTextSelection[] }
   // Provider-reconciled terminal replies have no synthetic runtime event; a
   // normal GUI reply still renders from its source event to avoid duplication.
   | { key: string; at: number; kind: "assistant"; messageID: string; text: string }
@@ -28,7 +28,13 @@ export function buildRows(
       text: message.content,
     };
     if (message.role === "user") {
-      result.push({ ...shared, kind: "user", attachments: message.attachments ?? [], annotations: message.annotations ?? [] });
+      result.push({
+        ...shared,
+        kind: "user",
+        attachments: message.attachments ?? [],
+        annotations: message.annotations ?? [],
+        textSelections: message.textSelections ?? [],
+      });
     } else if (message.role === "assistant" && !message.sourceEventID) {
       result.push({ ...shared, kind: "assistant" });
     } else if (message.role === "system") {

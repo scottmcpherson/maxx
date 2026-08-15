@@ -34,6 +34,7 @@ import type {
 import {
   AgentDefinition,
   ChatProvider,
+  ChatTextSelection,
   ChatSurface,
   ChatThread,
   ProviderProfile,
@@ -79,6 +80,7 @@ import {
 import { uploadImagesForHost } from "../host/mediaUpload";
 import type { QueuedMessage } from "../messageQueue";
 import type { GitEnvironmentMode } from "../git";
+import type { SideChatRequest } from "../sideChat";
 
 let listenersStarted = false;
 const initialDefaultRuntime = loadDefaultRuntime();
@@ -114,6 +116,7 @@ interface AppStoreState {
   /** Browser pane visibility for the selected thread. */
   browserOpen: boolean;
   pendingBrowserReveal: BrowserUiReveal | null;
+  pendingSideChatRequest: SideChatRequest | null;
   /** Draft DOM selections collected from the browser, scoped to each chat composer. */
   browserAnnotationsByThread: Record<string, BrowserAnnotation[]>;
   /** Latest result of an update check; `null` once dismissed. */
@@ -178,6 +181,14 @@ interface AppStoreState {
     environment?: GitEnvironmentMode,
   ) => Promise<boolean>;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
+  createSideChat: (projectID: string, parentThreadID: string) => Promise<ChatThread | null>;
+  sendSideChatPrompt: (
+    projectID: string,
+    threadID: string,
+    prompt: string,
+    imagePaths: string[],
+    textSelections?: ChatTextSelection[],
+  ) => Promise<boolean>;
   drainPromptQueue: (threadID: string) => Promise<boolean>;
   steerQueuedMessage: (threadID: string, messageID: string) => Promise<boolean>;
   retryQueuedMessage: (threadID: string, messageID: string) => Promise<boolean>;
@@ -224,6 +235,8 @@ interface AppStoreState {
   toggleBrowser: () => void;
   revealBrowserTab: (reveal: BrowserUiReveal) => void;
   consumeBrowserReveal: (tabID: string) => void;
+  requestSideChat: (request: SideChatRequest) => void;
+  consumeSideChatRequest: (requestID: string) => void;
   applyBrowserAnnotation: (threadID: string, annotation: BrowserAnnotation, selected: boolean) => void;
   replaceBrowserAnnotations: (threadID: string, annotations: BrowserAnnotation[]) => void;
   removeBrowserAnnotation: (threadID: string, annotationID: string) => void;
@@ -333,6 +346,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       message.hostID,
       prepared.attachmentIds,
       message.annotations,
+      message.textSelections,
     );
   };
 
@@ -376,6 +390,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   summaryPopoverOpen: false,
   browserOpen: false,
   pendingBrowserReveal: null,
+  pendingSideChatRequest: null,
   browserAnnotationsByThread: {},
   updateStatus: null,
   defaultRuntime: { ...initialDefaultRuntime },
@@ -600,6 +615,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       browserOpen: state.selectedThreadID === threadID ? state.browserOpen : false,
       pendingBrowserReveal: state.selectedThreadID === threadID
         ? state.pendingBrowserReveal
+        : null,
+      pendingSideChatRequest: state.selectedThreadID === threadID
+        ? state.pendingSideChatRequest
         : null,
       summaryPopoverOpen: state.selectedThreadID === threadID
         ? state.summaryPopoverOpen
@@ -838,6 +856,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       prompt,
       imagePaths: [...imagePaths],
       annotations: [...annotations],
+      textSelections: [],
     };
     const current = get();
     if (
@@ -864,6 +883,60 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       return false;
     } finally {
       setMessageSending(selectedThreadID, false);
+    }
+  },
+
+  createSideChat: async (projectID, parentThreadID) => {
+    try {
+      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+      const thread = await ipc.createSideChat(projectID, parentThreadID, hostID);
+      await get().refresh();
+      return thread;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+
+  sendSideChatPrompt: async (projectID, threadID, prompt, imagePaths, textSelections = []) => {
+    if (!prompt.trim() && imagePaths.length === 0 && textSelections.length === 0) return false;
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
+    const message: QueuedMessage = {
+      id: crypto.randomUUID(),
+      kind: "prompt",
+      projectID,
+      threadID,
+      hostID,
+      prompt,
+      imagePaths: [...imagePaths],
+      annotations: [],
+      textSelections: [...textSelections],
+    };
+    const current = get();
+    if (
+      current.activeTurnByThread[threadID]
+      || current.sendingMessageByThread[threadID]
+      || (current.queuedMessagesByThread[threadID]?.length ?? 0) > 0
+    ) {
+      enqueueMessage(message);
+      if (!current.activeTurnByThread[threadID] && !current.sendingMessageByThread[threadID]) {
+        void get().drainPromptQueue(threadID);
+      }
+      return true;
+    }
+    setMessageSending(threadID, true);
+    try {
+      const turnID = await dispatchQueuedMessage(message);
+      set((state) => ({
+        activeTurnByThread: setActiveTurn(state.activeTurnByThread, threadID, turnID),
+      }));
+      await get().refresh();
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    } finally {
+      setMessageSending(threadID, false);
     }
   },
 
@@ -1130,6 +1203,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   )),
   consumeBrowserReveal: (tabID) => set((state) => (
     state.pendingBrowserReveal?.tabId === tabID ? { pendingBrowserReveal: null } : {}
+  )),
+  requestSideChat: (request) => set((state) => (
+    state.selectedThreadID === request.parentThreadID
+      ? { browserOpen: true, pendingSideChatRequest: request }
+      : {}
+  )),
+  consumeSideChatRequest: (requestID) => set((state) => (
+    state.pendingSideChatRequest?.id === requestID ? { pendingSideChatRequest: null } : {}
   )),
   applyBrowserAnnotation: (threadID, annotation, selected) => set((state) => {
     const current = state.browserAnnotationsByThread[threadID] ?? [];

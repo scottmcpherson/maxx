@@ -1,18 +1,29 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+// The right panel owns mixed tab chrome; Chromium remains one tab content type.
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   DEFAULT_BROWSER_TITLE,
   normalizeAddressInput,
-  reorderBrowserTabs,
   type BrowserAnnotation,
   type BrowserNativeState,
   type BrowserTabDropEdge,
   type BrowserTabSummary,
   type ChromeImportStatus,
 } from "../browser";
+import { projectName, type ChatTextSelection } from "../contract/types";
 import { ipc } from "../ipc";
+import {
+  loadSidePanelTabState,
+  persistSidePanelTabState,
+  reconcileSidePanelTabs,
+  reorderSidePanelTabs,
+  type SidePanelTab,
+} from "../sidePanelTabs";
 import { useAppStore } from "../store/appStore";
+import { appendChatTextSelection } from "../sideChat";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
+import { ShellTerminalView } from "./ShellTerminalView";
+import { SideChatView } from "./SideChatView";
 
 const EMPTY_ANNOTATIONS: BrowserAnnotation[] = [];
 
@@ -28,7 +39,7 @@ function tabWithNativeState(tab: BrowserTabSummary, state: BrowserNativeState): 
   };
 }
 
-export function BrowserPane({
+export function SidePanel({
   threadID,
   showContent,
   expanded,
@@ -42,6 +53,10 @@ export function BrowserPane({
 }) {
   const pendingBrowserReveal = useAppStore((state) => state.pendingBrowserReveal);
   const consumeBrowserReveal = useAppStore((state) => state.consumeBrowserReveal);
+  const pendingSideChatRequest = useAppStore((state) => state.pendingSideChatRequest);
+  const consumeSideChatRequest = useAppStore((state) => state.consumeSideChatRequest);
+  const createSideChat = useAppStore((state) => state.createSideChat);
+  const removeThread = useAppStore((state) => state.removeThread);
   const annotations = useAppStore((state) => state.browserAnnotationsByThread[threadID] ?? EMPTY_ANNOTATIONS);
   const applyBrowserAnnotation = useAppStore((state) => state.applyBrowserAnnotation);
   const replaceBrowserAnnotations = useAppStore((state) => state.replaceBrowserAnnotations);
@@ -54,8 +69,34 @@ export function BrowserPane({
       project.threads.some((thread) => thread.id === threadID && thread.surface === "terminal"),
     ));
   });
+  const workspace = useAppStore((state) => state.workspace);
+  const remoteSessions = useAppStore((state) => state.remoteSessions);
+  const selectedHostID = useAppStore((state) => state.selectedHostID);
+  const selectedProjectID = useAppStore((state) => state.selectedProjectID);
+  const projectWorkspace = useMemo(() => {
+    if (!selectedHostID || selectedHostID === "local") return workspace;
+    return remoteSessions.find((session) => session.host.id === selectedHostID)?.workspace ?? workspace;
+  }, [remoteSessions, selectedHostID, workspace]);
+  const project = useMemo(
+    () => projectWorkspace?.projects.find((candidate) => candidate.id === selectedProjectID),
+    [projectWorkspace, selectedProjectID],
+  );
+  const sideChatThreads = useMemo(
+    () => project?.threads.filter((candidate) => candidate.parentThreadID === threadID && !candidate.agentID) ?? [],
+    [project, threadID],
+  );
+  const sideChatThreadsByID = useMemo(
+    () => new Map(sideChatThreads.map((candidate) => [candidate.id, candidate])),
+    [sideChatThreads],
+  );
+  const sideChatThreadIDs = useMemo(() => sideChatThreads.map((candidate) => candidate.id), [sideChatThreads]);
   const [tabs, setTabs] = useState<BrowserTabSummary[]>([]);
-  const [selectedTabID, setSelectedTabID] = useState<string | null>(null);
+  const [panelState, setPanelState] = useState(() => loadSidePanelTabState(threadID));
+  const panelTabs = panelState.tabs;
+  const browserTabsByID = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
+  const selectedPanelTabID = panelState.selectedTabID;
+  const selectedPanelTab = panelTabs.find((tab) => tab.id === selectedPanelTabID);
+  const selectedTabID = selectedPanelTab?.type === "browser" ? selectedPanelTab.id : null;
   const [draft, setDraft] = useState("");
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
@@ -77,6 +118,8 @@ export function BrowserPane({
   const [draggedTabID, setDraggedTabID] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ tabID: string; edge: BrowserTabDropEdge } | null>(null);
   const [tabOverflow, setTabOverflow] = useState({ left: false, right: false });
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement | null>(null);
 
   const updateTabOverflow = useCallback(() => {
     const strip = tabStripRef.current;
@@ -94,23 +137,43 @@ export function BrowserPane({
   }, [selectedTabID]);
 
   useEffect(() => {
-    if (!terminalMode || !annotationMode) return;
+    persistSidePanelTabState(threadID, panelState);
+  }, [panelState, threadID]);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
+    };
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", dismissWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", dismissWithEscape);
+    };
+  }, [addMenuOpen]);
+
+  useEffect(() => {
+    if ((!terminalMode && selectedTabID) || !annotationMode) return;
     const tabID = annotationTabRef.current;
     annotationTabRef.current = null;
     annotationSessionStartRef.current = null;
     setAnnotationMode(false);
     clearBrowserAnnotations(threadID);
     if (tabID) void ipc.browserAnnotationMode(tabID, false);
-  }, [annotationMode, clearBrowserAnnotations, terminalMode, threadID]);
+  }, [annotationMode, clearBrowserAnnotations, selectedTabID, terminalMode, threadID]);
 
   useEffect(() => {
-    if (!selectedTabID) return;
+    if (!selectedPanelTabID) return;
     const frame = requestAnimationFrame(() => {
-      tabRefs.current.get(selectedTabID)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      tabRefs.current.get(selectedPanelTabID)?.scrollIntoView({ block: "nearest", inline: "nearest" });
       updateTabOverflow();
     });
     return () => cancelAnimationFrame(frame);
-  }, [selectedTabID, tabs.length, updateTabOverflow]);
+  }, [selectedPanelTabID, panelTabs.length, updateTabOverflow]);
 
   useEffect(() => {
     const strip = tabStripRef.current;
@@ -122,7 +185,7 @@ export function BrowserPane({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [tabs.length, updateTabOverflow]);
+  }, [panelTabs.length, updateTabOverflow]);
 
   useEffect(() => {
     pendingNavigationRef.current = pendingNavigation;
@@ -130,24 +193,30 @@ export function BrowserPane({
 
   const refreshTabs = useCallback(async () => {
     const next = await ipc.browserUiTabs(threadID);
-    const current = selectedRef.current;
-    const selected = next.find((tab) => tab.selected)?.id
-      ?? (current && next.some((tab) => tab.id === current) ? current : next[0]?.id)
-      ?? null;
-    selectedRef.current = selected;
-    setSelectedTabID(selected);
     setTabs(next);
-    const tab = next.find((candidate) => candidate.id === selected);
+    setPanelState((current) => reconcileSidePanelTabs(
+      current,
+      next.map((tab) => tab.id),
+      sideChatThreadIDs,
+      next.find((tab) => tab.selected)?.id,
+    ));
+    const tab = next.find((candidate) => candidate.id === selectedRef.current);
     if (tab && document.activeElement !== inputRef.current) setDraft(tab.url === "about:blank" ? "" : tab.url);
     return next;
-  }, [threadID]);
+  }, [sideChatThreadIDs, threadID]);
 
   const openTab = useCallback(async (url: string | null = null) => {
+    setAddMenuOpen(false);
     setSurfaceError(null);
     try {
       const tabID = await ipc.browserUiOpenTab(threadID, url);
       selectedRef.current = tabID;
-      setSelectedTabID(tabID);
+      setPanelState((current) => ({
+        tabs: current.tabs.some((tab) => tab.id === tabID)
+          ? current.tabs
+          : [...current.tabs, { id: tabID, type: "browser" }],
+        selectedTabID: tabID,
+      }));
       await refreshTabs();
     } catch (error) {
       setSurfaceError(String(error));
@@ -156,13 +225,11 @@ export function BrowserPane({
 
   useEffect(() => {
     let cancelled = false;
-    void refreshTabs().then((existing) => {
-      if (!cancelled && existing.length === 0) return openTab();
-    }).catch((error) => {
+    void refreshTabs().catch((error) => {
       if (!cancelled) setSurfaceError(String(error));
     });
     return () => { cancelled = true; };
-  }, [openTab, refreshTabs]);
+  }, [refreshTabs]);
 
   useEffect(() => {
     void ipc.browserChromeImportStatus().then((status) => {
@@ -179,7 +246,7 @@ export function BrowserPane({
       await ipc.browserUiSelectTab(pendingBrowserReveal.tabId);
       if (cancelled) return;
       selectedRef.current = pendingBrowserReveal.tabId;
-      setSelectedTabID(pendingBrowserReveal.tabId);
+      setPanelState((current) => ({ ...current, selectedTabID: pendingBrowserReveal.tabId }));
     }).catch((error) => {
       if (!cancelled) setSurfaceError(String(error));
     }).finally(() => {
@@ -234,7 +301,7 @@ export function BrowserPane({
     window.addEventListener("resize", publish);
     publish();
     return () => { cancelAnimationFrame(frame); observer.disconnect(); window.removeEventListener("resize", publish); };
-  }, [annotations.length, surfaceError]);
+  }, [annotations.length, selectedTabID, surfaceError]);
 
   useEffect(() => {
     void ipc.browserViewVisible(showContent && Boolean(selectedTabID));
@@ -274,7 +341,7 @@ export function BrowserPane({
     try {
       await ipc.browserUiSelectTab(tabID);
       selectedRef.current = tabID;
-      setSelectedTabID(tabID);
+      setPanelState((current) => ({ ...current, selectedTabID: tabID }));
       pendingNavigationRef.current = false;
       setPendingNavigation(false);
       setSurfaceError(null);
@@ -286,12 +353,29 @@ export function BrowserPane({
     }
   };
 
-  const closeTab = async (tabID: string) => {
+  const selectPanelTab = (tab: SidePanelTab) => {
+    setAddMenuOpen(false);
+    if (tab.type === "browser") void selectTab(tab.id);
+    else {
+      selectedRef.current = null;
+      setPanelState((current) => ({ ...current, selectedTabID: tab.id }));
+      setSurfaceError(null);
+    }
+  };
+
+  const closeTab = async (panelTab: SidePanelTab) => {
     try {
-      if (annotationTabRef.current === tabID) annotationTabRef.current = null;
-      await ipc.browserUiCloseTab(tabID);
-      const remaining = await refreshTabs();
-      if (remaining.length === 0) await openTab();
+      if (annotationTabRef.current === panelTab.id) annotationTabRef.current = null;
+      if (panelTab.type === "browser") await ipc.browserUiCloseTab(panelTab.id);
+      else if (panelTab.type === "terminal") await ipc.shellTerminalStop(panelTab.id, selectedHostID);
+      else if (project) await removeThread(project.id, panelTab.id);
+      const index = panelTabs.findIndex((tab) => tab.id === panelTab.id);
+      const remaining = panelTabs.filter((tab) => tab.id !== panelTab.id);
+      const next = remaining[Math.min(Math.max(0, index), remaining.length - 1)] ?? null;
+      selectedRef.current = next?.type === "browser" ? next.id : null;
+      setPanelState({ tabs: remaining, selectedTabID: next?.id ?? null });
+      if (next?.type === "browser") await ipc.browserUiSelectTab(next.id);
+      if (panelTab.type === "browser") await refreshTabs();
     } catch (error) {
       setSurfaceError(String(error));
     }
@@ -307,12 +391,13 @@ export function BrowserPane({
     targetTabID: string,
     edge: BrowserTabDropEdge,
   ) => {
-    const next = reorderBrowserTabs(tabs, draggedTabID, targetTabID, edge);
-    if (next === tabs) return;
-    setTabs(next);
+    const next = reorderSidePanelTabs(panelTabs, draggedTabID, targetTabID, edge);
+    if (next === panelTabs) return;
+    setPanelState((current) => ({ ...current, tabs: next }));
     setSurfaceError(null);
     try {
-      await ipc.browserUiReorderTabs(threadID, next.map((tab) => tab.id));
+      const browserTabIDs = next.filter((tab) => tab.type === "browser").map((tab) => tab.id);
+      if (browserTabIDs.length > 0) await ipc.browserUiReorderTabs(threadID, browserTabIDs);
     } catch (error) {
       setSurfaceError(String(error));
       await refreshTabs().catch(() => undefined);
@@ -393,6 +478,66 @@ export function BrowserPane({
   const selectedTab = tabs.find((tab) => tab.id === selectedTabID);
   const showImport = chromeImport?.available && !chromeImport.importedAt && !importDismissed;
 
+  const openTerminalTab = () => {
+    if (!project) {
+      setSurfaceError("The selected project is unavailable.");
+      return;
+    }
+    const tab: SidePanelTab = {
+      id: crypto.randomUUID(),
+      type: "terminal",
+      title: projectName(project),
+    };
+    selectedRef.current = null;
+    setPanelState((current) => ({ tabs: [...current.tabs, tab], selectedTabID: tab.id }));
+    setAddMenuOpen(false);
+    setSurfaceError(null);
+  };
+
+  const openSideChatTab = useCallback(async (selection?: ChatTextSelection) => {
+    if (!project) {
+      setSurfaceError("The selected project is unavailable.");
+      return;
+    }
+    setAddMenuOpen(false);
+    setSurfaceError(null);
+    const sideChat = await createSideChat(project.id, threadID);
+    if (!sideChat) return;
+    const tab: SidePanelTab = {
+      id: sideChat.id,
+      type: "side-chat",
+      title: sideChat.title || "Side chat",
+      pendingSelections: selection ? [selection] : [],
+    };
+    selectedRef.current = null;
+    setPanelState((current) => ({
+      tabs: [...current.tabs.filter((candidate) => candidate.id !== tab.id), tab],
+      selectedTabID: tab.id,
+    }));
+  }, [createSideChat, project, threadID]);
+
+  useEffect(() => {
+    if (!pendingSideChatRequest || pendingSideChatRequest.parentThreadID !== threadID) return;
+    consumeSideChatRequest(pendingSideChatRequest.id);
+    const selected = panelTabs.find((tab) => tab.id === selectedPanelTabID);
+    if (selected?.type === "side-chat") {
+      setPanelState((current) => ({
+        ...current,
+        tabs: current.tabs.map((tab) => tab.id === selected.id && tab.type === "side-chat"
+          ? {
+              ...tab,
+              pendingSelections: pendingSideChatRequest.selection
+                ? appendChatTextSelection(tab.pendingSelections, pendingSideChatRequest.selection)
+                : tab.pendingSelections,
+            }
+          : tab),
+        selectedTabID: selected.id,
+      }));
+      return;
+    }
+    void openSideChatTab(pendingSideChatRequest.selection);
+  }, [consumeSideChatRequest, openSideChatTab, panelTabs, pendingSideChatRequest, selectedPanelTabID, threadID]);
+
   const beginAnnotations = () => {
     annotationSessionStartRef.current = [...annotations];
     setAnnotationMode(true);
@@ -441,7 +586,7 @@ export function BrowserPane({
   };
 
   return (
-    <aside className={`browser-pane${showContent ? "" : " is-obscured"}`} aria-label="Browser">
+    <aside className={`browser-pane${showContent ? "" : " is-obscured"}`} aria-label="Right side panel">
       <div className="browser-tabbar" onMouseDown={beginWindowDrag}>
         <div className={`browser-tabs-viewport${tabOverflow.left ? " has-overflow-left" : ""}${tabOverflow.right ? " has-overflow-right" : ""}`}>
           <div ref={tabStripRef} className="browser-tabs"
@@ -452,67 +597,98 @@ export function BrowserPane({
               event.preventDefault();
               event.currentTarget.scrollLeft += event.deltaY;
             }}>
-            <div className="browser-tab-list" role="tablist" aria-label="Browser tabs">
-              {tabs.map((tab) => (
-                <div key={tab.id} ref={(element) => {
-                  if (element) tabRefs.current.set(tab.id, element);
-                  else tabRefs.current.delete(tab.id);
-                }} role="tab" tabIndex={tab.id === selectedTabID ? 0 : -1} aria-selected={tab.id === selectedTabID}
-                  data-tab-id={tab.id}
-                  className={`browser-tab${tab.id === selectedTabID ? " is-selected" : ""}${draggedTabID === tab.id ? " is-dragging" : ""}${dropTarget?.tabID === tab.id ? ` drop-${dropTarget.edge}` : ""}`}
-                  title={tab.title || tab.url || DEFAULT_BROWSER_TITLE}
-                  onClick={() => {
-                    if (suppressTabClickRef.current) {
-                      suppressTabClickRef.current = false;
-                      return;
-                    }
-                    void selectTab(tab.id);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    void selectTab(tab.id);
-                  }}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return;
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                    tabPointerDragRef.current = {
-                      tabID: tab.id,
-                      pointerID: event.pointerId,
-                      startX: event.clientX,
-                      dragging: false,
-                    };
-                  }}
-                  onPointerMove={moveTabPointer}
-                  onPointerUp={endTabPointer}
-                  onPointerCancel={(event) => {
-                    const drag = tabPointerDragRef.current;
-                    if (!drag || drag.pointerID !== event.pointerId) return;
-                    tabPointerDragRef.current = null;
-                    setDraggedTabID(null);
-                    setTabDropTarget(null);
-                  }}>
-                  <Icons.globe size={12} />
-                  <span className="browser-tab-title">{tab.title || DEFAULT_BROWSER_TITLE}</span>
-                  {tab.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
-                  <button className="browser-tab-close" type="button" title="Close tab"
-                    aria-label={`Close ${tab.title || "browser tab"}`}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => { event.stopPropagation(); void closeTab(tab.id); }}>
-                    <Icons.close size={12} />
-                  </button>
-                </div>
-              ))}
+            <div className="browser-tab-list" role="tablist" aria-label="Right panel tabs">
+              {panelTabs.map((panelTab) => {
+                const browserTab = panelTab.type === "browser" ? browserTabsByID.get(panelTab.id) : null;
+                const title = panelTab.type === "terminal"
+                  ? panelTab.title
+                  : panelTab.type === "side-chat"
+                    ? sideChatThreadsByID.get(panelTab.id)?.title || panelTab.title
+                    : browserTab?.title || DEFAULT_BROWSER_TITLE;
+                return (
+                  <div key={panelTab.id} ref={(element) => {
+                    if (element) tabRefs.current.set(panelTab.id, element);
+                    else tabRefs.current.delete(panelTab.id);
+                  }} role="tab" tabIndex={panelTab.id === selectedPanelTabID ? 0 : -1}
+                    aria-selected={panelTab.id === selectedPanelTabID}
+                    data-tab-id={panelTab.id}
+                    className={`browser-tab${panelTab.id === selectedPanelTabID ? " is-selected" : ""}${draggedTabID === panelTab.id ? " is-dragging" : ""}${dropTarget?.tabID === panelTab.id ? ` drop-${dropTarget.edge}` : ""}`}
+                    title={title}
+                    onClick={() => {
+                      if (suppressTabClickRef.current) {
+                        suppressTabClickRef.current = false;
+                        return;
+                      }
+                      selectPanelTab(panelTab);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      selectPanelTab(panelTab);
+                    }}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) return;
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                      tabPointerDragRef.current = {
+                        tabID: panelTab.id,
+                        pointerID: event.pointerId,
+                        startX: event.clientX,
+                        dragging: false,
+                      };
+                    }}
+                    onPointerMove={moveTabPointer}
+                    onPointerUp={endTabPointer}
+                    onPointerCancel={(event) => {
+                      const drag = tabPointerDragRef.current;
+                      if (!drag || drag.pointerID !== event.pointerId) return;
+                      tabPointerDragRef.current = null;
+                      setDraggedTabID(null);
+                      setTabDropTarget(null);
+                    }}>
+                    {panelTab.type === "terminal"
+                      ? <Icons.terminal size={12} />
+                      : panelTab.type === "side-chat"
+                        ? <Icons.bubble size={12} />
+                        : <Icons.globe size={12} />}
+                    <span className="browser-tab-title">{title}</span>
+                    {browserTab?.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
+                    <button className="browser-tab-close" type="button" title="Close tab"
+                      aria-label={`Close ${title}`}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => { event.stopPropagation(); void closeTab(panelTab); }}>
+                      <Icons.close size={12} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-          <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
-            onClick={() => void openTab()}><Icons.plus size={13} /></button>
+          {panelTabs.length > 0 && (
+            <div className="side-panel-add" ref={addMenuRef}>
+              <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
+                aria-haspopup="menu" aria-expanded={addMenuOpen}
+                onClick={() => setAddMenuOpen((open) => !open)}><Icons.plus size={13} /></button>
+              {addMenuOpen && (
+                <div className="side-panel-add-menu" role="menu" aria-label="New tab type">
+                  <button type="button" role="menuitem" onClick={() => void openTab()}>
+                    <Icons.globe size={15} /><span>Browser</span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={openTerminalTab}>
+                    <Icons.terminal size={15} /><span>Terminal</span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => void openSideChatTab()}>
+                    <Icons.bubble size={15} /><span>Side chat</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <button
           className={`icon-button browser-expand-toggle${expanded ? " is-active" : ""}`}
           type="button"
-          title={expanded ? "Restore browser panel" : "Expand browser panel"}
-          aria-label={expanded ? "Restore browser panel" : "Expand browser panel"}
+          title={expanded ? "Restore right panel" : "Expand right panel"}
+          aria-label={expanded ? "Restore right panel" : "Expand right panel"}
           aria-pressed={expanded}
           onClick={onToggleExpanded}
         >
@@ -520,7 +696,7 @@ export function BrowserPane({
         </button>
       </div>
 
-      {annotationMode ? (
+      {selectedPanelTab?.type === "browser" && (annotationMode ? (
         <div className="browser-annotation-toolbar">
           <div className="browser-annotation-toolbar-actions">
             <button type="button" className="icon-button" title="Cancel annotations" aria-label="Cancel annotations" onClick={cancelAnnotations}>
@@ -561,9 +737,9 @@ export function BrowserPane({
           <Icons.lock size={13} />
         </button>
       </form>
-      )}
+      ))}
 
-      {showImport && (
+      {selectedPanelTab?.type === "browser" && showImport && (
         <div className="browser-import-banner">
           <span><strong>Import data from Chrome</strong><small>Bring over your passwords and cookies to the built-in browser</small></span>
           {chromeImport.profiles.length > 1 && (
@@ -582,10 +758,54 @@ export function BrowserPane({
         </div>
       )}
 
-      <div ref={stageRef} className="browser-native-stage" aria-label="Webpage">
-        {!selectedTabID && <span>Opening browser…</span>}
-        {selectedTab?.crashed && <span>The Chromium renderer stopped. Reload this tab.</span>}
-      </div>
+      {panelTabs.length === 0 && (
+        <div className="side-panel-empty">
+          <div className="side-panel-empty-card">
+            <span className="side-panel-empty-title">Open a tab</span>
+            <button type="button" onClick={() => void openTab()}>
+              <Icons.globe size={18} />
+              <span><strong>Browser</strong><small>Browse and annotate the web</small></span>
+            </button>
+            <button type="button" onClick={openTerminalTab}>
+              <Icons.terminal size={18} />
+              <span><strong>Terminal</strong><small>Open a shell in this project</small></span>
+            </button>
+            <button type="button" onClick={() => void openSideChatTab()}>
+              <Icons.bubble size={18} />
+              <span><strong>Side chat</strong><small>Ask with this chat’s context</small></span>
+            </button>
+          </div>
+        </div>
+      )}
+      {selectedPanelTab?.type === "browser" && (
+        <div ref={stageRef} className="browser-native-stage" aria-label="Webpage">
+          {selectedTab?.crashed && <span>The Chromium renderer stopped. Reload this tab.</span>}
+        </div>
+      )}
+      {selectedPanelTab?.type === "terminal" && project && (
+        <ShellTerminalView
+          key={selectedPanelTab.id}
+          projectID={project.id}
+          threadID={threadID}
+          sessionID={selectedPanelTab.id}
+          hostID={selectedHostID ?? undefined}
+        />
+      )}
+      {selectedPanelTab?.type === "side-chat" && project && sideChatThreadsByID.get(selectedPanelTab.id) && (
+        <SideChatView
+          key={selectedPanelTab.id}
+          project={project}
+          thread={sideChatThreadsByID.get(selectedPanelTab.id)!}
+          hostID={selectedHostID ?? undefined}
+          pendingSelections={selectedPanelTab.pendingSelections}
+          onClearSelections={() => setPanelState((current) => ({
+            ...current,
+            tabs: current.tabs.map((tab) => tab.id === selectedPanelTab.id && tab.type === "side-chat"
+              ? { ...tab, pendingSelections: [] }
+              : tab),
+          }))}
+        />
+      )}
     </aside>
   );
 }

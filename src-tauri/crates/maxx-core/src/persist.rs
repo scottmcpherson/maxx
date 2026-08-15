@@ -70,6 +70,12 @@ pub struct ChatMessage {
     pub attachments: Vec<ChatImageAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<BrowserAnnotationContext>,
+    #[serde(
+        rename = "textSelections",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub text_selections: Vec<ChatTextSelection>,
     #[serde(rename = "createdAt")]
     pub created_at: AppleDate,
     #[serde(
@@ -81,6 +87,14 @@ pub struct ChatMessage {
     /// Agent that produced this message (assistant messages in agent threads).
     #[serde(rename = "agentID", skip_serializing_if = "Option::is_none", default)]
     pub agent_id: Option<Uuid>,
+}
+
+/// A user-selected excerpt from the parent transcript attached to a side-chat
+/// prompt. The full parent transcript is supplied separately as context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatTextSelection {
+    pub id: String,
+    pub text: String,
 }
 
 /// A preconfigured agent: a named persona with pinned instructions and runtime.

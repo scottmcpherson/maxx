@@ -242,6 +242,7 @@ impl HostHandler for TestHost {
                         .to_string(),
                     attachments,
                     annotations: Vec::new(),
+                    text_selections: Vec::new(),
                     created_at: maxx_core::AppleDate::now(),
                     source_event_id: None,
                     agent_id: None,

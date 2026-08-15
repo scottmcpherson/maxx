@@ -45,10 +45,59 @@ import { SideThreadResizer } from "./SideThreadResizer";
 import { TerminalView, type TerminalViewHandle } from "./TerminalView";
 import { HostFolderPicker } from "./HostFolderPicker";
 import { NewThreadContextBar } from "./NewThreadContextBar";
+import { createChatTextSelection } from "../sideChat";
+import { TextSelectionPill } from "./TextSelectionPill";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
 const EMPTY_BROWSER_ANNOTATIONS = [] as const;
+
+interface PrimaryTextSelection {
+  selection: NonNullable<ReturnType<typeof createChatTextSelection>>;
+  left: number;
+  top: number;
+}
+
+function TextSelectionActions({
+  selected,
+  onAskInSideChat,
+  onDismiss,
+}: {
+  selected: PrimaryTextSelection;
+  onAskInSideChat: () => void;
+  onDismiss: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) onDismiss();
+    };
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onDismiss();
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", dismissWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", dismissWithEscape);
+    };
+  }, [onDismiss]);
+  return createPortal(
+    <div
+      ref={ref}
+      className="text-selection-actions"
+      role="toolbar"
+      aria-label="Selected text actions"
+      style={{ left: selected.left, top: selected.top }}
+    >
+      <button type="button" onClick={onAskInSideChat}>
+        <Icons.bubble size={14} />
+        <span>Ask in side chat</span>
+      </button>
+    </div>,
+    document.body,
+  );
+}
 
 function Markdown({
   text,
@@ -121,6 +170,7 @@ export function ThreadView({
   const summaryPinned = useAppStore((state) => state.summaryPinned);
   const browserOpen = useAppStore((state) => state.browserOpen);
   const toggleBrowser = useAppStore((state) => state.toggleBrowser);
+  const requestSideChat = useAppStore((state) => state.requestSideChat);
   const toggleBrowserShortcut = useAppStore((state) => state.keyboardShortcuts.toggleBrowser);
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
@@ -134,6 +184,7 @@ export function ThreadView({
   const terminalViewRef = useRef<TerminalViewHandle>(null);
   const [switchingSurface, setSwitchingSurface] = useState(false);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
+  const [primaryTextSelection, setPrimaryTextSelection] = useState<PrimaryTextSelection | null>(null);
 
   const projectWorkspace = useMemo(() => {
     if (!selectedHostID || selectedHostID === "local") return workspace;
@@ -231,6 +282,7 @@ export function ThreadView({
   }, [selectedThreadID]);
 
   useEffect(() => images.clear(), [images.clear, selectedThreadID]);
+  useEffect(() => setPrimaryTextSelection(null), [selectedThreadID]);
 
   // Turning the experiment off must not strand an existing terminal chat with
   // its return control hidden. Restore that chat's persisted GUI surface as
@@ -348,6 +400,16 @@ export function ThreadView({
     .reverse()
     .find((event) => (event.payload.usage?.contextTokens ?? 0) > 0)?.payload.usage;
   const contextUsed = usage?.contextTokens;
+  const askSelectionInSideChat = () => {
+    if (!primaryTextSelection) return;
+    requestSideChat({
+      id: crypto.randomUUID(),
+      parentThreadID: thread.id,
+      selection: primaryTextSelection.selection,
+    });
+    window.getSelection()?.removeAllRanges();
+    setPrimaryTextSelection(null);
+  };
 
   return (
     <div className="workspace-stage" aria-hidden={browserExpanded} inert={browserExpanded}>
@@ -434,7 +496,20 @@ export function ThreadView({
           openSideThreadID={openSideThreadID}
           agentsByID={agentsByID}
           onOpenSideThread={setOpenSideThreadID}
+          onTextSelection={(selection, rect) => setPrimaryTextSelection({
+            selection,
+            left: Math.max(12, Math.min(rect.left + rect.width / 2, window.innerWidth - 170)),
+            top: Math.min(window.innerHeight - 48, rect.bottom + 8),
+          })}
         />
+
+        {primaryTextSelection && (
+          <TextSelectionActions
+            selected={primaryTextSelection}
+            onAskInSideChat={askSelectionInSideChat}
+            onDismiss={() => setPrimaryTextSelection(null)}
+          />
+        )}
 
         <footer className="composer-zone">
           {error && <div className="error-banner">{error}</div>}
@@ -625,6 +700,7 @@ export function ThreadTimeline({
   agentsByID,
   turnAgents,
   turnTimes,
+  onTextSelection,
 }: {
   projectID: string;
   threadID: string;
@@ -644,6 +720,8 @@ export function ThreadTimeline({
   turnAgents?: Map<string, AgentDefinition>;
   /** Turn start times (Apple epoch seconds) for byline timestamps. */
   turnTimes?: Map<string, number>;
+  /** Primary-chat text selection action. Omitted in child/side timelines. */
+  onTextSelection?: (selection: NonNullable<ReturnType<typeof createChatTextSelection>>, rect: DOMRect) => void;
 }) {
   const [ready, setReady] = useState(false);
   const showProviderDiagnostics = useAppStore((state) => state.showProviderDiagnostics);
@@ -675,6 +753,16 @@ export function ThreadTimeline({
       initial="instant"
       resize={resizeMode}
       role="log"
+      onPointerUp={(event) => {
+        if (!onTextSelection) return;
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        if (!event.currentTarget.contains(range.commonAncestorContainer)) return;
+        const chatSelection = createChatTextSelection(selection.toString());
+        if (!chatSelection) return;
+        onTextSelection(chatSelection, range.getBoundingClientRect());
+      }}
     >
       <RevealTimeline whenReady={markReady} />
       <StickToBottom.Content className="timeline">
@@ -696,6 +784,7 @@ export function ThreadTimeline({
                     ))}
                   </div>
                 )}
+                <TextSelectionPill selections={row.textSelections} />
                 <BrowserAnnotationPills annotations={row.annotations} readonly />
                 {row.text && <div className="user-bubble"><MentionText text={row.text} agents={mentionAgents} /></div>}
                 {anchored.length > 0 && onOpenSideThread && (

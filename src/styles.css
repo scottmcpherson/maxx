@@ -2269,7 +2269,7 @@ button.git-environment-row:disabled:hover { background: transparent; }
    boxes bottom-align across the split. */
 .side-thread-composer { flex: 0 0 auto; padding: 8px 12px 32px; display: flex; flex-direction: column; gap: 7px; }
 
-/* ---- Shared Chromium browser pane ---- */
+/* ---- Right side panel: browser and terminal tabs ---- */
 .browser-shell {
   width: var(--browser-width, 584px); flex: 0 0 auto; height: 100%;
   overflow: hidden; visibility: visible;
@@ -2308,7 +2308,7 @@ button.git-environment-row:disabled:hover { background: transparent; }
 .browser-tabs-viewport {
   position: relative; min-width: 0; flex: 1 1 auto; align-self: stretch;
   display: flex; align-items: center;
-  overflow: hidden;
+  overflow: visible;
 }
 .browser-tabs-viewport::before,
 .browser-tabs-viewport::after {
@@ -2340,6 +2340,22 @@ button.git-environment-row:disabled:hover { background: transparent; }
   background: var(--bg);
 }
 .browser-tabbar .browser-new-tab:hover { background: var(--bg-hover); }
+.side-panel-add { position: relative; z-index: 12; flex: 0 0 auto; }
+.side-panel-add-menu {
+  position: absolute; z-index: 30; top: calc(100% + 8px); left: 4px;
+  width: 168px; padding: 6px;
+  border: 1px solid var(--border-strong); border-radius: 11px;
+  background: #2a2a2a; box-shadow: 0 18px 42px rgba(0,0,0,.52);
+}
+.side-panel-add-menu button {
+  width: 100%; min-height: 36px; padding: 0 9px;
+  display: flex; align-items: center; gap: 9px;
+  border: 0; border-radius: 7px; background: transparent;
+  color: #dedede; cursor: pointer; font: inherit; font-size: 12.5px; text-align: left;
+}
+.side-panel-add-menu button:hover,
+.side-panel-add-menu button:focus-visible { background: rgba(255,255,255,.075); outline: 0; }
+.side-panel-add-menu button > svg { color: #aaa; }
 .browser-tab {
   position: relative; display: flex; align-items: center; gap: 8px;
   flex: 0 0 176px; min-width: 176px; width: 176px;
@@ -2439,6 +2455,91 @@ button.git-environment-row:disabled:hover { background: transparent; }
   display: flex; align-items: center; justify-content: center;
   background: #fff; color: #666; font-size: 12px; cursor: default; user-select: none;
 }
+.side-panel-empty {
+  flex: 1; min-height: 0; display: grid; place-items: center;
+  padding: 28px; background: var(--bg);
+}
+.side-panel-empty-card {
+  width: min(420px, 100%); display: flex; flex-direction: column; gap: 8px;
+}
+.side-panel-empty-title {
+  margin: 0 4px 5px; color: #8b8b8b; font-size: 11px; font-weight: 600;
+  letter-spacing: .055em; text-transform: uppercase;
+}
+.side-panel-empty-card button {
+  width: 100%; min-height: 62px; padding: 10px 14px;
+  display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 11px;
+  border: 1px solid rgba(255,255,255,.065); border-radius: 10px;
+  background: #202020; color: #aaa; cursor: pointer; text-align: left;
+}
+.side-panel-empty-card button:hover,
+.side-panel-empty-card button:focus-visible {
+  border-color: rgba(255,255,255,.12); background: #252525; color: #dcdcdc; outline: 0;
+}
+.side-panel-empty-card button > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.side-panel-empty-card strong { color: #dedede; font: 500 13px/1.2 inherit; }
+.side-panel-empty-card small { color: #858585; font: 11px/1.3 inherit; }
+.panel-terminal {
+  position: relative; flex: 1; min-width: 0; min-height: 0;
+  overflow: hidden; background: #171717;
+}
+.panel-terminal .terminal-emulator { inset: 12px 8px 8px 14px; }
+.side-chat-view {
+  position: relative; flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden; background: var(--bg);
+}
+.side-chat-view .timeline { padding-left: 25px; padding-right: 25px; }
+.side-chat-empty {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px; padding: 28px;
+  color: var(--text-faint); text-align: center;
+}
+.side-chat-empty svg { color: #6f6f6f; }
+.side-chat-empty strong { color: var(--text); font-size: 17px; font-weight: 550; }
+.side-chat-empty span { max-width: 330px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.side-chat-composer {
+  flex: 0 0 auto; padding: 8px 24px 32px; display: flex; flex-direction: column; gap: 7px;
+}
+.side-chat-composer .composer { width: 100%; }
+.text-selection-pill {
+  width: fit-content; max-width: 100%; min-height: 28px; padding: 0 8px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  background: rgba(255,255,255,.035); color: var(--text-dim); font-size: 11.5px;
+  cursor: default; outline: 0;
+}
+.text-selection-pill:hover,
+.text-selection-pill:focus-visible { background: var(--bg-hover); color: var(--text); border-color: rgba(255,255,255,.16); }
+.text-selection-pill > span { white-space: nowrap; }
+.text-selection-pill > button {
+  width: 20px; height: 20px; margin-right: -5px; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-faint); cursor: pointer;
+}
+.text-selection-pill > button:hover { background: rgba(255,255,255,.09); color: var(--text); }
+.text-selection-preview {
+  position: fixed; z-index: 1000; width: 360px; max-height: min(320px, 46vh); padding: 10px;
+  overflow-y: auto; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--border-strong); border-radius: 11px;
+  background: #292929; box-shadow: 0 16px 42px rgba(0,0,0,.55);
+}
+.text-selection-preview blockquote {
+  margin: 0; padding: 0 0 0 10px; border-left: 2px solid #656565;
+  color: #dedede; font-size: 11.5px; line-height: 1.45;
+}
+.text-selection-actions {
+  position: fixed; z-index: 1000; transform: translateX(-50%); padding: 4px;
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  background: #2a2a2a; box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.text-selection-actions button {
+  height: 30px; padding: 0 9px; display: inline-flex; align-items: center; gap: 7px;
+  border: 0; border-radius: 6px; background: transparent; color: #dedede;
+  font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.text-selection-actions button:hover,
+.text-selection-actions button:focus-visible { background: rgba(255,255,255,.08); outline: 0; }
+.user-message-row > .text-selection-pill { align-self: flex-end; }
 .browser-native-loading {
   width: 12px; height: 12px; flex: 0 0 auto; border-radius: 50%;
   border: 1.5px solid rgba(255,255,255,.2); border-top-color: var(--link);

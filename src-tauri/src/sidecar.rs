@@ -448,6 +448,65 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 )
                 .await,
         ),
+        "shell_terminal_start" => value(
+            state
+                .app
+                .terminals
+                .start_shell(
+                    state.app.clone(),
+                    required(&params, "projectId")?,
+                    required(&params, "threadId")?,
+                    required(&params, "sessionId")?,
+                    optional(&params, "rows")?,
+                    optional(&params, "cols")?,
+                )
+                .await,
+        ),
+        "shell_terminal_status" => value(Ok(state
+            .app
+            .terminals
+            .status(required(&params, "sessionId")?)
+            .await)),
+        "shell_terminal_input" => value(
+            state
+                .app
+                .terminals
+                .input(
+                    required(&params, "sessionId")?,
+                    required(&params, "dataBase64")?,
+                )
+                .await,
+        ),
+        "shell_terminal_resize" => value(
+            state
+                .app
+                .terminals
+                .resize(
+                    required(&params, "sessionId")?,
+                    required(&params, "rows")?,
+                    required(&params, "cols")?,
+                )
+                .await,
+        ),
+        "shell_terminal_read" => value(
+            state
+                .app
+                .terminals
+                .read(
+                    required(&params, "sessionId")?,
+                    required(&params, "after")?,
+                    optional(&params, "maxBytes")?,
+                )
+                .await,
+        ),
+        "shell_terminal_stop" => {
+            state
+                .app
+                .terminals
+                .stop_shell(required(&params, "sessionId")?)
+                .await;
+            Ok(Value::Null)
+        }
         "update_profiles" => value(
             crate::commands::update_profiles(
                 state.app.clone(),
@@ -485,6 +544,15 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 optional(&params, "imagePaths")?.unwrap_or_default(),
                 optional(&params, "attachmentIds")?.unwrap_or_default(),
                 optional(&params, "annotations")?.unwrap_or_default(),
+                optional(&params, "textSelections")?.unwrap_or_default(),
+            )
+            .await,
+        ),
+        "create_side_chat" => value(
+            crate::commands::create_side_chat(
+                state.app.clone(),
+                required(&params, "projectId")?,
+                required(&params, "parentThreadId")?,
             )
             .await,
         ),

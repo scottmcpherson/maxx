@@ -21,6 +21,7 @@ import {
   AgentDefinition,
   ChatProvider,
   ChatProject,
+  ChatTextSelection,
   ChatThread,
   ChatSurface,
   ProviderHealth,
@@ -170,6 +171,34 @@ export const ipc = {
     archive: string | null,
     hostId?: string | null,
   ) => invokeOnHost<void>(hostId, "terminal_stop", { projectId, threadId, archive }),
+  shellTerminalStart: (
+    projectId: string,
+    threadId: string,
+    sessionId: string,
+    rows: number,
+    cols: number,
+    hostId?: string | null,
+  ) => invokeOnHost<TerminalStatus>(hostId, "shell_terminal_start", {
+    projectId,
+    threadId,
+    sessionId,
+    rows,
+    cols,
+  }),
+  shellTerminalStatus: (sessionId: string, hostId?: string | null) =>
+    invokeOnHost<TerminalStatus | null>(hostId, "shell_terminal_status", { sessionId }),
+  shellTerminalInput: (sessionId: string, dataBase64: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "shell_terminal_input", { sessionId, dataBase64 }),
+  shellTerminalResize: (
+    sessionId: string,
+    rows: number,
+    cols: number,
+    hostId?: string | null,
+  ) => invokeOnHost<void>(hostId, "shell_terminal_resize", { sessionId, rows, cols }),
+  shellTerminalRead: (sessionId: string, after: number, hostId?: string | null) =>
+    invokeOnHost<TerminalRead>(hostId, "shell_terminal_read", { sessionId, after, maxBytes: 262_144 }),
+  shellTerminalStop: (sessionId: string, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "shell_terminal_stop", { sessionId }),
   updateProfiles: (profiles: ProviderProfile[]) =>
     invoke<ProviderProfile[]>("update_profiles", { profiles }),
   updateTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) =>
@@ -224,6 +253,7 @@ export const ipc = {
     hostId?: string | null,
     attachmentIds: string[] = [],
     annotations: BrowserAnnotation[] = [],
+    textSelections: ChatTextSelection[] = [],
   ) =>
     invokeOnHost<string>(hostId, "send_prompt", {
       projectId,
@@ -232,7 +262,10 @@ export const ipc = {
       imagePaths,
       attachmentIds,
       annotations,
+      textSelections,
     }),
+  createSideChat: (projectId: string, parentThreadId: string, hostId?: string | null) =>
+    invokeOnHost<ChatThread>(hostId, "create_side_chat", { projectId, parentThreadId }),
   steerPrompt: (
     projectId: string,
     threadId: string,

@@ -185,6 +185,7 @@ impl AppState {
                         content: assistant_text,
                         attachments: Vec::new(),
                         annotations: Vec::new(),
+                        text_selections: Vec::new(),
                         created_at: AppleDate::now(),
                         source_event_id: assistant_source_event,
                         agent_id,

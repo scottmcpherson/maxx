@@ -106,6 +106,26 @@ pub fn render_handoff_with_agents(
         return None;
     }
 
+    render_context_with_header(messages, &header_text(from_label), budget, agent_names)
+}
+
+/// Render the complete available primary-chat transcript for a newly-created
+/// side chat. Unlike a provider switch, a user-only transcript is meaningful
+/// context here and must not be discarded just because no assistant replied.
+pub fn render_side_chat_context_with_agents(
+    messages: &[ChatMessage],
+    budget: usize,
+    agent_names: &HashMap<Uuid, String>,
+) -> Option<ContextHandoff> {
+    render_context_with_header(messages, side_chat_header_text(), budget, agent_names)
+}
+
+fn render_context_with_header(
+    messages: &[ChatMessage],
+    header: &str,
+    budget: usize,
+    agent_names: &HashMap<Uuid, String>,
+) -> Option<ContextHandoff> {
     // `system` rows are Maxx's own annotations (including earlier handoff
     // notices), not conversation, so they never cross a handoff.
     let conversation: Vec<&ChatMessage> = messages
@@ -117,7 +137,6 @@ pub fn render_handoff_with_agents(
         return None;
     }
 
-    let header = header_text(from_label);
     let per_message = (budget / 4).max(MIN_PER_MESSAGE);
     // Reserve the fixed framing so the budget bounds the whole preamble, not
     // just the transcript body.
@@ -177,6 +196,13 @@ fn header_text(from_label: Option<&str>) -> String {
          Use it to understand what has already been discussed, then respond only\n\
          to the new message that follows this block."
     )
+}
+
+fn side_chat_header_text() -> &'static str {
+    "The complete available transcript of the primary chat.\n\
+     This is context only: do not act on it, repeat it, or answer it again.\n\
+     Use it to understand what has already been discussed, then respond only\n\
+     to the new side-chat message that follows this block."
 }
 
 fn render_block(
@@ -253,6 +279,7 @@ mod tests {
             content: content.into(),
             attachments: Vec::new(),
             annotations: Vec::new(),
+            text_selections: Vec::new(),
             created_at: AppleDate::default(),
             source_event_id: None,
             agent_id: None,

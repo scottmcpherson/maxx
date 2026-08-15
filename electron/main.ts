@@ -32,6 +32,8 @@ const hermesBrowserSmoke = process.argv.includes("--hermes-browser-smoke");
 // Manual, isolated app session used by Computer Use to exercise the real
 // terminal UI without touching the user's normal Maxx workspace.
 const terminalUiSmoke = process.argv.includes("--terminal-ui-smoke");
+const terminalUiProject = process.argv.find((argument) => argument.startsWith("--terminal-ui-project="))
+  ?.slice("--terminal-ui-project=".length) || process.cwd();
 const smokeMode = appSmoke || browserSmoke || hermesBrowserSmoke || terminalUiSmoke;
 const smokeUserData = process.argv.find((argument) => argument.startsWith("--browser-smoke-user-data="))?.slice("--browser-smoke-user-data=".length);
 const BEST_BUY_BENCHMARK = "https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat335400050008&id=pcat17071&qp=brand_facet%3DBrand%7EBambu+Lab%5Estorepickupstores_facet%3DStore+Availability+-+In+Store+Pickup%7E885&st=categoryid%24pcmcat335400050008";
@@ -57,9 +59,10 @@ const RUNTIME_METHODS = new Set([
   "add_project", "remove_project", "add_thread",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
-  "start_side_thread", "send_agent_prompt", "steer_prompt", "cancel_turn", "resolve_request", "provider_health",
+  "create_side_chat", "start_side_thread", "send_agent_prompt", "steer_prompt", "cancel_turn", "resolve_request", "provider_health",
   "terminal_support", "terminal_start", "terminal_status", "terminal_input", "terminal_resize",
-  "terminal_read", "terminal_stop",
+  "terminal_read", "terminal_stop", "shell_terminal_start", "shell_terminal_status",
+  "shell_terminal_input", "shell_terminal_resize", "shell_terminal_read", "shell_terminal_stop",
   "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "update_voice_settings",
   "voice_start", "voice_send_audio", "voice_stop", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
@@ -798,6 +801,18 @@ else {
     });
     if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(path.join(projectDirectory, "src-tauri", "icons", "128x128.png")));
     await createWindow();
+    if (terminalUiSmoke) {
+      const project = await runtime!.request("add_project", { folderPath: terminalUiProject }, 5_000) as Record<string, JsonValue>;
+      await runtime!.request("add_thread", {
+        projectId: String(project.id),
+        provider: "codex",
+        model: "default",
+        title: "Right panel terminal acceptance",
+      }, 5_000);
+      const reloaded = new Promise<void>((resolve) => mainWindow!.webContents.once("did-finish-load", () => resolve()));
+      mainWindow!.webContents.reload();
+      await reloaded;
+    }
     await initializeUpdater();
     app.on("activate", () => { if (!mainWindow) void createWindow(); else mainWindow.show(); });
   }).catch((error) => { dialog.showErrorBox("Maxx could not start", String(error)); app.quit(); });

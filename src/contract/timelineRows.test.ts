@@ -166,6 +166,7 @@ describe("buildRows", () => {
         { id: "image", path: "/tmp/image.png", mimeType: "image/png", displayName: "image.png" },
       ],
       annotations: [],
+      textSelections: [],
     }]);
   });
 

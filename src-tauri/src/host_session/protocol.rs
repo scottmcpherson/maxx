@@ -76,12 +76,21 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "update_thread"
         | "upload_media"
         | "authorize_image_previews" => Some(Capability::WorkspaceWrite),
-        "send_prompt" | "steer_prompt" | "start_side_thread" | "send_agent_prompt"
-        | "cancel_turn" | "resolve_request" => Some(Capability::AgentRun),
-        "terminal_support" | "terminal_start" | "terminal_status" | "terminal_input"
-        | "terminal_resize" | "terminal_read" | "terminal_stop" => {
-            Some(Capability::TerminalControl)
-        }
+        "send_prompt" | "steer_prompt" | "create_side_chat" | "start_side_thread"
+        | "send_agent_prompt" | "cancel_turn" | "resolve_request" => Some(Capability::AgentRun),
+        "terminal_support"
+        | "terminal_start"
+        | "terminal_status"
+        | "terminal_input"
+        | "terminal_resize"
+        | "terminal_read"
+        | "terminal_stop"
+        | "shell_terminal_start"
+        | "shell_terminal_status"
+        | "shell_terminal_input"
+        | "shell_terminal_resize"
+        | "shell_terminal_read"
+        | "shell_terminal_stop" => Some(Capability::TerminalControl),
         "browser_ui_tabs"
         | "browser_ui_open_tab"
         | "browser_ui_select_tab"
