@@ -11,65 +11,6 @@
 
 import { VOICE_SAMPLE_RATE } from "./types";
 
-/** ~100 ms of audio per message. Small enough to feel live, large enough that
- *  the IPC round trip per chunk stays irrelevant. */
-const CHUNK_MILLISECONDS = 100;
-
-/**
- * Worklet source, inlined and loaded from a blob URL so no separate build
- * entry or static asset is needed. `addModule` requires a URL, and a blob is
- * the only way to give it one without a bundler plugin.
- *
- * Resampling happens here rather than on the main thread because the worklet
- * is the only place that sees every render quantum without jitter. The
- * `sampleRate` global is the context's real rate, which is not necessarily the
- * rate we asked for.
- */
-const WORKLET_SOURCE = `
-class MaxxPcmProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    const target = options.processorOptions.targetRate;
-    this.step = sampleRate / target;
-    this.chunkSamples = Math.round(target * ${CHUNK_MILLISECONDS} / 1000);
-    this.cursor = 0;
-    this.pending = [];
-  }
-
-  process(inputs) {
-    const channel = inputs[0] && inputs[0][0];
-    if (!channel || channel.length === 0) return true;
-
-    // Linear interpolation between neighbouring input samples. \`cursor\`
-    // carries its fractional part across quanta so the output rate does not
-    // drift over a long dictation.
-    while (this.cursor < channel.length) {
-      const index = Math.floor(this.cursor);
-      const fraction = this.cursor - index;
-      const current = channel[index];
-      const next = index + 1 < channel.length ? channel[index + 1] : current;
-      this.pending.push(current + (next - current) * fraction);
-      this.cursor += this.step;
-      if (this.pending.length >= this.chunkSamples) this.flush();
-    }
-    this.cursor -= channel.length;
-    return true;
-  }
-
-  flush() {
-    const pcm = new Int16Array(this.pending.length);
-    for (let i = 0; i < pcm.length; i += 1) {
-      const clamped = Math.max(-1, Math.min(1, this.pending[i]));
-      pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-    }
-    this.pending = [];
-    this.port.postMessage(pcm.buffer, [pcm.buffer]);
-  }
-}
-
-registerProcessor("maxx-pcm", MaxxPcmProcessor);
-`;
-
 export interface MicrophoneCapture {
   stop: () => Promise<void>;
 }
@@ -113,9 +54,9 @@ export async function startMicrophoneCapture(
     context = new AudioContext();
   }
 
-  const moduleUrl = URL.createObjectURL(
-    new Blob([WORKLET_SOURCE], { type: "application/javascript" }),
-  );
+  // Keep the processor as a packaged asset. Maxx's CSP deliberately excludes
+  // blob scripts, and AudioWorklet applies that policy to addModule as well.
+  const moduleUrl = new URL("maxx-pcm-worklet.js", document.baseURI).href;
 
   let source: MediaStreamAudioSourceNode | null = null;
   let worklet: AudioWorkletNode | null = null;
@@ -134,11 +75,7 @@ export async function startMicrophoneCapture(
   } catch (error) {
     stream.getTracks().forEach((track) => track.stop());
     await context.close().catch(() => {});
-    URL.revokeObjectURL(moduleUrl);
     throw error;
-  } finally {
-    // `addModule` has already fetched it; holding the URL only leaks.
-    URL.revokeObjectURL(moduleUrl);
   }
 
   let stopped = false;

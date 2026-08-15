@@ -254,6 +254,16 @@ async function runAppSmoke(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!state.bridge || !state.newChat || !state.projects) throw new Error(`packaged renderer did not become ready: ${JSON.stringify(state)}`);
+  const voiceWorklet = await mainWindow!.webContents.executeJavaScript(`(async () => {
+    const context = new AudioContext();
+    try {
+      await context.audioWorklet.addModule(new URL("maxx-pcm-worklet.js", document.baseURI).href);
+      return true;
+    } finally {
+      await context.close();
+    }
+  })()`);
+  if (voiceWorklet !== true) throw new Error("packaged voice worklet did not load");
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
   // Exercise Git-backed UI against the caller's checkout. A packaged app's
@@ -374,7 +384,7 @@ async function runAppSmoke(): Promise<void> {
   // catches regressions in the real sidecar transport, not only request bursts.
   await new Promise((resolve) => setTimeout(resolve, 500));
   await runtime!.request("workspace_snapshot", {}, 5_000);
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, runtimeAck: true, annotationPersisted, isolatedWorkspace: true, gitUI })}\n`);
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, annotationPersisted, isolatedWorkspace: true, gitUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {
