@@ -2964,20 +2964,6 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   .dictation-button.state-listening, .dictation-dot { animation: none; }
 }
 
-.host-group { display: flex; flex-direction: column; gap: 2px; }
-.host-group-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 4px;
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: none;
-}
-.host-group-header span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.host-disconnect { margin-left: auto; font-size: 11px; color: var(--text-faint); }
 .repositories-header { position: relative; }
 .host-choice-menu {
   position: absolute;

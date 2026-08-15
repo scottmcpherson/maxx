@@ -85,7 +85,6 @@ export function Sidebar() {
   const removeProject = useAppStore((state) => state.removeProject);
   const removeThread = useAppStore((state) => state.removeThread);
   const startNewThread = useAppStore((state) => state.startNewThread);
-  const disconnectHost = useAppStore((state) => state.disconnectHost);
   const settingsOpen = useAppStore((state) => state.settingsOpen);
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
   const agentsOpen = useAppStore((state) => state.agentsOpen);
@@ -318,12 +317,6 @@ export function Sidebar() {
   );
   const hostIdForProject = (projectID: string) =>
     visibleProjects.find((item) => item.project.id === projectID)?.hostId ?? LOCAL_HOST_ID;
-  const hostGroups = hosts.map((host) => ({
-    host,
-    projects: visibleProjects
-      .filter((item) => item.hostId === host.id)
-      .map((item) => item.project),
-  }));
   const pinnedThreadIDSet = useMemo(
     () => new Set(pinnedItems.map((item) => item.thread.id)),
     [pinnedItems],
@@ -489,25 +482,8 @@ export function Sidebar() {
                   </div>
                 </div>
 
-                {hostGroups.map(({ host, projects }) => (
-                  <section key={host.id} className="host-group" aria-label={host.name}>
-                    {(remoteSessions.length > 0 || !isLocalHost(host.id)) && (
-                      <header className="host-group-header">
-                        <Icons.computer size={13} />
-                        <span>{isLocalHost(host.id) ? `${host.name} · this Mac` : host.name}</span>
-                        {!isLocalHost(host.id) && (
-                          <button
-                            type="button"
-                            className="text-button host-disconnect"
-                            onClick={() => void disconnectHost(host.id)}
-                          >
-                            Disconnect
-                          </button>
-                        )}
-                      </header>
-                    )}
-                    {projects.map((project) => {
-                  const remoteProject = !isLocalHost(host.id);
+                {visibleProjects.map(({ hostId, hostName, project }) => {
+                  const remoteProject = !isLocalHost(hostId);
                   const projectVisible = !attentionFilterOpen || attentionProjectIDs.has(project.id);
                   const projectExpanded = attentionFilterOpen
                     ? projectVisible
@@ -533,10 +509,10 @@ export function Sidebar() {
                             <ProjectFolderIcon
                               expanded={projectExpanded}
                               remote={remoteProject}
-                              hostName={host.name}
+                              hostName={hostName}
                             />
                             <span className="project-name" title={project.folderPath}>{projectName(project)}</span>
-                            {remoteProject && <span className="sr-only">Remote project on {host.name}</span>}
+                            {remoteProject && <span className="sr-only">Remote project on {hostName}</span>}
                           </button>
                           <span
                             className={`project-header-actions ${openProjectMenuID === project.id ? "is-open" : ""}`}
@@ -563,7 +539,7 @@ export function Sidebar() {
                                     role="menuitem"
                                     onClick={() => {
                                       setOpenProjectMenuID(null);
-                                      void removeProject(project.id, host.id);
+                                      void removeProject(project.id, hostId);
                                     }}
                                   >
                                     Remove project
@@ -576,7 +552,7 @@ export function Sidebar() {
                               className="icon-button"
                               title="New chat in this project"
                               aria-label={`New chat in ${projectName(project)}`}
-                              onClick={() => startNewThread(project.id, host.id)}
+                              onClick={() => startNewThread(project.id, hostId)}
                             >
                               <Icons.compose size={15} />
                             </button>
@@ -615,7 +591,7 @@ export function Sidebar() {
                                           if (attentionFilterOpen && reason) {
                                             setStickyAttention({ threadID: thread.id, reason });
                                           }
-                                          selectThread(project.id, thread.id, host.id);
+                                          selectThread(project.id, thread.id, hostId);
                                         }}
                                         onRename={() => openRenameDialog(project.id, thread.id)}
                                         onContextMenu={(event) => openThreadMenu(event, project.id, thread, pinned)}
@@ -633,21 +609,17 @@ export function Sidebar() {
                     </section>
                   );
                 })}
-                  </section>
-                ))}
                 {addingOnHost && (
-                  <div className="host-folder-overlay">
-                    <HostFolderPicker
-                      hostId={addingOnHost.id}
-                      hostName={addingOnHost.name}
-                      onSelect={(folder) => {
-                        const hostId = addingOnHost.id;
-                        setAddingOnHost(null);
-                        void addProject(folder, hostId);
-                      }}
-                      onCancel={() => setAddingOnHost(null)}
-                    />
-                  </div>
+                  <HostFolderPicker
+                    hostId={addingOnHost.id}
+                    hostName={addingOnHost.name}
+                    onSelect={(folder) => {
+                      const hostId = addingOnHost.id;
+                      setAddingOnHost(null);
+                      void addProject(folder, hostId);
+                    }}
+                    onCancel={() => setAddingOnHost(null)}
+                  />
                 )}
               </div>
             </div>

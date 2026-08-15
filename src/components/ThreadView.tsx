@@ -1278,20 +1278,17 @@ function NewAgentView({
               : "Enter to send · Shift+Enter for a new line"}
           </p>
         </div>
-      {addingOnHost && createPortal(
-        <div className="host-folder-overlay">
-          <HostFolderPicker
-            hostId={addingOnHost.id}
-            hostName={addingOnHost.name}
-            onSelect={(folder) => {
-              const hostID = addingOnHost.id;
-              setAddingOnHost(null);
-              void addProject(folder, hostID);
-            }}
-            onCancel={() => setAddingOnHost(null)}
-          />
-        </div>,
-        document.body,
+      {addingOnHost && (
+        <HostFolderPicker
+          hostId={addingOnHost.id}
+          hostName={addingOnHost.name}
+          onSelect={(folder) => {
+            const hostID = addingOnHost.id;
+            setAddingOnHost(null);
+            void addProject(folder, hostID);
+          }}
+          onCancel={() => setAddingOnHost(null)}
+        />
       )}
     </main>
   );
