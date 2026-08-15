@@ -735,13 +735,6 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .thread-header-side { display: flex; align-items: center; gap: 10px; }
 .thread-header-side.end { justify-content: flex-end; }
 .git-environment-section { -webkit-app-region: no-drag; }
-.git-environment-heading {
-  min-height: 22px; margin-bottom: 3px;
-  display: flex; align-items: center; justify-content: space-between;
-}
-.git-environment-heading h3 { margin: 0; }
-.git-environment-heading .icon-button { width: 20px; height: 20px; color: #777; }
-.git-environment-heading .icon-button:hover { background: rgba(255,255,255,.05); color: #aaa; }
 .git-environment-row {
   width: 100%; min-height: 28px; padding: 0 2px;
   display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto;

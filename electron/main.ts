@@ -266,6 +266,7 @@ async function runAppSmoke(): Promise<void> {
     generatedMessageHint: false,
     includeUnstagedChanges: false,
     dialogActions: false,
+    manualRefresh: false,
     counts: "",
   };
   while (Date.now() < gitDeadline) {
@@ -289,15 +290,18 @@ async function runAppSmoke(): Promise<void> {
         generatedMessageHint: dialog?.querySelector('textarea')?.getAttribute('placeholder')?.includes('leave blank to generate') === true,
         includeUnstagedChanges: dialogText.includes('Include unstaged changes'),
         dialogActions: dialogText.includes('Commit and push') && dialogText.includes('Push'),
+        manualRefresh: Boolean(environment?.querySelector('[aria-label="Refresh Git status"]')),
         counts: environment?.querySelector('.git-change-counts')?.textContent ?? ''
       };
     })()`) as typeof gitUI;
     if (gitUI.rail && gitUI.environment && gitUI.changes && gitUI.action && !gitUI.trigger && !gitUI.popup
-      && gitUI.dialog && gitUI.generatedMessageHint && gitUI.includeUnstagedChanges && gitUI.dialogActions) break;
+      && gitUI.dialog && gitUI.generatedMessageHint && gitUI.includeUnstagedChanges && gitUI.dialogActions
+      && !gitUI.manualRefresh) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!gitUI.rail || !gitUI.environment || !gitUI.changes || !gitUI.action || gitUI.trigger || gitUI.popup
-    || !gitUI.dialog || !gitUI.generatedMessageHint || !gitUI.includeUnstagedChanges || !gitUI.dialogActions) {
+    || !gitUI.dialog || !gitUI.generatedMessageHint || !gitUI.includeUnstagedChanges || !gitUI.dialogActions
+    || gitUI.manualRefresh) {
     throw new Error(`packaged Git environment and commit dialog did not render correctly: ${JSON.stringify(gitUI)}`);
   }
   const expectedCounts = `+${String(gitStatus.additions)}-${String(gitStatus.deletions)}`;

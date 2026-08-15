@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { gitCanPush, gitFileStatusLabel, gitHasStagedChanges, type GitRepositoryStatus } from "../git";
+import {
+  gitCanPush,
+  gitFileStatusLabel,
+  gitHasStagedChanges,
+  shouldRefreshGitAfterTurn,
+  type GitRepositoryStatus,
+} from "../git";
 import { ipc } from "../ipc";
+import { useAppStore } from "../store/appStore";
 import { GitCommitDialog } from "./GitCommitDialog";
 import { Icons } from "./Icons";
 
@@ -25,6 +32,8 @@ export function GitEnvironment({
   const [notice, setNotice] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
   const busyRef = useRef(false);
+  const activeTurnID = useAppStore((state) => threadID ? state.activeTurnByThread[threadID] : undefined);
+  const previousActiveTurnID = useRef(activeTurnID);
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
@@ -52,18 +61,37 @@ export function GitEnvironment({
     setIncludeUnstagedChanges(true);
     setError(null);
     setNotice(null);
-    void refresh();
-    const timer = window.setInterval(() => {
-      if (!busyRef.current) void refresh();
-    }, REFRESH_INTERVAL_MS);
+    let cancelled = false;
+    let timer: number | undefined;
+    const schedulePoll = () => {
+      timer = window.setTimeout(async () => {
+        if (!busyRef.current && document.visibilityState === "visible") await refresh();
+        if (!cancelled) schedulePoll();
+      }, REFRESH_INTERVAL_MS);
+    };
+    void refresh().finally(() => {
+      if (!cancelled) schedulePoll();
+    });
     const onFocus = () => { if (!busyRef.current) void refresh(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible" && !busyRef.current) void refresh();
+    };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.clearInterval(timer);
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       refreshGeneration.current += 1;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const finishedCurrentTurn = shouldRefreshGitAfterTurn(previousActiveTurnID.current, activeTurnID);
+    previousActiveTurnID.current = activeTurnID;
+    if (finishedCurrentTurn && !busyRef.current) void refresh();
+  }, [activeTurnID, refresh]);
 
   if (!status) return null;
 
@@ -140,19 +168,7 @@ export function GitEnvironment({
 
   return (
     <section className="context-section git-environment-section" aria-label="Git environment">
-      <div className="git-environment-heading">
-        <h3>Environment</h3>
-        <button
-          type="button"
-          className="icon-button"
-          title="Refresh Git status"
-          aria-label="Refresh Git status"
-          disabled={busy}
-          onClick={() => void refresh()}
-        >
-          <Icons.reload size={13} />
-        </button>
-      </div>
+      <h3>Environment</h3>
 
       <button
         type="button"

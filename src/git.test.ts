@@ -4,6 +4,7 @@ import {
   gitFileStatusLabel,
   gitHasStagedChanges,
   gitPrimaryAction,
+  shouldRefreshGitAfterTurn,
   threadWorkingDirectory,
   type GitRepositoryStatus,
 } from "./git";
@@ -71,6 +72,15 @@ describe("gitHasStagedChanges", () => {
     expect(gitHasStagedChanges(status({
       files: [{ path: "new", status: "??", staged: false, unstaged: false, untracked: true }],
     }))).toBe(false);
+  });
+});
+
+describe("shouldRefreshGitAfterTurn", () => {
+  it("refreshes when a running turn ends or is replaced by a queued turn", () => {
+    expect(shouldRefreshGitAfterTurn("turn-1", undefined)).toBe(true);
+    expect(shouldRefreshGitAfterTurn("turn-1", "turn-2")).toBe(true);
+    expect(shouldRefreshGitAfterTurn(undefined, "turn-1")).toBe(false);
+    expect(shouldRefreshGitAfterTurn("turn-1", "turn-1")).toBe(false);
   });
 });
 

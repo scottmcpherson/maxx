@@ -51,6 +51,13 @@ export function gitHasStagedChanges(status: GitRepositoryStatus): boolean {
   return status.files.some((file) => file.staged);
 }
 
+export function shouldRefreshGitAfterTurn(
+  previousTurnID: string | undefined,
+  currentTurnID: string | undefined,
+): boolean {
+  return Boolean(previousTurnID && previousTurnID !== currentTurnID);
+}
+
 export function gitPrimaryAction(status: GitRepositoryStatus): GitPrimaryAction {
   if (status.files.length > 0) return "commit";
   if (gitCanPush(status) && (status.ahead > 0 || status.upstream === null)) return "push";
