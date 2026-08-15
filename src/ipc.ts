@@ -15,7 +15,7 @@ import type {
 import { isMenuActionID, type MenuActionID, type MenuActionPayload } from "./menu";
 import type { UpdateStatus } from "./updates";
 import type { VoiceCredentialStatus, VoiceEvent, VoiceSettings } from "./voice/types";
-import type { GitBranchList, GitRepositoryStatus } from "./git";
+import type { GitBranchList, GitCommitResult, GitRepositoryStatus } from "./git";
 import {
   ActiveTurnRecord,
   AgentDefinition,
@@ -86,8 +86,18 @@ export const ipc = {
     invokeOnHost<GitBranchList>(hostId, "git_checkout", { projectId, branch }),
   gitCreateBranch: (projectId: string, branch: string, hostId?: string | null) =>
     invokeOnHost<GitBranchList>(hostId, "git_create_branch", { projectId, branch }),
-  gitCommit: (projectId: string, message: string, hostId?: string | null, threadId?: string | null) =>
-    invokeOnHost<GitRepositoryStatus>(hostId, "git_commit", { projectId, threadId: threadId || null, message }),
+  gitCommit: (
+    projectId: string,
+    message: string,
+    includeUnstagedChanges: boolean,
+    hostId?: string | null,
+    threadId?: string | null,
+  ) => invokeOnHost<GitCommitResult>(hostId, "git_commit", {
+    projectId,
+    threadId: threadId || null,
+    message,
+    includeUnstagedChanges,
+  }),
   gitPush: (projectId: string, hostId?: string | null, threadId?: string | null) =>
     invokeOnHost<GitRepositoryStatus>(hostId, "git_push", { projectId, threadId: threadId || null }),
   addProject: (folderPath: string, hostId?: string | null) =>

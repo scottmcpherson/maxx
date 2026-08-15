@@ -40,7 +40,7 @@ impl TitleGenerationCandidate {
             && self.speed == other.speed
     }
 
-    fn request(
+    pub(crate) fn request(
         &self,
         prompt: String,
         attachments: Vec<ChatImageAttachment>,

@@ -25,6 +25,11 @@ export interface GitBranchList {
   branches: string[];
 }
 
+export interface GitCommitResult {
+  status: GitRepositoryStatus;
+  message: string;
+}
+
 export type GitEnvironmentMode = "current" | "worktree";
 
 export function threadWorkingDirectory(
@@ -40,6 +45,10 @@ export function gitCanPush(status: GitRepositoryStatus): boolean {
   return !status.detached
     && status.head.length > 0
     && (status.upstream !== null || status.remotes.includes("origin") || status.remotes.length === 1);
+}
+
+export function gitHasStagedChanges(status: GitRepositoryStatus): boolean {
+  return status.files.some((file) => file.staged);
 }
 
 export function gitPrimaryAction(status: GitRepositoryStatus): GitPrimaryAction {

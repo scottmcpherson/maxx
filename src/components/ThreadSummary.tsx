@@ -3,13 +3,22 @@ import { ChatProject, ChatThread, EventKind, projectName, providerDisplayName } 
 import { useAppStore } from "../store/appStore";
 import { summaryToggleAction, summaryToggleActive } from "../summary";
 import { beginWindowDrag } from "../windowDrag";
+import { GitEnvironment } from "./GitEnvironment";
 import { Icons } from "./Icons";
 
 /**
  * The summary itself. One body, two containers: the pinned rail and the
  * popover that stands in for it on a window too narrow to seat the rail.
  */
-function SummaryBody({ project, thread }: { project: ChatProject; thread: ChatThread }) {
+function SummaryBody({
+  project,
+  thread,
+  hostID,
+}: {
+  project: ChatProject;
+  thread: ChatThread;
+  hostID?: string | null;
+}) {
   const providerColor = useAppStore((state) =>
     state.workspace?.providerProfiles.find((profile) => profile.provider === thread.provider)?.colorHex,
   );
@@ -32,6 +41,7 @@ function SummaryBody({ project, thread }: { project: ChatProject; thread: ChatTh
           <span className="context-value">{thread.model || "Default"}</span>
         </div>
       </section>
+      <GitEnvironment projectID={project.id} hostID={hostID} threadID={thread.id} />
       <section className="context-section">
         <h3>On This Thread</h3>
         <div className="context-row">
@@ -65,13 +75,21 @@ function SummaryBody({ project, thread }: { project: ChatProject; thread: ChatTh
  * one control for this surface, and a second button beside it would just be
  * the same toggle wearing a different label.
  */
-export function ContextRail({ project, thread }: { project: ChatProject; thread: ChatThread }) {
+export function ContextRail({
+  project,
+  thread,
+  hostID,
+}: {
+  project: ChatProject;
+  thread: ChatThread;
+  hostID?: string | null;
+}) {
   return (
     <aside className="context-rail" aria-label="Thread summary">
       <div className="context-rail-header" onMouseDown={beginWindowDrag}>
         <span>Thread Context</span>
       </div>
-      <SummaryBody project={project} thread={thread} />
+      <SummaryBody project={project} thread={thread} hostID={hostID} />
     </aside>
   );
 }
@@ -87,10 +105,12 @@ export function ContextRail({ project, thread }: { project: ChatProject; thread:
 export function SummaryToggle({
   project,
   thread,
+  hostID,
   fits,
 }: {
   project: ChatProject;
   thread: ChatThread;
+  hostID?: string | null;
   fits: boolean;
 }) {
   const pinned = useAppStore((state) => state.summaryPinned);
@@ -163,7 +183,7 @@ export function SummaryToggle({
       </button>
       {popoverOpen && !fits && (
         <div className="summary-popover" role="dialog" aria-label="Thread summary">
-          <SummaryBody project={project} thread={thread} />
+          <SummaryBody project={project} thread={thread} hostID={hostID} />
         </div>
       )}
     </div>

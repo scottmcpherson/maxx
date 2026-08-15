@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   gitCanPush,
   gitFileStatusLabel,
+  gitHasStagedChanges,
   gitPrimaryAction,
   threadWorkingDirectory,
   type GitRepositoryStatus,
@@ -59,6 +60,17 @@ describe("gitCanPush", () => {
     expect(gitCanPush(status({ upstream: null, remotes: [] }))).toBe(false);
     expect(gitCanPush(status({ upstream: null, remotes: ["fork", "company"] }))).toBe(false);
     expect(gitCanPush(status({ upstream: null, remotes: ["fork"] }))).toBe(true);
+  });
+});
+
+describe("gitHasStagedChanges", () => {
+  it("distinguishes staged files from unstaged and untracked files", () => {
+    expect(gitHasStagedChanges(status({
+      files: [{ path: "staged", status: "M ", staged: true, unstaged: false, untracked: false }],
+    }))).toBe(true);
+    expect(gitHasStagedChanges(status({
+      files: [{ path: "new", status: "??", staged: false, unstaged: false, untracked: true }],
+    }))).toBe(false);
   });
 });
 

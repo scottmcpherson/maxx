@@ -318,6 +318,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "projectId")?,
                 optional(&params, "threadId")?,
                 required(&params, "message")?,
+                required(&params, "includeUnstagedChanges")?,
             )
             .await,
         ),

@@ -40,7 +40,6 @@ import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./Im
 import { RuntimePicker } from "./RuntimePicker";
 import { QueuedMessages } from "./QueuedMessages";
 import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
-import { GitEnvironment } from "./GitEnvironment";
 import { SideThreadPanel } from "./SideThreadPanel";
 import { SideThreadResizer } from "./SideThreadResizer";
 import { TerminalView, type TerminalViewHandle } from "./TerminalView";
@@ -369,8 +368,7 @@ export function ThreadView({
             <Icons.chevronDown size={11} />
           </button>
           <div className="thread-header-side end">
-            <GitEnvironment projectID={project.id} hostID={selectedHostID} threadID={thread.id} />
-            <SummaryToggle project={project} thread={thread} fits={summarySlotFree} />
+            <SummaryToggle project={project} thread={thread} hostID={selectedHostID} fits={summarySlotFree} />
             {terminalModeEnabled && (
               <button
                 className={`icon-button terminal-surface-toggle${terminalSurface ? " is-active" : ""}`}
@@ -595,7 +593,7 @@ export function ThreadView({
           />
         </>
       ) : (
-        showSummaryRail && <ContextRail project={project} thread={thread} />
+        showSummaryRail && <ContextRail project={project} thread={thread} hostID={selectedHostID} />
       ))}
     </div>
   );

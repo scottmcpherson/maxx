@@ -255,29 +255,56 @@ async function runAppSmoke(): Promise<void> {
   mainWindow!.webContents.reload();
   await reloaded;
   const gitDeadline = Date.now() + 15_000;
-  let gitUI = { trigger: false, changes: false, action: false, counts: "" };
+  let gitUI = {
+    rail: false,
+    environment: false,
+    changes: false,
+    action: false,
+    trigger: false,
+    popup: false,
+    dialog: false,
+    generatedMessageHint: false,
+    includeUnstagedChanges: false,
+    dialogActions: false,
+    counts: "",
+  };
   while (Date.now() < gitDeadline) {
     gitUI = await mainWindow!.webContents.executeJavaScript(`(() => {
-      const trigger = document.querySelector('[aria-label="Environment and Git changes"]');
-      if (trigger && trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
-      const text = document.querySelector('.git-environment-popover')?.textContent ?? '';
+      const rail = document.querySelector('.context-rail');
+      const environment = rail?.querySelector('.git-environment-section');
+      const text = environment?.textContent ?? '';
+      const action = Array.from(environment?.querySelectorAll('button') ?? [])
+        .find((button) => button.textContent?.includes('Commit or push'));
+      if (action && !document.querySelector('.git-commit-dialog')) action.click();
+      const dialog = document.querySelector('.git-commit-dialog');
+      const dialogText = dialog?.textContent ?? '';
       return {
-        trigger: Boolean(trigger),
+        rail: Boolean(rail),
+        environment: Boolean(environment),
         changes: text.includes('Changes'),
         action: text.includes('Commit or push'),
-        counts: document.querySelector('.git-change-counts')?.textContent ?? ''
+        trigger: Boolean(document.querySelector('[aria-label="Environment and Git changes"]')),
+        popup: Boolean(document.querySelector('.git-environment-popover')),
+        dialog: dialog?.getAttribute('role') === 'dialog',
+        generatedMessageHint: dialog?.querySelector('textarea')?.getAttribute('placeholder')?.includes('leave blank to generate') === true,
+        includeUnstagedChanges: dialogText.includes('Include unstaged changes'),
+        dialogActions: dialogText.includes('Commit and push') && dialogText.includes('Push'),
+        counts: environment?.querySelector('.git-change-counts')?.textContent ?? ''
       };
     })()`) as typeof gitUI;
-    if (gitUI.trigger && gitUI.changes && gitUI.action) break;
+    if (gitUI.rail && gitUI.environment && gitUI.changes && gitUI.action && !gitUI.trigger && !gitUI.popup
+      && gitUI.dialog && gitUI.generatedMessageHint && gitUI.includeUnstagedChanges && gitUI.dialogActions) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!gitUI.trigger || !gitUI.changes || !gitUI.action) {
-    throw new Error(`packaged Git environment UI did not become ready: ${JSON.stringify(gitUI)}`);
+  if (!gitUI.rail || !gitUI.environment || !gitUI.changes || !gitUI.action || gitUI.trigger || gitUI.popup
+    || !gitUI.dialog || !gitUI.generatedMessageHint || !gitUI.includeUnstagedChanges || !gitUI.dialogActions) {
+    throw new Error(`packaged Git environment and commit dialog did not render correctly: ${JSON.stringify(gitUI)}`);
   }
   const expectedCounts = `+${String(gitStatus.additions)}-${String(gitStatus.deletions)}`;
   if (gitUI.counts.replaceAll(/\s/g, "") !== expectedCounts) {
     throw new Error(`packaged Git counts diverged from the runtime: ${JSON.stringify({ gitUI, expectedCounts })}`);
   }
+  await mainWindow!.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   const browserTabId = await runtime!.request("browser_ui_open_tab", { threadId, url: null }, 5_000) as string;
   // Human input interrupts the native engine through a sidecar host request.
   // A subsequent command proves that the sidecar input reader remains free to
