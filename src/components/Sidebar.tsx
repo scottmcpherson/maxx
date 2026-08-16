@@ -516,7 +516,10 @@ export function Sidebar() {
                             aria-controls={threadListID}
                             title={attentionFilterOpen ? "Expanded while filtering" : undefined}
                             disabled={attentionFilterOpen}
-                            onClick={() => toggleProject(project.id)}
+                            onClick={(event) => {
+                              toggleProject(project.id);
+                              if (event.detail > 0) event.currentTarget.blur();
+                            }}
                           >
                             <ProjectFolderIcon
                               expanded={projectExpanded}
