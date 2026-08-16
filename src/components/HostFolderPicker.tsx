@@ -192,7 +192,12 @@ export function HostFolderPicker({
   const disconnected = !local && error?.startsWith(`${hostName} is disconnected`);
 
   return createPortal(
-    <div className="host-folder-overlay">
+    <div
+      className="host-folder-overlay"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !creatingFolder) onCancel();
+      }}
+    >
       <div
         ref={dialogRef}
         className="host-folder-picker"
@@ -216,13 +221,13 @@ export function HostFolderPicker({
         <div className="host-folder-toolbar">
           <button
             type="button"
-            className="icon-button host-folder-up"
+            className="icon-button host-folder-tooltip host-folder-up"
             disabled={loading || !path || parent === path}
             onClick={() => void load(parent)}
             aria-label="Go to parent folder"
-            title="Go to parent folder"
           >
             <Icons.chevronUp size={15} />
+            <span className="host-folder-tooltip-label" aria-hidden="true">Parent folder</span>
           </button>
           <nav className="host-folder-breadcrumbs" aria-label="Current folder" title={path}>
             {breadcrumbs.length === 0 && <span>Loading…</span>}
@@ -241,13 +246,13 @@ export function HostFolderPicker({
           </nav>
           <button
             type="button"
-            className="icon-button host-folder-new"
+            className="icon-button host-folder-tooltip host-folder-new"
             disabled={loading || creating || creatingFolder || !path}
             onClick={() => setCreating(true)}
             aria-label="New folder"
-            title="New folder (⇧⌘N)"
           >
             <Icons.folderPlus size={17} />
+            <span className="host-folder-tooltip-label" aria-hidden="true">New folder&nbsp; ⇧⌘N</span>
           </button>
         </div>
         <div className="host-folder-browser">
