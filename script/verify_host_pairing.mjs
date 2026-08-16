@@ -182,6 +182,13 @@ try {
     const status = await client.request("host_status");
     return status.remotes.find((remote) => remote.id === remoteID)?.connected === true;
   }, "restarted client process did not recover its remembered host connection");
+  await waitFor(
+    async () => client.events.some((message) =>
+      message.event === "host://event"
+      && message.payload?.hostId === remoteID
+      && message.payload?.event === "host://connected"),
+    "restarted client did not emit its renderer reconnect event",
+  );
   const restoredSnapshot = await client.request("workspace_snapshot", { hostId: remoteID });
   assert(Array.isArray(restoredSnapshot.projects), "restarted client could not read the recovered remote workspace");
 
@@ -207,6 +214,7 @@ try {
     pairingConsumed: true,
     keychainReconnect: true,
     clientRestartRecovery: true,
+    reconnectEvent: true,
     offlineWorkspaceRetention: true,
     revocation: true,
     remoteWorkspace: true,

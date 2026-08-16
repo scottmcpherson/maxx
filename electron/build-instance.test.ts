@@ -10,13 +10,17 @@ describe("buildInstanceSettings", () => {
     });
   });
 
-  it("isolates each checkout build and requests a dynamic listener port", () => {
+  it("isolates each checkout build on a stable listener port", () => {
     const first = buildInstanceSettings("/AppData", "Maxx", "/repo/one", false, true);
+    const repeated = buildInstanceSettings("/AppData", "Maxx", "/repo/one", false, true);
     const second = buildInstanceSettings("/AppData", "Maxx", "/repo/two", false, true);
 
-    expect(first.listenPort).toBe("0");
+    expect(Number(first.listenPort)).toBeGreaterThanOrEqual(40_000);
+    expect(Number(first.listenPort)).toBeLessThan(49_000);
+    expect(repeated.listenPort).toBe(first.listenPort);
     expect(first.userDataPath).toMatch(new RegExp(`^${path.join("/AppData", "Maxx-build-")}`));
     expect(second.userDataPath).not.toBe(first.userDataPath);
+    expect(second.listenPort).not.toBe(first.listenPort);
   });
 
   it("keeps development data distinct from the packaged checkout build", () => {
@@ -24,6 +28,6 @@ describe("buildInstanceSettings", () => {
     const packaged = buildInstanceSettings("/AppData", "Maxx", "/repo/maxx", false, true);
 
     expect(development.userDataPath).not.toBe(packaged.userDataPath);
-    expect(development.listenPort).toBe("0");
+    expect(development.listenPort).not.toBe(packaged.listenPort);
   });
 });

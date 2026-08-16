@@ -588,6 +588,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       );
       if (refreshSequence !== hostStatusRefreshSequence) return;
       set((state) => {
+        const connectedHostIDs = new Set(
+          hostStatus.remotes.filter((remote) => remote.connected).map((remote) => remote.id),
+        );
         let catalog = emptyCatalog(
           state.workspace ?? catalogFromState(state).local,
           hostStatus.name,
@@ -595,7 +598,19 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         for (const session of sessions) {
           if (session) catalog = attachRemote(catalog, session.host, session.workspace);
         }
-        return { hostStatus, remoteSessions: catalog.remotes };
+        return {
+          hostStatus,
+          remoteSessions: catalog.remotes,
+          ...(state.hostDisconnectNotice
+            && connectedHostIDs.has(state.hostDisconnectNotice.hostID)
+            ? { hostDisconnectNotice: null }
+            : {}),
+          ...(state.errorHostID
+            && connectedHostIDs.has(state.errorHostID)
+            && state.error?.includes(" is offline.")
+            ? { error: null, errorHostID: null }
+            : {}),
+        };
       });
     } catch {
       // Older runtimes without host commands still boot a local workspace.

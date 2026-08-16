@@ -839,7 +839,7 @@ async fn supervise_host(state: Arc<SidecarState>, host_id: String, shutdown: Can
                         if wait_for_retry(&shutdown, retry_seconds).await {
                             break;
                         }
-                        retry_seconds = (retry_seconds * 2).min(30);
+                        retry_seconds = (retry_seconds * 2).min(2);
                         continue;
                     }
                 }
@@ -896,7 +896,7 @@ async fn supervise_host(state: Arc<SidecarState>, host_id: String, shutdown: Can
         if wait_for_retry(&shutdown, retry_seconds).await {
             break;
         }
-        retry_seconds = (retry_seconds * 2).min(30);
+        retry_seconds = (retry_seconds * 2).min(2);
     }
     state.host_supervisors.lock().await.remove(&host_id);
 }

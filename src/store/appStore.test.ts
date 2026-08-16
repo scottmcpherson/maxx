@@ -464,6 +464,45 @@ describe("additive remote hosts", () => {
     }]);
   });
 
+  it("clears stale offline UI when refreshed host status confirms reconnection", async () => {
+    const cachedRemote = sampleWorkspace("/Users/scott/mini", "remote-project");
+    useAppStore.setState({
+      error: "Mac mini is offline. Its projects and chats remain available to read, but messages and changes require it to reconnect.",
+      errorHostID: "mini",
+      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
+      remoteSessions: [{
+        host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+        workspace: cachedRemote,
+      }],
+    });
+    vi.spyOn(ipc, "hostStatus").mockResolvedValue({
+      id: "local-id",
+      name: "This Mac",
+      protocolVersion: 2,
+      listening: false,
+      bindAddress: null,
+      shareAddress: null,
+      pairing: null,
+      remotes: [{
+        id: "mini",
+        name: "Mac mini",
+        address: "100.64.0.2:7422",
+        capabilities: ["workspace-read"],
+        connected: true,
+        lastEventCursor: 0,
+        error: "",
+      }],
+      pairedDevices: [],
+    });
+    vi.spyOn(ipc, "workspaceSnapshot").mockResolvedValue(cachedRemote);
+
+    await useAppStore.getState().refreshHostStatus();
+
+    expect(useAppStore.getState().error).toBeNull();
+    expect(useAppStore.getState().errorHostID).toBeNull();
+    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
+  });
+
   it("keeps the in-memory remote snapshot when an offline cache read fails", async () => {
     const remote = sampleWorkspace("/Users/scott/mini", "remote-project");
     useAppStore.setState({

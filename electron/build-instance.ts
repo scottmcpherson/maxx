@@ -22,10 +22,14 @@ export function buildInstanceSettings(
     .digest("hex")
     .slice(0, 12);
   const kind = development ? "dev" : "build";
+  const portSeed = createHash("sha256")
+    .update(`${kind}:${path.resolve(projectDirectory)}`)
+    .digest()
+    .readUInt16BE(0);
   return {
     userDataPath: path.join(appDataPath, `${appName}-${kind}-${checkoutID}`),
-    // Port zero asks the OS for an available port. The runtime reports the
-    // actual value in the address users copy from Connections.
-    listenPort: "0",
+    // Checkout builds cannot share the installed app's canonical port, but
+    // their port must survive listener and app restarts for remembered peers.
+    listenPort: String(40_000 + (portSeed % 9_000)),
   };
 }
