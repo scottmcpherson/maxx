@@ -344,17 +344,7 @@ async fn begin(
             native
         }
     } else {
-        let mut params = json!({
-            "cwd": request.working_directory,
-            "approvalPolicy": "on-request",
-            "developerInstructions": codex_developer_instructions(request)
-        });
-        if let Some(model) = request.selected_model() {
-            params["model"] = Value::String(model);
-        }
-        if let Some(effort) = request.selected_effort() {
-            params["model_reasoning_effort"] = Value::String(effort);
-        }
+        let params = codex_thread_start_params(request);
         let response = client.request("thread/start", params).await?;
         let id = thread_id_from(&response)
             .ok_or_else(|| "thread/start omitted result.thread.id".to_string())?;
@@ -760,6 +750,22 @@ fn codex_developer_instructions(request: &TurnRequest) -> String {
     }
 }
 
+fn codex_thread_start_params(request: &TurnRequest) -> Value {
+    let mut params = json!({
+        "cwd": request.working_directory,
+        "approvalPolicy": "on-request",
+        "developerInstructions": codex_developer_instructions(request),
+        "ephemeral": request.ephemeral
+    });
+    if let Some(model) = request.selected_model() {
+        params["model"] = Value::String(model);
+    }
+    if let Some(effort) = request.selected_effort() {
+        params["model_reasoning_effort"] = Value::String(effort);
+    }
+    params
+}
+
 fn codex_elicitation_result(
     decision: &RuntimeInteractionDecision,
     schema: Option<&Value>,
@@ -899,6 +905,15 @@ mod browser_mcp_tests {
         assert!(developer.contains(MAXX_BROWSER_DEVELOPER_INSTRUCTIONS));
         assert!(developer.contains("You are Dana. Reply exactly with hi."));
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn background_generation_uses_an_ephemeral_codex_thread() {
+        let mut request = crate::engine::test_request(ChatProvider::Codex);
+        request.ephemeral = true;
+        let params = codex_thread_start_params(&request);
+
+        assert_eq!(params["ephemeral"], true);
     }
 
     #[test]

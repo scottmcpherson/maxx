@@ -165,8 +165,9 @@ impl Runtime {
     /// Synthetic turns never enter the visible active-turn inventory and never
     /// receive browser authority. Their provider-native session is released as
     /// soon as a final response (or timeout) is observed.
-    pub async fn generate_text(&self, request: TurnRequest) -> Result<String, String> {
+    pub async fn generate_text(&self, mut request: TurnRequest) -> Result<String, String> {
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        request.ephemeral = true;
 
         let engine = self
             .engines
@@ -176,14 +177,20 @@ impl Runtime {
         let provider_instance_id = request.provider_instance_id;
         let thread_id = request.thread_id;
         let turn_id = request.turn_id;
+        let profile = request.profile.clone();
         let (draft_tx, mut draft_rx) = mpsc::channel(256);
         engine.run_turn(request, draft_tx).await;
+        let native_session_id = Arc::new(Mutex::new(None));
+        let collected_session_id = native_session_id.clone();
 
         let collected = tokio::time::timeout(TIMEOUT, async {
             let mut output = String::new();
             while let Some(draft) = draft_rx.recv().await {
                 match draft {
                     Ok(ProviderEventDraft::AssistantDelta(delta)) => output.push_str(&delta),
+                    Ok(ProviderEventDraft::SessionUpdated(session_id)) => {
+                        *collected_session_id.lock().await = Some(session_id)
+                    }
                     Ok(ProviderEventDraft::Terminal(state)) => {
                         return match state {
                             ProviderTurnTerminalState::Completed if !output.trim().is_empty() => {
@@ -217,8 +224,17 @@ impl Runtime {
         if collected.is_err() {
             engine.cancel(turn_id).await;
         }
-        engine.release_thread(provider_instance_id, thread_id).await;
-        collected.unwrap_or_else(|_| Err("Title generation timed out.".into()))
+        let result = collected.unwrap_or_else(|_| Err("Title generation timed out.".into()));
+        let native_session_id = native_session_id.lock().await.take();
+        engine
+            .discard_ephemeral_thread(
+                provider_instance_id,
+                thread_id,
+                &profile,
+                native_session_id.as_deref(),
+            )
+            .await;
+        result
     }
 
     pub async fn register_route(&self, request_id: Uuid, provider: ChatProvider) {
@@ -354,6 +370,7 @@ mod tests {
             attachments: Vec::new(),
             working_directory: "/tmp".into(),
             session_id: None,
+            ephemeral: false,
             agent_id: None,
             browser_access: None,
             profile: ProviderProfile::default_for(ChatProvider::Claude),

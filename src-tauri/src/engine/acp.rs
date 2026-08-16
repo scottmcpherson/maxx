@@ -339,6 +339,25 @@ impl ProviderEngine for AcpEngine {
         }
     }
 
+    async fn discard_ephemeral_thread(
+        &self,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+        profile: &maxx_core::persist::ProviderProfile,
+        native_session_id: Option<&str>,
+    ) {
+        self.release_thread(provider_instance_id, thread_id).await;
+        let Some(session_id) = native_session_id else {
+            return;
+        };
+        if let Err(error) = discard_acp_session(self.provider, profile, session_id).await {
+            log::warn!(
+                "could not discard ephemeral {} session {session_id}: {error}",
+                self.provider.display_name()
+            );
+        }
+    }
+
     async fn shutdown(&self) {
         let sessions: Vec<Arc<AcpSession>> =
             self.sessions.lock().await.drain().map(|(_, s)| s).collect();
@@ -362,6 +381,68 @@ fn profile_path(path: &str, home: &std::path::Path) -> PathBuf {
     } else {
         home.join(path)
     }
+}
+
+fn acp_cleanup_arguments(provider: ChatProvider, session_id: &str) -> Option<Vec<String>> {
+    match provider {
+        ChatProvider::Grok => Some(vec!["sessions".into(), "delete".into(), session_id.into()]),
+        ChatProvider::Hermes => Some(vec![
+            "sessions".into(),
+            "delete".into(),
+            "--yes".into(),
+            session_id.into(),
+        ]),
+        _ => None,
+    }
+}
+
+async fn discard_acp_session(
+    provider: ChatProvider,
+    profile: &maxx_core::persist::ProviderProfile,
+    session_id: &str,
+) -> Result<(), String> {
+    let configuration = super::launch::launch_configuration(profile)?;
+    if provider == ChatProvider::Cursor {
+        return discard_cursor_session(&configuration.home.join(".cursor/projects"), session_id)
+            .await;
+    }
+
+    let arguments = acp_cleanup_arguments(provider, session_id).ok_or_else(|| {
+        format!(
+            "{} has no session cleanup command.",
+            provider.display_name()
+        )
+    })?;
+    let status = tokio::process::Command::new(&configuration.executable)
+        .args(arguments)
+        .current_dir(std::env::temp_dir())
+        .envs(configuration.environment)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|error| format!("Could not start the session cleanup command: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("session cleanup exited with {status}"))
+    }
+}
+
+async fn discard_cursor_session(
+    projects_root: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    let transcript = find_cursor_transcript(projects_root, session_id).await?;
+    let session_directory = transcript
+        .parent()
+        .filter(|directory| {
+            directory.file_name().and_then(|name| name.to_str()) == Some(session_id)
+        })
+        .ok_or("Cursor returned an unexpected transcript location.")?;
+    tokio::fs::remove_dir_all(session_directory)
+        .await
+        .map_err(|error| format!("Could not delete Cursor session history: {error}"))
 }
 
 struct NativeTurnDraft {
@@ -1560,6 +1641,37 @@ mod browser_mcp_tests {
             next_id: AtomicI64::new(1),
             activity,
         })
+    }
+
+    #[test]
+    fn persistent_acp_harnesses_have_exact_cleanup_commands() {
+        assert_eq!(
+            acp_cleanup_arguments(ChatProvider::Grok, "session-id").unwrap(),
+            ["sessions", "delete", "session-id"]
+        );
+        assert_eq!(
+            acp_cleanup_arguments(ChatProvider::Hermes, "session-id").unwrap(),
+            ["sessions", "delete", "--yes", "session-id"]
+        );
+        assert!(acp_cleanup_arguments(ChatProvider::Cursor, "session-id").is_none());
+    }
+
+    #[tokio::test]
+    async fn cursor_cleanup_removes_only_the_ephemeral_session_directory() {
+        let session_id = Uuid::new_v4().to_string();
+        let root = std::env::temp_dir().join(format!("maxx-cursor-cleanup-{}", Uuid::new_v4()));
+        let transcripts = root.join("project").join("agent-transcripts");
+        let session = transcripts.join(&session_id);
+        let sibling = transcripts.join("keep-me");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(session.join(format!("{session_id}.jsonl")), "{}").unwrap();
+
+        discard_cursor_session(&root, &session_id).await.unwrap();
+
+        assert!(!session.exists());
+        assert!(sibling.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

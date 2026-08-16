@@ -76,6 +76,7 @@ async fn run_turn(
         attachments: Vec::new(),
         working_directory: std::env::temp_dir().to_string_lossy().to_string(),
         session_id: None,
+        ephemeral: false,
         agent_id: None,
         browser_access: None,
         profile,

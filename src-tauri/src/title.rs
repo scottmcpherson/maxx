@@ -59,6 +59,7 @@ impl TitleGenerationCandidate {
             attachments,
             working_directory,
             session_id: None,
+            ephemeral: true,
             profile: self.profile.clone(),
             agent_id: None,
             browser_access: None,
@@ -337,5 +338,14 @@ mod tests {
         assert_eq!(candidates[0].provider, ChatProvider::Claude);
         assert_eq!(candidates[0].model, "sonnet");
         assert_eq!(candidates[1].provider, ChatProvider::Codex);
+    }
+
+    #[test]
+    fn background_generation_requests_are_ephemeral() {
+        let request = crate::engine::test_request(ChatProvider::Codex);
+        let candidate = TitleGenerationCandidate::from_chat(&request);
+        let generated = candidate.request("title this".into(), Vec::new(), "/tmp".into());
+
+        assert!(generated.ephemeral);
     }
 }

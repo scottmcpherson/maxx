@@ -682,6 +682,9 @@ fn pi_arguments(request: &TurnRequest) -> Vec<String> {
     if let Some(effort) = request.selected_effort() {
         arguments.extend(["--thinking".into(), effort]);
     }
+    if request.ephemeral {
+        arguments.push("--no-session".into());
+    }
     if let Some(instructions) = &request.agent_instructions {
         arguments.extend(["--append-system-prompt".into(), instructions.clone()]);
     }
@@ -941,6 +944,16 @@ mod browser_mcp_tests {
             .windows(2)
             .any(|pair| pair == ["--append-system-prompt", "You are Dana."]));
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn background_generation_disables_pi_session_persistence() {
+        let mut request = crate::engine::test_request(ChatProvider::Pi);
+        request.ephemeral = true;
+
+        assert!(pi_arguments(&request)
+            .iter()
+            .any(|argument| argument == "--no-session"));
     }
 
     #[test]

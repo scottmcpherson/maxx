@@ -21,6 +21,22 @@ pub struct OpenCodeEngine {
     instance_by_turn: Mutex<HashMap<Uuid, (Uuid, Uuid)>>,
 }
 
+impl OpenCodeEngine {
+    async fn take_instance(
+        &self,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+    ) -> Option<Arc<OpenCodeInstance>> {
+        let key = (provider_instance_id, thread_id);
+        let instance = self.instances.lock().await.remove(&key);
+        self.instance_by_turn
+            .lock()
+            .await
+            .retain(|_, route| *route != key);
+        instance
+    }
+}
+
 struct ActiveTurn {
     turn_id: Uuid,
     session_id: String,
@@ -240,15 +256,49 @@ impl ProviderEngine for OpenCodeEngine {
     }
 
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid) {
-        let key = (provider_instance_id, thread_id);
-        let instance = self.instances.lock().await.remove(&key);
-        self.instance_by_turn
-            .lock()
-            .await
-            .retain(|_, route| *route != key);
+        let instance = self.take_instance(provider_instance_id, thread_id).await;
         if let Some(instance) = instance {
             retire_instance(&instance).await;
         }
+    }
+
+    async fn discard_ephemeral_thread(
+        &self,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+        _profile: &maxx_core::persist::ProviderProfile,
+        native_session_id: Option<&str>,
+    ) {
+        let instance = self.take_instance(provider_instance_id, thread_id).await;
+        let Some(instance) = instance else { return };
+        if let Some(session_id) = native_session_id {
+            let (base_url, directory, environment) = {
+                let state = instance.state.lock().await;
+                (
+                    state.base_url.clone(),
+                    state.directory.clone(),
+                    state.environment.clone(),
+                )
+            };
+            if let Some(base_url) = base_url {
+                if let Err((_, error)) = http_request(
+                    &instance.http,
+                    &base_url,
+                    &format!("session/{session_id}"),
+                    directory.as_deref(),
+                    "DELETE",
+                    None,
+                    &environment,
+                )
+                .await
+                {
+                    log::warn!(
+                        "could not discard ephemeral OpenCode session {session_id}: {error}"
+                    );
+                }
+            }
+        }
+        retire_instance(&instance).await;
     }
 
     async fn shutdown(&self) {
@@ -744,6 +794,7 @@ async fn http_request(
     }
     let request = match method {
         "POST" => http.post(&url),
+        "DELETE" => http.delete(&url),
         _ => http.get(&url),
     };
     let mut request = authorized(request, environment)

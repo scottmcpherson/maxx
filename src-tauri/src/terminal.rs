@@ -1179,6 +1179,7 @@ fn reconciliation_request(
         attachments: Vec::new(),
         working_directory: working_directory.to_string(),
         session_id: thread.provider_session_id.clone(),
+        ephemeral: false,
         profile: profile.clone(),
         agent_id: thread.agent_id,
         browser_access,

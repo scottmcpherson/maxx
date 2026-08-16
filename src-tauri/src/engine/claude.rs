@@ -656,6 +656,9 @@ fn claude_arguments(request: &TurnRequest) -> Vec<String> {
     if let Some(effort) = request.selected_effort() {
         arguments.extend(["--effort".into(), effort]);
     }
+    if request.ephemeral {
+        arguments.push("--no-session-persistence".into());
+    }
     if let Some(instructions) = &request.agent_instructions {
         arguments.extend(["--append-system-prompt".into(), instructions.clone()]);
     }
@@ -753,6 +756,16 @@ mod browser_mcp_tests {
             .windows(2)
             .any(|pair| pair == ["--append-system-prompt", "You are Dana."]));
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn background_generation_disables_claude_session_persistence() {
+        let mut request = crate::engine::test_request(ChatProvider::Claude);
+        request.ephemeral = true;
+
+        assert!(claude_arguments(&request)
+            .iter()
+            .any(|argument| argument == "--no-session-persistence"));
     }
 }
 

@@ -57,6 +57,8 @@ pub struct TurnRequest {
     pub attachments: Vec<ChatImageAttachment>,
     pub working_directory: String,
     pub session_id: Option<String>,
+    /// One-off background work must not appear in provider conversation history.
+    pub ephemeral: bool,
     pub profile: ProviderProfile,
     /// Preconfigured agent handling this turn, when it is an agent turn.
     pub agent_id: Option<Uuid>,
@@ -109,6 +111,7 @@ pub(crate) fn test_request(provider: ChatProvider) -> TurnRequest {
         attachments: Vec::new(),
         working_directory: "/tmp".into(),
         session_id: None,
+        ephemeral: false,
         profile,
         agent_id: None,
         browser_access: None,
@@ -144,6 +147,17 @@ pub trait ProviderEngine: Send + Sync {
     /// Background text generation uses isolated synthetic thread IDs and must
     /// release them as soon as the result has been collected.
     async fn release_thread(&self, provider_instance_id: Uuid, thread_id: Uuid);
+    /// Tear down an ephemeral provider session and remove any provider-owned
+    /// history when the harness has no native in-memory session mode.
+    async fn discard_ephemeral_thread(
+        &self,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+        _profile: &ProviderProfile,
+        _native_session_id: Option<&str>,
+    ) {
+        self.release_thread(provider_instance_id, thread_id).await;
+    }
     async fn shutdown(&self);
 }
 
