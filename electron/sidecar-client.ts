@@ -19,6 +19,7 @@ interface SidecarClientOptions {
   executable: string;
   cwd: string;
   dataDirectory?: string;
+  environment?: Record<string, string>;
   onEvent: (event: string, payload: JsonValue) => void;
   onHostRequest: (method: string, params: JsonValue) => Promise<JsonValue>;
   onLog?: (line: string) => void;
@@ -49,6 +50,7 @@ export class SidecarClient {
         ...process.env,
         MAXX_DESKTOP_HOST: "electron",
         ...(options.dataDirectory ? { MAXX_DATA_DIR: options.dataDirectory } : {}),
+        ...options.environment,
       },
     });
     const lines = createInterface({ input: this.#process.stdout });

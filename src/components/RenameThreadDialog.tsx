@@ -1,15 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
+import { LOCAL_HOST_ID } from "../host/session";
 import { useAppStore } from "../store/appStore";
 import { Icons } from "./Icons";
 
 export function RenameThreadDialog() {
   const target = useAppStore((state) => state.renamingThread);
   const workspace = useAppStore((state) => state.workspace);
+  const remoteSessions = useAppStore((state) => state.remoteSessions);
   const renameThread = useAppStore((state) => state.renameThread);
   const setRenamingThread = useAppStore((state) => state.setRenamingThread);
+  const targetWorkspace = target?.hostID === LOCAL_HOST_ID
+    ? workspace
+    : remoteSessions.find((session) => session.host.id === target?.hostID)?.workspace;
   const thread = target
-    ? workspace?.projects
+    ? targetWorkspace?.projects
         .find((project) => project.id === target.projectID)
         ?.threads.find((candidate) => candidate.id === target.threadID)
     : undefined;
@@ -22,8 +27,8 @@ export function RenameThreadDialog() {
   }, []);
 
   useEffect(() => {
-    if (target && workspace && !thread) setRenamingThread(null);
-  }, [setRenamingThread, target, thread, workspace]);
+    if (target && targetWorkspace && !thread) setRenamingThread(null);
+  }, [setRenamingThread, target, targetWorkspace, thread]);
 
   if (!target || !thread) return null;
 
@@ -40,7 +45,7 @@ export function RenameThreadDialog() {
       return;
     }
     setSaving(true);
-    if (await renameThread(target.projectID, target.threadID, nextTitle)) {
+    if (await renameThread(target.hostID, target.projectID, target.threadID, nextTitle)) {
       setRenamingThread(null);
     } else {
       setSaving(false);

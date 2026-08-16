@@ -38,6 +38,7 @@ const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-co
 const CHATS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.chats-section-collapsed";
 
 interface ThreadMenuTarget {
+  hostID: string;
   projectID: string;
   threadID: string;
   title: string;
@@ -263,6 +264,7 @@ export function Sidebar() {
 
   const openThreadMenu = (
     event: ReactMouseEvent,
+    hostID: string,
     projectID: string,
     thread: ChatThread,
     pinned: boolean,
@@ -279,6 +281,7 @@ export function Sidebar() {
     const availableWidth = surface?.clientWidth ?? window.innerWidth;
     const availableHeight = surface?.clientHeight ?? window.innerHeight;
     setThreadMenu({
+      hostID,
       projectID,
       threadID: thread.id,
       title: thread.title,
@@ -288,9 +291,9 @@ export function Sidebar() {
     });
   };
 
-  const openRenameDialog = (projectID: string, threadID: string) => {
+  const openRenameDialog = (hostID: string, projectID: string, threadID: string) => {
     setThreadMenu(null);
-    setRenamingThread({ projectID, threadID });
+    setRenamingThread({ hostID, projectID, threadID });
   };
 
   const attentionItems = useMemo(
@@ -398,8 +401,14 @@ export function Sidebar() {
                           unseen={Boolean(unseenThreads[thread.id]) && thread.id !== selectedThreadID}
                           pinned
                           onSelect={() => selectThread(project.id, thread.id, hostIdForProject(project.id))}
-                          onRename={() => openRenameDialog(project.id, thread.id)}
-                          onContextMenu={(event) => openThreadMenu(event, project.id, thread, true)}
+                          onRename={() => openRenameDialog(hostIdForProject(project.id), project.id, thread.id)}
+                          onContextMenu={(event) => openThreadMenu(
+                            event,
+                            hostIdForProject(project.id),
+                            project.id,
+                            thread,
+                            true,
+                          )}
                           onTogglePin={() => updateThreadPin(thread.id, false)}
                           onDelete={() => void removeThread(project.id, thread.id)}
                         />
@@ -496,10 +505,13 @@ export function Sidebar() {
                       aria-hidden={!projectVisible}
                     >
                       <div className="sidebar-filter-block-inner" inert={!projectVisible}>
-                        <header className="project-header">
+                        <header className={`project-header${openProjectMenuID === project.id ? " is-actions-open" : ""}`}>
                           <button
                             type="button"
                             className="project-disclosure"
+                            aria-label={remoteProject
+                              ? `${projectName(project)} — Remote project on ${hostName}`
+                              : undefined}
                             aria-expanded={projectExpanded}
                             aria-controls={threadListID}
                             title={attentionFilterOpen ? "Expanded while filtering" : undefined}
@@ -512,8 +524,15 @@ export function Sidebar() {
                               hostName={hostName}
                             />
                             <span className="project-name" title={project.folderPath}>{projectName(project)}</span>
-                            {remoteProject && <span className="sr-only">Remote project on {hostName}</span>}
                           </button>
+                          {remoteProject && (
+                            <span
+                              className="project-host-label is-remote"
+                              title={`Remote host: ${hostName}`}
+                            >
+                              {hostName}
+                            </span>
+                          )}
                           <span
                             className={`project-header-actions ${openProjectMenuID === project.id ? "is-open" : ""}`}
                           >
@@ -593,8 +612,8 @@ export function Sidebar() {
                                           }
                                           selectThread(project.id, thread.id, hostId);
                                         }}
-                                        onRename={() => openRenameDialog(project.id, thread.id)}
-                                        onContextMenu={(event) => openThreadMenu(event, project.id, thread, pinned)}
+                                        onRename={() => openRenameDialog(hostId, project.id, thread.id)}
+                                        onContextMenu={(event) => openThreadMenu(event, hostId, project.id, thread, pinned)}
                                         onTogglePin={() => updateThreadPin(thread.id, !pinned)}
                                         onDelete={() => void removeThread(project.id, thread.id)}
                                       />
@@ -681,8 +700,14 @@ export function Sidebar() {
                                   }
                                   selectThread(CHATS_PROJECT_ID, thread.id, LOCAL_HOST_ID);
                                 }}
-                                onRename={() => openRenameDialog(CHATS_PROJECT_ID, thread.id)}
-                                onContextMenu={(event) => openThreadMenu(event, CHATS_PROJECT_ID, thread, pinned)}
+                                onRename={() => openRenameDialog(LOCAL_HOST_ID, CHATS_PROJECT_ID, thread.id)}
+                                onContextMenu={(event) => openThreadMenu(
+                                  event,
+                                  LOCAL_HOST_ID,
+                                  CHATS_PROJECT_ID,
+                                  thread,
+                                  pinned,
+                                )}
                                 onTogglePin={() => updateThreadPin(thread.id, !pinned)}
                                 onDelete={() => void removeThread(CHATS_PROJECT_ID, thread.id)}
                               />
@@ -734,7 +759,11 @@ export function Sidebar() {
             type="button"
             className="thread-context-menu-item"
             role="menuitem"
-            onClick={() => openRenameDialog(threadMenu.projectID, threadMenu.threadID)}
+            onClick={() => openRenameDialog(
+              threadMenu.hostID,
+              threadMenu.projectID,
+              threadMenu.threadID,
+            )}
           >
             Rename chat
           </button>

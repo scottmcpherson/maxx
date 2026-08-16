@@ -13,14 +13,12 @@ APP_BINARY="$APP_BUNDLE/Contents/MacOS/Maxx"
 RUNTIME_BINARY="$APP_BUNDLE/Contents/Resources/bin/maxx-runtime"
 APP_BINARY_PATTERN="${APP_BINARY//./\.}"
 RUNTIME_BINARY_PATTERN="${RUNTIME_BINARY//./\.}"
-ANY_MAXX_APP_PATTERN='/Maxx\.app/Contents/MacOS/Maxx$'
 
-# Electron's single-instance lock is shared by every Maxx bundle. Leaving a
-# build from another checkout alive makes macOS foreground that older app
-# instead of this freshly built bundle, so replace the active Maxx instance.
-pkill -TERM -f "$ANY_MAXX_APP_PATTERN" >/dev/null 2>&1 || true
+# Replace only this checkout's previous build. Installed Maxx and builds from
+# other checkouts keep running with their own data directories and ports.
+pkill -TERM -f "$APP_BINARY_PATTERN" >/dev/null 2>&1 || true
 for _ in {1..30}; do
-  if ! pgrep -f "$ANY_MAXX_APP_PATTERN" >/dev/null; then
+  if ! pgrep -f "$APP_BINARY_PATTERN" >/dev/null; then
     break
   fi
   sleep 0.1
@@ -36,7 +34,7 @@ node script/stage_runtime.mjs
 "$ROOT_DIR/node_modules/.bin/electron-builder" --mac dir
 
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open -n "$APP_BUNDLE" --args --checkout-build
 }
 
 case "$MODE" in
@@ -44,7 +42,7 @@ case "$MODE" in
     open_app
     ;;
   --debug|debug)
-    lldb -- "$APP_BINARY"
+    lldb -- "$APP_BINARY" --checkout-build
     ;;
   --logs|logs)
     open_app

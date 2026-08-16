@@ -1,5 +1,6 @@
 use maxx_core::persist::{ChatProject, WorkspaceDocument};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub const LOCAL_HOST_ID: &str = "local";
@@ -195,6 +196,15 @@ pub fn hosted_projects(catalog: &HostCatalog) -> Vec<HostedProject> {
 }
 
 pub fn apply_add_project(workspace: &mut WorkspaceDocument, folder_path: String) -> ChatProject {
+    deduplicate_project_folders(workspace);
+    if let Some(existing) = workspace
+        .projects
+        .iter()
+        .find(|project| project.folder_path == folder_path)
+    {
+        return existing.clone();
+    }
+
     let project = ChatProject {
         id: Uuid::new_v4(),
         folder_path,
@@ -202,6 +212,38 @@ pub fn apply_add_project(workspace: &mut WorkspaceDocument, folder_path: String)
     };
     workspace.projects.push(project.clone());
     project
+}
+
+/// Keep one authoritative project record for each folder on a host. Duplicate
+/// records are folded into the first record so their chats remain reachable.
+pub fn deduplicate_project_folders(workspace: &mut WorkspaceDocument) -> usize {
+    let mut retained = Vec::<ChatProject>::with_capacity(workspace.projects.len());
+    let mut project_index_by_path = HashMap::<String, usize>::new();
+    let mut removed = 0;
+
+    for mut project in std::mem::take(&mut workspace.projects) {
+        if let Some(&index) = project_index_by_path.get(&project.folder_path) {
+            let existing = &mut retained[index];
+            let mut known_thread_ids = existing
+                .threads
+                .iter()
+                .map(|thread| thread.id)
+                .collect::<HashSet<_>>();
+            existing.threads.extend(
+                project
+                    .threads
+                    .drain(..)
+                    .filter(|thread| known_thread_ids.insert(thread.id)),
+            );
+            removed += 1;
+        } else {
+            project_index_by_path.insert(project.folder_path.clone(), retained.len());
+            retained.push(project);
+        }
+    }
+
+    workspace.projects = retained;
+    removed
 }
 
 #[cfg(test)]
@@ -275,5 +317,95 @@ mod tests {
                 catalog.workspace("mini").unwrap().projects[1].id
             )
             .is_err());
+    }
+
+    #[test]
+    fn adding_a_folder_twice_returns_the_existing_project() {
+        let mut workspace = WorkspaceDocument::default();
+        let first = apply_add_project(&mut workspace, "/tmp/repo".into());
+        let mut existing = first.clone();
+        existing.threads.push(maxx_core::persist::ChatThread::new(
+            "Existing chat".into(),
+            maxx_core::contract::ChatProvider::Codex,
+            "gpt-5".into(),
+        ));
+        workspace.projects[0] = existing.clone();
+
+        let second = apply_add_project(&mut workspace, "/tmp/repo".into());
+
+        assert_eq!(workspace.projects.len(), 1);
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.threads, existing.threads);
+    }
+
+    #[test]
+    fn duplicate_folder_records_are_collapsed_without_losing_chats() {
+        let first_thread = maxx_core::persist::ChatThread::new(
+            "First chat".into(),
+            maxx_core::contract::ChatProvider::Codex,
+            "gpt-5".into(),
+        );
+        let second_thread = maxx_core::persist::ChatThread::new(
+            "Second chat".into(),
+            maxx_core::contract::ChatProvider::Codex,
+            "gpt-5".into(),
+        );
+        let first_id = Uuid::new_v4();
+        let mut workspace = WorkspaceDocument {
+            projects: vec![
+                ChatProject {
+                    id: first_id,
+                    folder_path: "/tmp/repo".into(),
+                    threads: vec![first_thread.clone()],
+                },
+                ChatProject {
+                    id: Uuid::new_v4(),
+                    folder_path: "/tmp/repo".into(),
+                    threads: vec![first_thread, second_thread.clone()],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(deduplicate_project_folders(&mut workspace), 1);
+        assert_eq!(workspace.projects.len(), 1);
+        assert_eq!(workspace.projects[0].id, first_id);
+        assert_eq!(workspace.projects[0].threads.len(), 2);
+        assert!(workspace.projects[0]
+            .threads
+            .iter()
+            .any(|thread| thread.id == second_thread.id));
+    }
+
+    #[test]
+    fn same_folder_name_on_different_hosts_remains_distinct() {
+        let mut catalog =
+            HostCatalog::new(HostInfo::local("This Mac"), WorkspaceDocument::default());
+        apply_add_project(
+            catalog.local_workspace_mut(),
+            "/Users/scott/local/browser-annotations".into(),
+        );
+        catalog
+            .attach_remote(
+                HostInfo::remote("mini", "Mac mini", "100.64.0.2:7422"),
+                WorkspaceDocument::default(),
+            )
+            .unwrap();
+        apply_add_project(
+            catalog.workspace_mut("mini").unwrap(),
+            "/Users/scott/mini/browser-annotations".into(),
+        );
+
+        let visible = hosted_projects(&catalog);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(
+            visible[0].project.folder_path,
+            "/Users/scott/local/browser-annotations"
+        );
+        assert_eq!(
+            visible[1].project.folder_path,
+            "/Users/scott/mini/browser-annotations"
+        );
+        assert_ne!(visible[0].project.id, visible[1].project.id);
     }
 }

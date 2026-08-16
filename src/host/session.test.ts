@@ -62,4 +62,24 @@ describe("host session catalog", () => {
     expect(hostOwnsProject(catalog, "mini", "added")).toBe(true);
     expect(hostOwnsProject(catalog, LOCAL_HOST_ID, "added")).toBe(false);
   });
+
+  it("shows one project row per folder on a host while cleanup is pending", () => {
+    let catalog = emptyCatalog(workspace("/tmp/local"), "This Mac");
+    const remote = workspace("/tmp/browser-annotations");
+    remote.projects.push({
+      id: "duplicate-empty-project",
+      folderPath: "/tmp/browser-annotations",
+      threads: [],
+    });
+    catalog = attachRemote(
+      catalog,
+      { id: "mini", name: "Mini", kind: "remote", address: "127.0.0.1:7422" },
+      remote,
+    );
+
+    const remoteProjects = hostedProjects(catalog).filter((item) => item.hostId === "mini");
+
+    expect(remoteProjects).toHaveLength(1);
+    expect(remoteProjects[0].project.id).toBe("project-/tmp/browser-annotations");
+  });
 });

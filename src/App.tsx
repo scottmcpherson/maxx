@@ -16,6 +16,7 @@ import { useLayoutWidth } from "./layout";
 import { canFitPinnedSummary } from "./summary";
 import { isNativeMenuShortcut, menuAcceleratorFor } from "./menu";
 import { UpdateToast } from "./components/UpdateToast";
+import { HostDisconnectNotice } from "./components/HostDisconnectNotice";
 import { ipc } from "./ipc";
 import { useAppStore } from "./store/appStore";
 
@@ -357,6 +358,7 @@ export default function App() {
       </div>
       {/* HUD stays outside the scaled surface so fixed positioning tracks the real window. */}
       <ZoomControls onReady={onZoomReady} />
+      <HostDisconnectNotice />
       <UpdateToast />
     </div>
   );

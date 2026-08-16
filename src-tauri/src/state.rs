@@ -81,9 +81,10 @@ impl AppState {
                 WorkspaceDocument::default()
             }
         };
+        let duplicate_projects = crate::host_session::deduplicate_project_folders(&mut document);
         // On launch, a turn persisted without a terminal closes as interrupted.
         let recovered = close_interrupted_turns(&mut document.projects);
-        if recovered > 0 {
+        if duplicate_projects > 0 || recovered > 0 {
             let _ = persistence.save(&document);
         }
         Self {

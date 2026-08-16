@@ -169,10 +169,27 @@ pub async fn listen_host(
     }
     let listener = TcpListener::bind(bind)
         .await
-        .map_err(|error| format!("Could not listen on {bind}: {error}"))?;
+        .map_err(|error| {
+            if error.kind() == ErrorKind::AddrInUse {
+                format!(
+                    "Port {} is already being used, usually by another Maxx build. Quit the duplicate build and try again.",
+                    bind.port()
+                )
+            } else {
+                format!("Could not listen on {bind}: {error}")
+            }
+        })?;
     let bound = listener
         .local_addr()
         .map_err(|error| format!("Could not read listen address: {error}"))?;
+    let share_address = if bind.port() == 0 {
+        share_address
+            .strip_suffix(":0")
+            .map(|host| format!("{host}:{}", bound.port()))
+            .unwrap_or(share_address)
+    } else {
+        share_address
+    };
     let shutdown = CancellationToken::new();
     let sessions = Arc::new(SessionRegistry::default());
     let task_shutdown = shutdown.clone();

@@ -178,9 +178,13 @@ export function annotationInstallScript(token: string): string {
     }
   };
   state.setSelections = (selections) => { state.selectionList = Array.isArray(selections) ? selections.slice(0,20) : []; hideTooltip(); render(); };
+  const elementAtPoint = (x, y) => {
+    const layers = document.elementsFromPoint?.(x, y) || [];
+    return layers.find((element) => element !== root && !root.contains(element)) || document.elementFromPoint(x, y);
+  };
   const move = (event) => {
     if(state.pending)return;
-    const el=document.elementFromPoint(event.clientX,event.clientY);
+    const el=elementAtPoint(event.clientX,event.clientY);
     if(!el||el===root){hover.style.display="none";hideTooltip();return;}
     const selection=selectionForElement(el);
     if(selection){hover.style.display="none";showTooltip(selection);return;}
@@ -188,7 +192,13 @@ export function annotationInstallScript(token: string): string {
     const r=el.getBoundingClientRect(); hover.style.display="block"; hover.style.left=r.left+"px"; hover.style.top=r.top+"px"; hover.style.width=r.width+"px"; hover.style.height=r.height+"px";
   };
   const leave = (event) => { if(!event.relatedTarget){hover.style.display="none";hideTooltip();} };
-  const click = (event) => { if(event.target===root)return; const el=document.elementFromPoint(event.clientX,event.clientY); if(!el||el===root)return; event.preventDefault(); event.stopImmediatePropagation(); const metadata=metadataFor(el); const selected=state.selectionList.some((item)=>item.selector===metadata.selector); if(selected)emit({selected:false,instruction:"",...metadata}); else openEditor(el); };
+  const clickTarget = (event) => {
+    const target = event.target instanceof Element && event.target !== root && !root.contains(event.target) ? event.target : null;
+    const hasPointerPosition = event.clientX !== 0 || event.clientY !== 0;
+    if (hasPointerPosition) return elementAtPoint(event.clientX,event.clientY) || target;
+    return target;
+  };
+  const click = (event) => { const el=clickTarget(event); if(!el)return; event.preventDefault(); event.stopImmediatePropagation(); const metadata=metadataFor(el); const selected=state.selectionList.some((item)=>item.selector===metadata.selector); if(selected)emit({selected:false,instruction:"",...metadata}); else openEditor(el); };
   const keydown = (event) => { if(event.key!=="Escape")return; event.preventDefault(); event.stopImmediatePropagation(); if(state.pending){closeEditor();return;} emit({cancel:true}); };
   let frame = 0;
   const reposition = () => { cancelAnimationFrame(frame); frame=requestAnimationFrame(() => { render(); positionEditor(); }); };

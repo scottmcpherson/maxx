@@ -55,12 +55,9 @@ pub async fn add_project(state: Arc<AppState>, folder_path: String) -> Result<Ch
     if !std::path::Path::new(&folder_path).is_dir() {
         return Err("The path is not a folder".into());
     }
-    let project = ChatProject {
-        id: Uuid::new_v4(),
-        folder_path,
-        threads: Vec::new(),
-    };
-    state.workspace.lock().await.projects.push(project.clone());
+    let mut workspace = state.workspace.lock().await;
+    let project = crate::host_session::apply_add_project(&mut workspace, folder_path);
+    drop(workspace);
     state.save().await;
     Ok(project)
 }

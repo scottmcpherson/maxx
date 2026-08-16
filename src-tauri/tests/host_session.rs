@@ -714,6 +714,46 @@ async fn listener_stop_closes_existing_sessions_and_fails_pending_requests() {
 }
 
 #[tokio::test]
+async fn duplicate_listener_reports_the_duplicate_build_remedy() {
+    let (events, root) = test_journal();
+    let listener = listen_host(
+        parse_bind_address("127.0.0.1:0").unwrap(),
+        "127.0.0.1:0".into(),
+        TestAuthenticator::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "host-a".into(),
+        "Mac mini".into(),
+        Arc::new(EchoHost),
+        events.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listener.share_address(), listener.bind_address());
+    assert!(!listener.share_address().ends_with(":0"));
+    let duplicate = listen_host(
+        parse_bind_address(&listener.bind_address()).unwrap(),
+        listener.share_address(),
+        TestAuthenticator::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        "host-b".into(),
+        "Duplicate Mac mini".into(),
+        Arc::new(EchoHost),
+        events,
+    )
+    .await;
+    let duplicate = match duplicate {
+        Ok(handle) => {
+            handle.stop().await;
+            panic!("a duplicate listener must not bind the same address");
+        }
+        Err(error) => error,
+    };
+
+    assert!(duplicate.contains("another Maxx build"));
+    assert!(duplicate.contains("Quit the duplicate build"));
+    listener.stop().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn client_credential_reconnects_and_replays_from_the_last_cursor() {
     let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let (events, root) = test_journal();

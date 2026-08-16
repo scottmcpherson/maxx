@@ -79,7 +79,7 @@ export function replaceWorkspace(
 }
 
 export function hostedProjects(catalog: HostCatalog): HostedProject[] {
-  return [
+  const projects = [
     ...catalog.local.projects.map((project) => ({
       hostId: catalog.localHost.id,
       hostName: catalog.localHost.name,
@@ -93,6 +93,15 @@ export function hostedProjects(catalog: HostCatalog): HostedProject[] {
       })),
     ),
   ];
+  const uniqueByHostAndPath = new Map<string, HostedProject>();
+  for (const item of projects) {
+    const key = `${item.hostId}\0${item.project.folderPath}`;
+    const existing = uniqueByHostAndPath.get(key);
+    if (!existing || item.project.threads.length > existing.project.threads.length) {
+      uniqueByHostAndPath.set(key, item);
+    }
+  }
+  return [...uniqueByHostAndPath.values()];
 }
 
 export function mergedWorkspace(catalog: HostCatalog): WorkspaceDocument {

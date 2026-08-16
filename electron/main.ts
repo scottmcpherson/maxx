@@ -18,6 +18,7 @@ import {
   Tray,
 } from "electron";
 import { BrowserManager } from "./browser-manager.js";
+import { buildInstanceSettings } from "./build-instance.js";
 import { ChromeImporter } from "./chrome-importer.js";
 import type { BrowserAnnotationSelection, BrowserEngineContext, BrowserOperation, BrowserViewBounds, JsonValue } from "./contracts.js";
 import { SidecarClient } from "./sidecar-client.js";
@@ -26,6 +27,7 @@ import { MaxxUpdater } from "./updater.js";
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(sourceDirectory, "..");
 const development = process.argv.includes("--dev");
+const checkoutBuild = process.argv.includes("--checkout-build");
 const appSmoke = process.argv.includes("--app-smoke");
 const browserSmoke = process.argv.includes("--browser-smoke");
 const hermesBrowserSmoke = process.argv.includes("--hermes-browser-smoke");
@@ -38,8 +40,15 @@ const smokeMode = appSmoke || browserSmoke || hermesBrowserSmoke || terminalUiSm
 const smokeUserData = process.argv.find((argument) => argument.startsWith("--browser-smoke-user-data="))?.slice("--browser-smoke-user-data=".length);
 const BEST_BUY_BENCHMARK = "https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat335400050008&id=pcat17071&qp=brand_facet%3DBrand%7EBambu+Lab%5Estorepickupstores_facet%3DStore+Availability+-+In+Store+Pickup%7E885&st=categoryid%24pcmcat335400050008";
 const HERMES_SMOKE_MODEL = "custom:vllm-spark:unsloth/Qwen3.6-35B-A3B-NVFP4";
+const buildInstance = buildInstanceSettings(
+  app.getPath("appData"),
+  app.getName(),
+  projectDirectory,
+  development,
+  checkoutBuild,
+);
 
-if (development) app.setPath("userData", path.join(app.getPath("appData"), `${app.getName()}-dev`));
+if (buildInstance.userDataPath) app.setPath("userData", buildInstance.userDataPath);
 else if (smokeMode) app.setPath("userData", smokeUserData || path.join(app.getPath("temp"), `maxx-browser-smoke-${process.pid}`));
 
 protocol.registerSchemesAsPrivileged([
@@ -139,6 +148,14 @@ function installMenu(toggleSidebar?: string | null, toggleBrowser?: string | nul
       { label: "Zoom In", accelerator: "CommandOrControl+Plus", click: () => send("zoom_in") },
       { label: "Zoom Out", accelerator: "CommandOrControl+-", click: () => send("zoom_out") },
       { label: "Actual Size", accelerator: "CommandOrControl+0", click: () => send("zoom_reset") },
+      ...(development ? [
+        { type: "separator" as const },
+        {
+          label: "Toggle Developer Tools",
+          accelerator: process.platform === "darwin" ? "Alt+Command+I" : "Ctrl+Shift+I",
+          click: () => mainWindow?.webContents.toggleDevTools(),
+        },
+      ] : []),
       { type: "separator" }, { role: "togglefullscreen" },
     ] },
     { role: "windowMenu" },
@@ -209,6 +226,7 @@ async function createWindow(): Promise<void> {
     executable,
     cwd: runtimeWorkingDirectory(),
     dataDirectory: app.getPath("userData"),
+    environment: buildInstance.listenPort ? { MAXX_LISTEN_PORT: buildInstance.listenPort } : undefined,
     onEvent: (event, payload) => {
       if (event === "notification://turn-finished") {
         const value = payload as { title?: unknown; terminalState?: unknown };
@@ -596,6 +614,12 @@ async function runBrowserSmoke(): Promise<void> {
     ) {
       throw new Error("Annotation mode did not emit the described element");
     }
+    const selectedReference = await run({
+      operation: "evaluate",
+      tabId,
+      expression: `(() => { const selected=document.querySelector(${JSON.stringify(picked.selector)}); const clicked=globalThis.__maxxBrowser?.refToElement.get(${JSON.stringify(button.reference)}); return selected === clicked; })()`,
+    });
+    if (selectedReference.value !== true) throw new Error("Annotation mode selected the wrong element");
     await manager.setAnnotationSelections(tabId, [
       { selector: picked.selector, index: 1, instruction: "update" },
       { selector: "#status", index: 2, instruction: "verify status" },

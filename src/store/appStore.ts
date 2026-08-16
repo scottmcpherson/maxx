@@ -90,6 +90,9 @@ interface AppStoreState {
   workspace: WorkspaceDocument | null;
   selectedHostID: string;
   remoteSessions: RemoteSession[];
+  /** The last remote host that disconnected unexpectedly. Kept separate from
+   * the general error so the main shell can explain why its projects vanished. */
+  hostDisconnectNotice: { hostID: string; hostName: string } | null;
   hostStatus: HostStatus | null;
   selectedProjectID: string | null;
   selectedThreadID: string | null;
@@ -103,7 +106,7 @@ interface AppStoreState {
   /** Side thread shown in the reply panel next to the main thread. */
   openSideThreadID: string | null;
   searchOpen: boolean;
-  renamingThread: { projectID: string; threadID: string } | null;
+  renamingThread: { hostID: string; projectID: string; threadID: string } | null;
   sidebarOpen: boolean;
   /** Bell-toggled filter that keeps only chats needing attention in the projects tree. */
   attentionFilterOpen: boolean;
@@ -149,6 +152,7 @@ interface AppStoreState {
   connectHost: (address: string, code: string) => Promise<void>;
   disconnectHost: (hostID: string) => Promise<void>;
   markHostDisconnected: (hostID: string) => void;
+  clearHostDisconnectNotice: (hostID?: string) => void;
   startHostListen: (bindAddress?: string) => Promise<void>;
   stopHostListen: () => Promise<void>;
   refreshHostStatus: () => Promise<void>;
@@ -163,7 +167,12 @@ interface AppStoreState {
     environment?: GitEnvironmentMode,
   ) => Promise<ChatThread | null>;
   removeThread: (projectID: string, threadID: string) => Promise<void>;
-  renameThread: (projectID: string, threadID: string, title: string) => Promise<boolean>;
+  renameThread: (
+    hostID: string,
+    projectID: string,
+    threadID: string,
+    title: string,
+  ) => Promise<boolean>;
   updateThreadRuntime: (
     projectID: string,
     threadID: string,
@@ -227,7 +236,9 @@ interface AppStoreState {
   setAgentsOpen: (open: boolean) => void;
   setOpenSideThreadID: (threadID: string | null) => void;
   setSearchOpen: (open: boolean) => void;
-  setRenamingThread: (target: { projectID: string; threadID: string } | null) => void;
+  setRenamingThread: (
+    target: { hostID: string; projectID: string; threadID: string } | null,
+  ) => void;
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
   setAttentionFilterOpen: (open: boolean) => void;
@@ -376,6 +387,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   workspace: null,
   selectedHostID: LOCAL_HOST_ID,
   remoteSessions: [],
+  hostDisconnectNotice: null,
   hostStatus: null,
   selectedProjectID: null,
   selectedThreadID: null,
@@ -428,6 +440,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             get().markHostDisconnected(message.hostId);
             void get().refreshHostStatus();
           } else if (message.event === "host://connected" || message.event === "host://status-changed") {
+            if (message.event === "host://connected") get().clearHostDisconnectNotice(message.hostId);
             void get().refreshHostStatus();
           }
         });
@@ -553,6 +566,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           { ...host, kind: "remote" },
           workspace,
         ).remotes,
+        hostDisconnectNotice: state.hostDisconnectNotice?.hostID === host.id
+          ? null
+          : state.hostDisconnectNotice,
         error: null,
       }));
       await get().refreshHostStatus();
@@ -576,6 +592,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
       selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
       workspace: localBefore,
+      hostDisconnectNotice: state.hostDisconnectNotice?.hostID === hostID
+        ? null
+        : state.hostDisconnectNotice,
     }));
     await get().refreshHostStatus();
   },
@@ -585,9 +604,23 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
     selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
     selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
+    hostDisconnectNotice: {
+      hostID,
+      hostName: state.remoteSessions.find((session) => session.host.id === hostID)?.host.name
+        ?? state.hostStatus?.remotes.find((host) => host.id === hostID)?.name
+        ?? "Remote host",
+    },
   })),
 
+  clearHostDisconnectNotice: (hostID) => set((state) => (
+    !state.hostDisconnectNotice
+      || (hostID !== undefined && state.hostDisconnectNotice.hostID !== hostID)
+      ? {}
+      : { hostDisconnectNotice: null }
+  )),
+
   startHostListen: async (bindAddress) => {
+    set({ error: null });
     try {
       await ipc.hostListen(bindAddress);
       await get().refreshHostStatus();
@@ -597,6 +630,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   stopHostListen: async () => {
+    set({ error: null });
     try {
       await ipc.hostUnlisten();
       await get().refreshHostStatus();
@@ -783,11 +817,10 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
   },
 
-  renameThread: async (projectID, threadID, title) => {
+  renameThread: async (hostID, projectID, threadID, title) => {
     const trimmedTitle = title.trim();
     if (!trimmedTitle) return false;
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       await ipc.updateThread(projectID, threadID, { title: trimmedTitle }, hostID);
       await get().refresh();
       return true;

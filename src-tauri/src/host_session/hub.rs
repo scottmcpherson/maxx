@@ -71,6 +71,7 @@ pub struct HostHub {
     settings: Arc<HostSettingsStore>,
     pub events: Arc<EventJournal>,
     listen: Mutex<Option<ListenHandle>>,
+    listen_port: u16,
     remotes: Mutex<HashMap<String, Arc<HostClient>>>,
     connection_errors: Mutex<HashMap<String, String>>,
 }
@@ -109,12 +110,13 @@ pub struct HostStatus {
 
 impl HostHub {
     pub fn new() -> Self {
-        Self::with_stores(
+        Self::with_stores_at_port(
             HostIdentity::load_or_create(),
             Arc::new(PeerStore::load_default()),
             Arc::new(KeychainCredentialStore),
             Arc::new(EventJournal::load_default()),
             Arc::new(HostSettingsStore::load_default()),
+            configured_listen_port(),
         )
     }
 
@@ -125,6 +127,24 @@ impl HostHub {
         events: Arc<EventJournal>,
         settings: Arc<HostSettingsStore>,
     ) -> Self {
+        Self::with_stores_at_port(
+            identity,
+            peers,
+            credentials,
+            events,
+            settings,
+            super::DEFAULT_LISTEN_PORT,
+        )
+    }
+
+    fn with_stores_at_port(
+        identity: HostIdentity,
+        peers: Arc<PeerStore>,
+        credentials: Arc<dyn CredentialStore>,
+        events: Arc<EventJournal>,
+        settings: Arc<HostSettingsStore>,
+        listen_port: u16,
+    ) -> Self {
         Self {
             identity,
             peers,
@@ -133,6 +153,7 @@ impl HostHub {
             settings,
             events,
             listen: Mutex::new(None),
+            listen_port,
             remotes: Mutex::new(HashMap::new()),
             connection_errors: Mutex::new(HashMap::new()),
         }
@@ -215,10 +236,10 @@ impl HostHub {
                 (address, address.to_string())
             }
             None => {
-                let endpoint =
-                    tokio::task::spawn_blocking(|| self_endpoint(super::DEFAULT_LISTEN_PORT))
-                        .await
-                        .map_err(|error| format!("Could not inspect Tailscale: {error}"))??;
+                let listen_port = self.listen_port;
+                let endpoint = tokio::task::spawn_blocking(move || self_endpoint(listen_port))
+                    .await
+                    .map_err(|error| format!("Could not inspect Tailscale: {error}"))??;
                 (endpoint.bind, endpoint.share_address)
             }
         };
@@ -459,6 +480,13 @@ impl HostHub {
             .await
             .insert(host_id.to_string(), error);
     }
+}
+
+fn configured_listen_port() -> u16 {
+    std::env::var("MAXX_LISTEN_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(super::DEFAULT_LISTEN_PORT)
 }
 
 fn remote_status(peer: &RememberedPeer, connected: bool, error: &str) -> RemoteHostStatus {

@@ -141,6 +141,7 @@ pub fn title_prompt(message: &str, attachments: &[ChatImageAttachment]) -> Strin
         "Generate a short sidebar title for this chat.\n\
          Return only the title, with no JSON, quotes, label, or punctuation.\n\
          Use 3-8 words and fewer than 40 characters.\n\
+         Use sentence case: capitalize only the first letter of the title.\n\
          Capture the durable subject and desired outcome, not instructions about tools, agents, plans, reports, or output format.\n\
          Do not use tools or inspect the working directory.\n\n\
          User message:\n{}{}",

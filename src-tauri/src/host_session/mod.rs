@@ -17,8 +17,8 @@ mod protocol;
 mod settings;
 
 pub use catalog::{
-    apply_add_project, hosted_projects, HostCatalog, HostInfo, HostKind, HostedProject,
-    LOCAL_HOST_ID,
+    apply_add_project, deduplicate_project_folders, hosted_projects, HostCatalog, HostInfo,
+    HostKind, HostedProject, LOCAL_HOST_ID,
 };
 pub use credentials::{CredentialStore, KeychainCredentialStore, MemoryCredentialStore};
 pub use discovery::{

@@ -464,9 +464,15 @@ function ConnectionsSettingsSection() {
     return () => window.clearTimeout(timer);
   }, [hostStatus?.pairing, refreshHostStatus]);
 
-  const toggleListening = (enabled: boolean) => {
-    if (enabled) void startHostListen();
-    else void stopHostListen();
+  const toggleListening = async (enabled: boolean) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      if (enabled) await startHostListen();
+      else await stopHostListen();
+    } finally {
+      setBusy(false);
+    }
   };
 
   const createPairing = async () => {
@@ -540,8 +546,9 @@ function ConnectionsSettingsSection() {
             <input
               type="checkbox"
               checked={listening}
+              disabled={busy}
               aria-label="Allow connections from other Maxx apps"
-              onChange={(event) => toggleListening(event.target.checked)}
+              onChange={(event) => void toggleListening(event.target.checked)}
             />
             <span />
           </label>

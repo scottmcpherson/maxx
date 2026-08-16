@@ -1272,11 +1272,6 @@ function NewAgentView({
             </div>
           </div>
           {error && <div className="error-banner">{error}</div>}
-          <p className="new-agent-hint">
-            {surface === "terminal"
-              ? "Terminal mode · attachments, dictation, annotations, and @agent side threads are unavailable"
-              : "Enter to send · Shift+Enter for a new line"}
-          </p>
         </div>
       {addingOnHost && (
         <HostFolderPicker

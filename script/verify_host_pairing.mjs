@@ -15,13 +15,18 @@ class Runtime {
   #pending = new Map();
   #readyResolve;
   #readyReject;
+  #stoppedResolve;
   ready;
+  stopped;
   events = [];
 
   constructor(name) {
     this.ready = new Promise((resolveReady, rejectReady) => {
       this.#readyResolve = resolveReady;
       this.#readyReject = rejectReady;
+    });
+    this.stopped = new Promise((resolveStopped) => {
+      this.#stoppedResolve = resolveStopped;
     });
     this.#child = spawn(executable, ["--sidecar"], {
       cwd: process.cwd(),
@@ -33,6 +38,7 @@ class Runtime {
     this.#child.stderr.on("data", (chunk) => process.stderr.write(`[${name}] ${chunk}`));
     this.#child.once("error", (error) => this.#fail(error));
     this.#child.once("exit", (code, signal) => {
+      this.#stoppedResolve();
       this.#fail(new Error(`${name} exited (${code ?? signal ?? "unknown"})`));
     });
   }
@@ -121,7 +127,7 @@ async function waitFor(check, message, timeoutMs = 12_000) {
 }
 
 const host = new Runtime("host");
-const client = new Runtime("client");
+let client = new Runtime("client");
 let remoteID = null;
 
 try {
@@ -163,6 +169,18 @@ try {
     return status.remotes.find((remote) => remote.id === remoteID)?.connected === true;
   }, "client did not reconnect with its Keychain credential");
 
+  const previousClient = client;
+  previousClient.shutdown();
+  await previousClient.stopped;
+  client = new Runtime("client");
+  await client.ready;
+  await waitFor(async () => {
+    const status = await client.request("host_status");
+    return status.remotes.find((remote) => remote.id === remoteID)?.connected === true;
+  }, "restarted client process did not recover its remembered host connection");
+  const restoredSnapshot = await client.request("workspace_snapshot", { hostId: remoteID });
+  assert(Array.isArray(restoredSnapshot.projects), "restarted client could not read the recovered remote workspace");
+
   await host.request("host_revoke_peer", { peerId: clientStatus.id });
   await waitFor(async () => {
     const status = await client.request("host_status");
@@ -181,6 +199,7 @@ try {
     protocolVersion: finalHost.protocolVersion,
     pairingConsumed: true,
     keychainReconnect: true,
+    clientRestartRecovery: true,
     revocation: true,
     remoteWorkspace: true,
     capabilitiesEnforced: true,

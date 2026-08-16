@@ -6,11 +6,13 @@ import { ipc } from "../ipc";
 import { useAppStore } from "./appStore";
 
 const originalRefresh = useAppStore.getState().refresh;
+const originalRefreshHostStatus = useAppStore.getState().refreshHostStatus;
 
 function seedThreadPanels(threadID: string | null = "thread-a") {
   useAppStore.setState({
     workspace: null,
     remoteSessions: [],
+    hostDisconnectNotice: null,
     selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: "project",
     selectedThreadID: threadID,
@@ -26,9 +28,11 @@ afterEach(() => {
   useAppStore.setState({
     workspace: null,
     remoteSessions: [],
+    hostDisconnectNotice: null,
     selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: null,
     selectedThreadID: null,
+    renamingThread: null,
     browserOpen: false,
     pendingBrowserReveal: null,
     pendingSideChatRequest: null,
@@ -40,6 +44,7 @@ afterEach(() => {
     sendingMessageByThread: {},
     error: null,
     refresh: originalRefresh,
+    refreshHostStatus: originalRefreshHostStatus,
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
     newThreadSurface: "gui",
@@ -247,6 +252,18 @@ function sampleWorkspace(folderPath: string, projectID = "project"): WorkspaceDo
 }
 
 describe("additive remote hosts", () => {
+  it("clears a stale listener error before enabling connections again", async () => {
+    useAppStore.setState({
+      error: "Port 7422 is already being used",
+      refreshHostStatus: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(ipc, "hostListen").mockResolvedValue("100.64.0.2:7422");
+
+    await useAppStore.getState().startHostListen();
+
+    expect(useAppStore.getState().error).toBeNull();
+  });
+
   it("keeps the local workspace byte-for-byte when a remote host is detached", async () => {
     const local = sampleWorkspace("/Users/scott/macbook", "local-project");
     const before = JSON.stringify(local);
@@ -300,6 +317,36 @@ describe("additive remote hosts", () => {
     expect(useAppStore.getState().workspace?.projects[0]?.threads[0]?.title).toBe("Local chat");
     expect(useAppStore.getState().remoteSessions[0]?.workspace.projects[0]?.threads[0]?.title)
       .toBe("Changed on the mini");
+  });
+
+  it("routes a remote chat rename to its owning host", async () => {
+    const local = sampleWorkspace("/tmp/local", "local-project");
+    const remote = sampleWorkspace("/tmp/mini", "remote-project");
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({
+      workspace: local,
+      remoteSessions: [{
+        host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+        workspace: remote,
+      }],
+      refresh,
+    });
+    const update = vi.spyOn(ipc, "updateThread").mockResolvedValue(undefined);
+
+    await expect(useAppStore.getState().renameThread(
+      "mini",
+      "remote-project",
+      "thread-a",
+      "Renamed remotely",
+    )).resolves.toBe(true);
+
+    expect(update).toHaveBeenCalledWith(
+      "remote-project",
+      "thread-a",
+      { title: "Renamed remotely" },
+      "mini",
+    );
+    expect(refresh).toHaveBeenCalledOnce();
   });
 
   it("connects through the shipped host_connect pairing path", async () => {
@@ -401,6 +448,20 @@ describe("additive remote hosts", () => {
     expect(useAppStore.getState().selectedHostID).toBe(LOCAL_HOST_ID);
     expect(useAppStore.getState().selectedProjectID).toBeNull();
     expect(useAppStore.getState().workspace).toBe(local);
+    expect(useAppStore.getState().hostDisconnectNotice).toEqual({
+      hostID: "mini",
+      hostName: "Mac mini",
+    });
+  });
+
+  it("clears the disconnect notice when the remote reconnects", () => {
+    useAppStore.setState({
+      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
+    });
+
+    useAppStore.getState().clearHostDisconnectNotice("mini");
+
+    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
   });
 });
 
