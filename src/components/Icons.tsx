@@ -122,6 +122,13 @@ export const Icons = {
       <path d="M12 3.5c2.2 2.3 3.3 5.2 3.3 8.5S14.2 18.2 12 20.5c-2.2-2.3-3.3-5.2-3.3-8.5S9.8 5.8 12 3.5Z" />
     </IconBase>
   ),
+  warning: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M10.3 4.2 2.8 17.1A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.9L13.7 4.2a2 2 0 0 0-3.4 0Z" />
+      <path d="M12 9v4" />
+      <path d="M12 16.5h.01" />
+    </IconBase>
+  ),
   computer: (props: IconProps) => (
     <IconBase {...props}>
       <rect x="3.5" y="4.5" width="17" height="12" rx="2" />

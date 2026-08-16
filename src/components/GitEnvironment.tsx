@@ -6,6 +6,7 @@ import {
   shouldRefreshGitAfterTurn,
   type GitRepositoryStatus,
 } from "../git";
+import { isHostConnectionError } from "../host/errors";
 import { ipc } from "../ipc";
 import { useAppStore } from "../store/appStore";
 import { GitCommitDialog } from "./GitCommitDialog";
@@ -41,9 +42,10 @@ export function GitEnvironment({
       const next = await ipc.gitStatus(projectID, hostID, threadID);
       if (generation === refreshGeneration.current) {
         setStatus(next);
+        setError((current) => current && isHostConnectionError(current) ? null : current);
       }
     } catch (refreshError) {
-      if (generation === refreshGeneration.current) {
+      if (generation === refreshGeneration.current && !isHostConnectionError(refreshError)) {
         setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
       }
     }

@@ -125,6 +125,9 @@ export function Sidebar() {
     return next;
   }, [hostStatus?.name, remoteSessions, workspace]);
   const visibleProjects = hostedProjects(catalog).filter(({ project }) => !isChatsProject(project));
+  const offlineHostIDs = new Set(
+    hostStatus?.remotes.filter((remote) => !remote.connected).map((remote) => remote.id) ?? [],
+  );
   const chatsProject = catalog.local.projects.find(isChatsProject);
   const combinedWorkspace = mergedWorkspace(catalog);
   const projectMenuRef = useRef<HTMLDivElement>(null);
@@ -493,6 +496,7 @@ export function Sidebar() {
 
                 {visibleProjects.map(({ hostId, hostName, project }) => {
                   const remoteProject = !isLocalHost(hostId);
+                  const remoteOffline = remoteProject && offlineHostIDs.has(hostId);
                   const projectVisible = !attentionFilterOpen || attentionProjectIDs.has(project.id);
                   const projectExpanded = attentionFilterOpen
                     ? projectVisible
@@ -510,7 +514,7 @@ export function Sidebar() {
                             type="button"
                             className="project-disclosure"
                             aria-label={remoteProject
-                              ? `${projectName(project)} — Remote project on ${hostName}`
+                              ? `${projectName(project)} — Remote project on ${hostName}${remoteOffline ? ", offline" : ""}`
                               : undefined}
                             aria-expanded={projectExpanded}
                             aria-controls={threadListID}
@@ -530,10 +534,17 @@ export function Sidebar() {
                           </button>
                           {remoteProject && (
                             <span
-                              className="project-host-label is-remote"
-                              title={`Remote host: ${hostName}`}
+                              className={`project-host-label is-remote${remoteOffline ? " is-offline" : ""}`}
+                              title={remoteOffline
+                                ? `${hostName} is offline. Reconnecting…`
+                                : `Remote host: ${hostName}`}
                             >
-                              {hostName}
+                              {remoteOffline && (
+                                <span className="project-host-offline-indicator" aria-hidden="true">
+                                  <Icons.warning size={12} />
+                                </span>
+                              )}
+                              <span className="project-host-label-text">{hostName}</span>
                             </span>
                           )}
                           <span

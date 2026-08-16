@@ -26,6 +26,7 @@
      navigation, project, and chat rows. Smaller text is reserved for metadata. */
   --sidebar-font-size: 13px;
   --sidebar-font-weight: 400;
+  --sidebar-row-height: 31px;
   --purple: #7657ee;
   --green: #6fc58b;
   --red: #e47370;
@@ -605,7 +606,7 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .empty-project-cta:hover { background: var(--bg-hover); color: var(--text-dim); }
 .project { margin-bottom: 1px; }
 .project-header {
-  height: 29px; padding: 0 3px 0 0;
+  height: var(--sidebar-row-height); padding: 0 3px 0 0;
   position: relative;
   display: flex; align-items: center; gap: 2px; border-radius: 6px;
 }
@@ -635,13 +636,21 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 }
 .project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sidebar-text); }
 .project-host-label {
-  flex: 0 0 auto; max-width: 60px;
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 0 auto; max-width: 78px;
+  min-width: 0; display: flex; align-items: center; gap: 3px; white-space: nowrap;
   margin-right: 3px; padding: 2px 0;
   color: var(--sidebar-meta); font-size: inherit; font-weight: inherit; line-height: 1.2;
   transition: opacity .1s; pointer-events: none;
 }
 .project-host-label.is-remote { color: var(--sidebar-label); }
+.project-host-label-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.project-host-offline-indicator {
+  width: 12px; height: 12px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  color: var(--red);
+}
 .project-header-actions {
   display: flex; align-items: center; gap: 0;
   position: absolute; top: 50%; right: 3px; z-index: 2;
@@ -697,7 +706,7 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .thread-list { list-style: none; padding: 0; min-width: 0; }
 .thread-list > li { min-width: 0; }
 .thread-row {
-  width: 100%; max-width: 100%; min-width: 0; height: 31px; padding: 0 3px 0 0;
+  width: 100%; max-width: 100%; min-width: 0; height: var(--sidebar-row-height); padding: 0 3px 0 0;
   position: relative;
   border: 0; border-radius: 6px; background: transparent;
   display: flex; align-items: center;
@@ -2795,64 +2804,6 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   .thread-header {
     transition: none;
   }
-}
-
-/* Window-anchored notices live outside the zoom surface (like the zoom HUD) so
-   they stay pinned to the real window and above the browser pane's chrome. */
-.host-disconnect-notice {
-  position: fixed;
-  top: 52px;
-  left: 50%;
-  z-index: 10000;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: min(520px, calc(100vw - 32px));
-  padding: 10px 7px 10px 12px;
-  border: 1px solid rgba(229, 114, 111, .52);
-  border-radius: 9px;
-  background: rgba(56, 35, 35, .98);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .42);
-  color: #f0b4b1;
-  transform: translateX(-50%);
-  animation: host-disconnect-notice-in 140ms ease-out;
-  -webkit-app-region: no-drag;
-}
-@keyframes host-disconnect-notice-in {
-  from { opacity: 0; transform: translate(-50%, -6px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
-}
-.host-disconnect-notice > svg { flex: 0 0 auto; }
-.host-disconnect-notice-copy {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.host-disconnect-notice-copy strong { color: #f2c6c3; font-size: 12px; font-weight: 600; }
-.host-disconnect-notice-copy small { color: #dba3a0; font-size: 11px; line-height: 1.35; }
-.host-disconnect-notice-action,
-.host-disconnect-notice-dismiss {
-  flex: 0 0 auto;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.host-disconnect-notice-action {
-  padding: 5px 7px;
-  background: rgba(255, 255, 255, .08);
-  font-size: 11px;
-  white-space: nowrap;
-}
-.host-disconnect-notice-action:hover,
-.host-disconnect-notice-dismiss:hover { background: rgba(255, 255, 255, .13); }
-.host-disconnect-notice-dismiss { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; }
-
-@media (prefers-reduced-motion: reduce) {
-  .host-disconnect-notice { animation: none; }
 }
 
 .update-toast {

@@ -9,7 +9,7 @@ const REFRESH_INTERVAL_MS = 2_000;
  */
 export function HostConnectionMonitor() {
   const offlineHostID = useAppStore((state) =>
-    state.errorHostID ?? state.hostDisconnectNotice?.hostID ?? null,
+    state.errorHostID ?? state.hostStatus?.remotes.find((remote) => !remote.connected)?.id ?? null,
   );
   const refreshHostStatus = useAppStore((state) => state.refreshHostStatus);
 

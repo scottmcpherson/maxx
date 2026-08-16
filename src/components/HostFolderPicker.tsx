@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ipc } from "../ipc";
+import { hostErrorMessage, isHostConnectionError } from "../host/errors";
 import type { FolderEntry } from "../host/types";
 import { isLocalHost } from "../host/session";
 import { Icons } from "./Icons";
@@ -35,10 +36,8 @@ export function folderBreadcrumbs(path: string, homePath: string): FolderBreadcr
 }
 
 export function folderPickerError(reason: unknown, hostName: string): string {
-  const message = (reason instanceof Error ? reason.message : String(reason))
-    .replace(/^Error:\s*/i, "")
-    .trim();
-  if (/disconnected|not connected|connection.*(?:closed|lost)/i.test(message)) {
+  const message = hostErrorMessage(reason);
+  if (isHostConnectionError(reason)) {
     return `${hostName} is disconnected. Reconnect it, then try again.`;
   }
   return message || "The folder could not be loaded.";

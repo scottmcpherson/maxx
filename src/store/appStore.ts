@@ -68,6 +68,7 @@ import type { BrowserAnnotation } from "../browser";
 import { annotationKey, MAX_BROWSER_ANNOTATIONS } from "../browserAnnotations";
 import type { HostStatus } from "../host/types";
 import type { RemoteSession } from "../host/session";
+import { isHostConnectionError } from "../host/errors";
 import {
   attachRemote,
   detachRemote,
@@ -91,10 +92,6 @@ interface AppStoreState {
   workspace: WorkspaceDocument | null;
   selectedHostID: string;
   remoteSessions: RemoteSession[];
-  /** The last remote host that disconnected unexpectedly. Kept separate from
-   * the general error so the main shell can explain that its cached projects
-   * remain visible but cannot be changed until the connection returns. */
-  hostDisconnectNotice: { hostID: string; hostName: string } | null;
   hostStatus: HostStatus | null;
   selectedProjectID: string | null;
   selectedThreadID: string | null;
@@ -159,7 +156,6 @@ interface AppStoreState {
   markHostDisconnected: (hostID: string) => void;
   markHostRevoked: (hostID: string) => void;
   clearHostConnectionError: (hostID: string) => void;
-  clearHostDisconnectNotice: (hostID?: string) => void;
   startHostListen: (bindAddress?: string) => Promise<void>;
   stopHostListen: () => Promise<void>;
   refreshHostStatus: () => Promise<void>;
@@ -354,7 +350,7 @@ function hostActionError(
   const message = String(error);
   if (
     !isLocalHost(hostID)
-    && /environment .+ is offline|remote maxx disconnected|not connected|connection (?:closed|lost)/i.test(message)
+    && isHostConnectionError(error)
   ) {
     const hostName = state.remoteSessions.find((session) => session.host.id === hostID)?.host.name
       ?? state.hostStatus?.remotes.find((host) => host.id === hostID)?.name
@@ -415,7 +411,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   workspace: null,
   selectedHostID: LOCAL_HOST_ID,
   remoteSessions: [],
-  hostDisconnectNotice: null,
   hostStatus: null,
   selectedProjectID: null,
   selectedThreadID: null,
@@ -473,7 +468,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             void get().refreshHostStatus();
           } else if (message.event === "host://connected" || message.event === "host://status-changed") {
             if (message.event === "host://connected") {
-              get().clearHostDisconnectNotice(message.hostId);
               get().clearHostConnectionError(message.hostId);
             }
             void get().refreshHostStatus();
@@ -601,10 +595,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         return {
           hostStatus,
           remoteSessions: catalog.remotes,
-          ...(state.hostDisconnectNotice
-            && connectedHostIDs.has(state.hostDisconnectNotice.hostID)
-            ? { hostDisconnectNotice: null }
-            : {}),
           ...(state.errorHostID
             && connectedHostIDs.has(state.errorHostID)
             && state.error?.includes(" is offline.")
@@ -627,9 +617,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           { ...host, kind: "remote" },
           workspace,
         ).remotes,
-        hostDisconnectNotice: state.hostDisconnectNotice?.hostID === host.id
-          ? null
-          : state.hostDisconnectNotice,
         error: null,
         errorHostID: null,
       }));
@@ -654,9 +641,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
       selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
       workspace: localBefore,
-      hostDisconnectNotice: state.hostDisconnectNotice?.hostID === hostID
-        ? null
-        : state.hostDisconnectNotice,
     }));
     await get().refreshHostStatus();
   },
@@ -680,12 +664,16 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   markHostDisconnected: (hostID) => set((state) => ({
-    hostDisconnectNotice: {
-      hostID,
-      hostName: state.remoteSessions.find((session) => session.host.id === hostID)?.host.name
-        ?? state.hostStatus?.remotes.find((host) => host.id === hostID)?.name
-        ?? "Remote host",
-    },
+    hostStatus: state.hostStatus
+      ? {
+          ...state.hostStatus,
+          remotes: state.hostStatus.remotes.map((remote) =>
+            remote.id === hostID
+              ? { ...remote, connected: false, error: "Connection lost. Retrying…" }
+              : remote,
+          ),
+        }
+      : state.hostStatus,
   })),
 
   markHostRevoked: (hostID) => set((state) => ({
@@ -693,9 +681,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
     selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
     selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
-    hostDisconnectNotice: state.hostDisconnectNotice?.hostID === hostID
-      ? null
-      : state.hostDisconnectNotice,
     hostStatus: state.hostStatus
       ? {
           ...state.hostStatus,
@@ -711,13 +696,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     state.errorHostID === hostID && state.error?.includes(" is offline.")
       ? { error: null, errorHostID: null }
       : {}
-  )),
-
-  clearHostDisconnectNotice: (hostID) => set((state) => (
-    !state.hostDisconnectNotice
-      || (hostID !== undefined && state.hostDisconnectNotice.hostID !== hostID)
-      ? {}
-      : { hostDisconnectNotice: null }
   )),
 
   startHostListen: async (bindAddress) => {

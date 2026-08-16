@@ -12,7 +12,6 @@ function seedThreadPanels(threadID: string | null = "thread-a") {
   useAppStore.setState({
     workspace: null,
     remoteSessions: [],
-    hostDisconnectNotice: null,
     hostStatus: null,
     selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: "project",
@@ -29,7 +28,6 @@ afterEach(() => {
   useAppStore.setState({
     workspace: null,
     remoteSessions: [],
-    hostDisconnectNotice: null,
     selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: null,
     selectedThreadID: null,
@@ -469,7 +467,6 @@ describe("additive remote hosts", () => {
     useAppStore.setState({
       error: "Mac mini is offline. Its projects and chats remain available to read, but messages and changes require it to reconnect.",
       errorHostID: "mini",
-      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
       remoteSessions: [{
         host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
         workspace: cachedRemote,
@@ -500,7 +497,6 @@ describe("additive remote hosts", () => {
 
     expect(useAppStore.getState().error).toBeNull();
     expect(useAppStore.getState().errorHostID).toBeNull();
-    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
   });
 
   it("keeps the in-memory remote snapshot when an offline cache read fails", async () => {
@@ -580,6 +576,25 @@ describe("additive remote hosts", () => {
         host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
         workspace: sampleWorkspace("/Users/scott/mini", "remote-project"),
       }],
+      hostStatus: {
+        id: "local-id",
+        name: "This Mac",
+        protocolVersion: 2,
+        listening: false,
+        bindAddress: null,
+        shareAddress: null,
+        pairing: null,
+        remotes: [{
+          id: "mini",
+          name: "Mac mini",
+          address: "100.64.0.2:7422",
+          capabilities: ["workspace-read"],
+          connected: true,
+          lastEventCursor: 0,
+          error: "",
+        }],
+        pairedDevices: [],
+      },
     });
 
     useAppStore.getState().markHostDisconnected("mini");
@@ -589,9 +604,10 @@ describe("additive remote hosts", () => {
     expect(useAppStore.getState().selectedProjectID).toBe("remote-project");
     expect(useAppStore.getState().selectedThreadID).toBe("thread-a");
     expect(useAppStore.getState().workspace).toBe(local);
-    expect(useAppStore.getState().hostDisconnectNotice).toEqual({
-      hostID: "mini",
-      hostName: "Mac mini",
+    expect(useAppStore.getState().hostStatus?.remotes[0]).toMatchObject({
+      id: "mini",
+      connected: false,
+      error: "Connection lost. Retrying…",
     });
   });
 
@@ -636,7 +652,6 @@ describe("additive remote hosts", () => {
         host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
         workspace: sampleWorkspace("/Users/scott/mini", "remote-project"),
       }],
-      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
     });
 
     useAppStore.getState().markHostRevoked("mini");
@@ -645,17 +660,6 @@ describe("additive remote hosts", () => {
     expect(useAppStore.getState().selectedHostID).toBe(LOCAL_HOST_ID);
     expect(useAppStore.getState().selectedProjectID).toBeNull();
     expect(useAppStore.getState().selectedThreadID).toBeNull();
-    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
-  });
-
-  it("clears the disconnect notice when the remote reconnects", () => {
-    useAppStore.setState({
-      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
-    });
-
-    useAppStore.getState().clearHostDisconnectNotice("mini");
-
-    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
   });
 });
 
