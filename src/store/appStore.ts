@@ -84,6 +84,7 @@ import type { GitEnvironmentMode } from "../git";
 import type { SideChatRequest } from "../sideChat";
 
 let listenersStarted = false;
+let hostStatusRefreshSequence = 0;
 const initialDefaultRuntime = loadDefaultRuntime();
 
 interface AppStoreState {
@@ -91,7 +92,8 @@ interface AppStoreState {
   selectedHostID: string;
   remoteSessions: RemoteSession[];
   /** The last remote host that disconnected unexpectedly. Kept separate from
-   * the general error so the main shell can explain why its projects vanished. */
+   * the general error so the main shell can explain that its cached projects
+   * remain visible but cannot be changed until the connection returns. */
   hostDisconnectNotice: { hostID: string; hostName: string } | null;
   hostStatus: HostStatus | null;
   selectedProjectID: string | null;
@@ -139,6 +141,8 @@ interface AppStoreState {
   /** Experimental access to native provider terminal surfaces. */
   terminalModeEnabled: boolean;
   error: string | null;
+  /** Identifies an offline error so only that host's reconnect clears it. */
+  errorHostID: string | null;
 
   bootstrap: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -151,7 +155,10 @@ interface AppStoreState {
   setNewThreadProject: (projectID: string | null, hostID?: string) => void;
   connectHost: (address: string, code: string) => Promise<void>;
   disconnectHost: (hostID: string) => Promise<void>;
+  revokePairedDevice: (peerID: string) => Promise<void>;
   markHostDisconnected: (hostID: string) => void;
+  markHostRevoked: (hostID: string) => void;
+  clearHostConnectionError: (hostID: string) => void;
   clearHostDisconnectNotice: (hostID?: string) => void;
   startHostListen: (bindAddress?: string) => Promise<void>;
   stopHostListen: () => Promise<void>;
@@ -339,6 +346,27 @@ function hostForProject(
   return remote?.host.id ?? fallback;
 }
 
+function hostActionError(
+  error: unknown,
+  hostID: string,
+  state: Pick<AppStoreState, "remoteSessions" | "hostStatus">,
+): Pick<AppStoreState, "error" | "errorHostID"> {
+  const message = String(error);
+  if (
+    !isLocalHost(hostID)
+    && /environment .+ is offline|remote maxx disconnected|not connected|connection (?:closed|lost)/i.test(message)
+  ) {
+    const hostName = state.remoteSessions.find((session) => session.host.id === hostID)?.host.name
+      ?? state.hostStatus?.remotes.find((host) => host.id === hostID)?.name
+      ?? "Remote Maxx";
+    return {
+      error: `${hostName} is offline. Its projects and chats remain available to read, but messages and changes require it to reconnect.`,
+      errorHostID: hostID,
+    };
+  }
+  return { error: message, errorHostID: null };
+}
+
 export const useAppStore = create<AppStoreState>((set, get) => {
   const dispatchQueuedMessage = async (message: QueuedMessage): Promise<string> => {
     const prepared = await uploadImagesForHost(message.hostID, message.imagePaths);
@@ -417,6 +445,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   showProviderDiagnostics: loadShowProviderDiagnostics(),
   terminalModeEnabled: loadTerminalModeEnabled(),
   error: null,
+  errorHostID: null,
 
   bootstrap: async () => {
     await get().refreshHostStatus();
@@ -439,8 +468,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           } else if (message.event === "host://disconnected") {
             get().markHostDisconnected(message.hostId);
             void get().refreshHostStatus();
+          } else if (message.event === "host://revoked") {
+            get().markHostRevoked(message.hostId);
+            void get().refreshHostStatus();
           } else if (message.event === "host://connected" || message.event === "host://status-changed") {
-            if (message.event === "host://connected") get().clearHostDisconnectNotice(message.hostId);
+            if (message.event === "host://connected") {
+              get().clearHostDisconnectNotice(message.hostId);
+              get().clearHostConnectionError(message.hostId);
+            }
             void get().refreshHostStatus();
           }
         });
@@ -495,6 +530,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           ),
         ),
         error: null,
+        errorHostID: null,
       }));
       // Profiles may disable the stored default (toggle, import, older builds).
       // Reconcile after each workspace load so Settings and new chats stay valid.
@@ -520,6 +556,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           session.host.id === hostID ? { ...session, workspace } : session,
         ),
         error: null,
+        errorHostID: null,
       }));
     } catch (error) {
       set({ error: String(error) });
@@ -527,20 +564,29 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   refreshHostStatus: async () => {
+    const refreshSequence = ++hostStatusRefreshSequence;
     try {
       const hostStatus = await ipc.hostStatus();
+      const previousSessions = get().remoteSessions;
       const sessions = await Promise.all(
-        hostStatus.remotes.filter((host) => host.connected).map(async (host) => {
+        hostStatus.remotes.map(async (host) => {
           try {
             return {
               host: { id: host.id, name: host.name, kind: "remote" as const, address: host.address },
               workspace: await ipc.workspaceSnapshot(host.id),
             };
           } catch {
-            return null;
+            const previous = previousSessions.find((session) => session.host.id === host.id);
+            return previous
+              ? {
+                  host: { id: host.id, name: host.name, kind: "remote" as const, address: host.address },
+                  workspace: previous.workspace,
+                }
+              : null;
           }
         }),
       );
+      if (refreshSequence !== hostStatusRefreshSequence) return;
       set((state) => {
         let catalog = emptyCatalog(
           state.workspace ?? catalogFromState(state).local,
@@ -570,6 +616,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           ? null
           : state.hostDisconnectNotice,
         error: null,
+        errorHostID: null,
       }));
       await get().refreshHostStatus();
       await get().refresh();
@@ -599,11 +646,25 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     await get().refreshHostStatus();
   },
 
+  revokePairedDevice: async (peerID) => {
+    set({ error: null, errorHostID: null });
+    try {
+      await ipc.hostRevokePeer(peerID);
+      set((state) => ({
+        hostStatus: state.hostStatus
+          ? {
+              ...state.hostStatus,
+              pairedDevices: state.hostStatus.pairedDevices.filter((device) => device.id !== peerID),
+            }
+          : state.hostStatus,
+      }));
+      await get().refreshHostStatus();
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+
   markHostDisconnected: (hostID) => set((state) => ({
-    remoteSessions: detachRemote(catalogFromState(state), hostID).remotes,
-    selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
-    selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
-    selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
     hostDisconnectNotice: {
       hostID,
       hostName: state.remoteSessions.find((session) => session.host.id === hostID)?.host.name
@@ -611,6 +672,31 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         ?? "Remote host",
     },
   })),
+
+  markHostRevoked: (hostID) => set((state) => ({
+    remoteSessions: detachRemote(catalogFromState(state), hostID).remotes,
+    selectedHostID: state.selectedHostID === hostID ? LOCAL_HOST_ID : state.selectedHostID,
+    selectedProjectID: state.selectedHostID === hostID ? null : state.selectedProjectID,
+    selectedThreadID: state.selectedHostID === hostID ? null : state.selectedThreadID,
+    hostDisconnectNotice: state.hostDisconnectNotice?.hostID === hostID
+      ? null
+      : state.hostDisconnectNotice,
+    hostStatus: state.hostStatus
+      ? {
+          ...state.hostStatus,
+          remotes: state.hostStatus.remotes.filter((remote) => remote.id !== hostID),
+        }
+      : state.hostStatus,
+    ...(state.errorHostID === hostID && state.error?.includes(" is offline.")
+      ? { error: null, errorHostID: null }
+      : {}),
+  })),
+
+  clearHostConnectionError: (hostID) => set((state) => (
+    state.errorHostID === hostID && state.error?.includes(" is offline.")
+      ? { error: null, errorHostID: null }
+      : {}
+  )),
 
   clearHostDisconnectNotice: (hostID) => set((state) => (
     !state.hostDisconnectNotice
@@ -620,7 +706,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   )),
 
   startHostListen: async (bindAddress) => {
-    set({ error: null });
+    set({ error: null, errorHostID: null });
     try {
       await ipc.hostListen(bindAddress);
       await get().refreshHostStatus();
@@ -630,7 +716,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   stopHostListen: async () => {
-    set({ error: null });
+    set({ error: null, errorHostID: null });
     try {
       await ipc.hostUnlisten();
       await get().refreshHostStatus();
@@ -705,8 +791,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   }),
 
   addProject: async (folderPath, hostID) => {
+    const targetHost = routeHostId(hostID ?? get().selectedHostID);
     try {
-      const targetHost = routeHostId(hostID ?? get().selectedHostID);
       const project = await ipc.addProject(folderPath, targetHost);
       await get().refresh();
       set({
@@ -721,7 +807,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         summaryPopoverOpen: false,
       });
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, targetHost, get()));
     }
   },
 
@@ -755,10 +841,10 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     surface = "gui",
     environment = "current",
   ) => {
+    const hostID = projectID
+      ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
+      : LOCAL_HOST_ID;
     try {
-      const hostID = projectID
-        ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
-        : LOCAL_HOST_ID;
       const thread = projectID
         ? effort || speed || surface === "terminal" || environment === "worktree"
           ? await ipc.addThreadWithRuntime(
@@ -787,7 +873,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       });
       return thread;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return null;
     }
   },
@@ -825,14 +911,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     }
   },
 
   updateThreadRuntime: async (projectID, threadID, provider, model, effort = null, speed = null) => {
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       await ipc.updateThread(projectID, threadID, {
         provider,
         model,
@@ -842,7 +928,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       }, hostID);
       await get().refresh();
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
     }
   },
 
@@ -871,10 +957,10 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       environment,
     );
     if (!thread) return false;
+    const hostID = projectID
+      ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
+      : routeHostId(requestedHostID ?? LOCAL_HOST_ID);
     try {
-      const hostID = projectID
-        ? hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID)
-        : routeHostId(requestedHostID ?? LOCAL_HOST_ID);
       const ownerProjectID = projectID ?? CHATS_PROJECT_ID;
       const prepared = await uploadImagesForHost(hostID, surface === "terminal" ? [] : imagePaths);
       const turnID = await ipc.sendPrompt(
@@ -890,7 +976,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       }));
       await get().refresh();
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     }
     return true;
@@ -932,7 +1018,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     } finally {
       setMessageSending(selectedThreadID, false);
@@ -940,13 +1026,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   createSideChat: async (projectID, parentThreadID) => {
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       const thread = await ipc.createSideChat(projectID, parentThreadID, hostID);
       await get().refresh();
       return thread;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return null;
     }
   },
@@ -986,7 +1072,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     } finally {
       setMessageSending(threadID, false);
@@ -1011,12 +1097,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           activeTurnByThread: setActiveTurn(state.activeTurnByThread, threadID, turnID),
           queuedMessagesByThread,
           error: null,
+          errorHostID: null,
         };
       });
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, message.hostID, get()));
       return false;
     } finally {
       setMessageSending(threadID, false);
@@ -1050,12 +1137,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         const queuedMessagesByThread = { ...state.queuedMessagesByThread };
         if (remaining.length > 0) queuedMessagesByThread[threadID] = remaining;
         else delete queuedMessagesByThread[threadID];
-        return { queuedMessagesByThread, error: null };
+        return { queuedMessagesByThread, error: null, errorHostID: null };
       });
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, message.hostID, get()));
       return false;
     } finally {
       setMessageSending(threadID, false);
@@ -1101,12 +1188,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   },
 
   resolveRequest: async (projectID, threadID, requestID, decision) => {
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       await ipc.resolveRequest(projectID, threadID, requestID, decision, hostID);
       await get().refresh();
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
     }
   },
 
@@ -1148,8 +1235,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
   startSideThread: async (projectID, parentThreadID, agentIDs, prompt, imagePaths, annotations = []) => {
     if ((!prompt.trim() && imagePaths.length === 0 && annotations.length === 0) || agentIDs.length === 0) return false;
+    const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     try {
-      const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
       const prepared = await uploadImagesForHost(hostID, imagePaths);
       const thread = await ipc.startSideThread(
         projectID,
@@ -1170,7 +1257,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     }
   },
@@ -1209,7 +1296,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      set(hostActionError(error, hostID, get()));
       return false;
     } finally {
       setMessageSending(threadID, false);

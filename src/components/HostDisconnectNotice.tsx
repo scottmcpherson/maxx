@@ -2,8 +2,8 @@ import { useAppStore } from "../store/appStore";
 import { Icons } from "./Icons";
 
 /**
- * Explains why a remote project disappeared from the sidebar after its
- * connection dropped. This lives outside the zoom surface so it remains
+ * Explains why a cached remote project is temporarily read-only after its
+ * connection drops. This lives outside the zoom surface so it remains
  * visible even when the sidebar is collapsed or another pane is open.
  */
 export function HostDisconnectNotice() {
@@ -18,7 +18,7 @@ export function HostDisconnectNotice() {
       <Icons.globe size={16} />
       <span className="host-disconnect-notice-copy">
         <strong>Connection to {notice.hostName} lost</strong>
-        <small>Remote projects are hidden until the connection returns.</small>
+        <small>Its projects and chats remain visible, but need the connection to make changes.</small>
       </span>
       <button
         type="button"

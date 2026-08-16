@@ -162,12 +162,8 @@ try {
     const status = await client.request("host_status");
     return status.remotes.find((remote) => remote.id === remoteID)?.connected === false;
   }, "client did not detect the stopped host");
-
-  await host.request("host_listen", { bindAddress: address });
-  await waitFor(async () => {
-    const status = await client.request("host_status");
-    return status.remotes.find((remote) => remote.id === remoteID)?.connected === true;
-  }, "client did not reconnect with its Keychain credential");
+  const cachedWhileOffline = await client.request("workspace_snapshot", { hostId: remoteID });
+  assert(Array.isArray(cachedWhileOffline.projects), "offline client could not read its cached remote workspace");
 
   const previousClient = client;
   previousClient.shutdown();
@@ -176,19 +172,30 @@ try {
   await client.ready;
   await waitFor(async () => {
     const status = await client.request("host_status");
+    return status.remotes.find((remote) => remote.id === remoteID)?.connected === false;
+  }, "restarted client did not retain the remembered offline host");
+  const cachedAfterRestart = await client.request("workspace_snapshot", { hostId: remoteID });
+  assert(Array.isArray(cachedAfterRestart.projects), "restarted client lost its cached remote workspace while offline");
+
+  await host.request("host_listen", { bindAddress: address });
+  await waitFor(async () => {
+    const status = await client.request("host_status");
     return status.remotes.find((remote) => remote.id === remoteID)?.connected === true;
   }, "restarted client process did not recover its remembered host connection");
   const restoredSnapshot = await client.request("workspace_snapshot", { hostId: remoteID });
   assert(Array.isArray(restoredSnapshot.projects), "restarted client could not read the recovered remote workspace");
 
   await host.request("host_revoke_peer", { peerId: clientStatus.id });
+  const hostAfterRevoke = await host.request("host_status");
+  assert(
+    !hostAfterRevoke.pairedDevices.some((device) => device.id === clientStatus.id),
+    "revoked device remained in the host's paired device list",
+  );
   await waitFor(async () => {
     const status = await client.request("host_status");
-    const remote = status.remotes.find((candidate) => candidate.id === remoteID);
-    return remote?.connected === false && remote.error.length > 0;
-  }, "revocation did not disconnect and reject the remembered client");
+    return !status.remotes.some((candidate) => candidate.id === remoteID);
+  }, "revocation did not remove the remembered client connection");
 
-  await client.request("host_disconnect", { hostId: remoteID });
   remoteID = null;
   const finalHost = await host.request("host_status");
   const finalClient = await client.request("host_status");
@@ -200,6 +207,7 @@ try {
     pairingConsumed: true,
     keychainReconnect: true,
     clientRestartRecovery: true,
+    offlineWorkspaceRetention: true,
     revocation: true,
     remoteWorkspace: true,
     capabilitiesEnforced: true,

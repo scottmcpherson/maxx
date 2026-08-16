@@ -438,6 +438,7 @@ function ConnectionsSettingsSection() {
   const stopHostListen = useAppStore((state) => state.stopHostListen);
   const connectHost = useAppStore((state) => state.connectHost);
   const disconnectHost = useAppStore((state) => state.disconnectHost);
+  const revokePairedDevice = useAppStore((state) => state.revokePairedDevice);
   const refreshHostStatus = useAppStore((state) => state.refreshHostStatus);
   const error = useAppStore((state) => state.error);
   const [address, setAddress] = useState("");
@@ -505,10 +506,7 @@ function ConnectionsSettingsSection() {
     setBusy(true);
     setActionError(null);
     try {
-      await ipc.hostRevokePeer(peerId);
-      await refreshHostStatus();
-    } catch (cause) {
-      setActionError(String(cause));
+      await revokePairedDevice(peerId);
     } finally {
       setBusy(false);
     }

@@ -808,26 +808,42 @@ async fn supervise_host(state: Arc<SidecarState>, host_id: String, shutdown: Can
     while !shutdown.is_cancelled() && state.hosts.is_remembered(&host_id) {
         let client = match state.hosts.connected_client(&host_id).await {
             Some(client) => client,
-            None => match state.hosts.reconnect(&host_id).await {
-                Ok(client) => client,
-                Err(error) => {
-                    state
-                        .hosts
-                        .set_connection_error(&host_id, error.clone())
-                        .await;
-                    emit_remote_event_to_renderer(
-                        &state.outbound,
-                        &host_id,
-                        "host://status-changed",
-                        json!({"error": error}),
-                    );
-                    if wait_for_retry(&shutdown, retry_seconds).await {
-                        break;
+            None => {
+                match state.hosts.reconnect(&host_id).await {
+                    Ok(client) => client,
+                    Err(error) => {
+                        if error == "The device credential was rejected" {
+                            if let Err(forget_error) =
+                                state.hosts.forget_rejected_remote(&host_id).await
+                            {
+                                log::warn!("could not forget revoked environment {host_id}: {forget_error}");
+                            }
+                            emit_remote_event_to_renderer(
+                                &state.outbound,
+                                &host_id,
+                                "host://revoked",
+                                Value::Null,
+                            );
+                            break;
+                        }
+                        state
+                            .hosts
+                            .set_connection_error(&host_id, error.clone())
+                            .await;
+                        emit_remote_event_to_renderer(
+                            &state.outbound,
+                            &host_id,
+                            "host://status-changed",
+                            json!({"error": error}),
+                        );
+                        if wait_for_retry(&shutdown, retry_seconds).await {
+                            break;
+                        }
+                        retry_seconds = (retry_seconds * 2).min(30);
+                        continue;
                     }
-                    retry_seconds = (retry_seconds * 2).min(30);
-                    continue;
                 }
-            },
+            }
         };
         retry_seconds = 1;
         emit_remote_event_to_renderer(
@@ -882,6 +898,7 @@ async fn supervise_host(state: Arc<SidecarState>, host_id: String, shutdown: Can
         }
         retry_seconds = (retry_seconds * 2).min(30);
     }
+    state.host_supervisors.lock().await.remove(&host_id);
 }
 
 async fn wait_for_retry(shutdown: &CancellationToken, seconds: u64) -> bool {

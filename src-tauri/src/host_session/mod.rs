@@ -15,6 +15,7 @@ mod pairing;
 mod peers;
 mod protocol;
 mod settings;
+mod workspace_cache;
 
 pub use catalog::{
     apply_add_project, deduplicate_project_folders, hosted_projects, HostCatalog, HostInfo,

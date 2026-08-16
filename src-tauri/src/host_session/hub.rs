@@ -6,6 +6,7 @@ use super::net::{
     HostAuthenticator, HostClient, HostHandler, ListenHandle,
 };
 use super::pairing::{PairingInvitation, PairingManager};
+use super::workspace_cache::RemoteWorkspaceCache;
 use super::{
     AccessPreset, Capability, EventJournal, HostInfo, HostSettingsStore, PairedDevice, PeerStore,
     RememberedPeer, LOCAL_HOST_ID, PROTOCOL_VERSION,
@@ -74,6 +75,7 @@ pub struct HostHub {
     listen_port: u16,
     remotes: Mutex<HashMap<String, Arc<HostClient>>>,
     connection_errors: Mutex<HashMap<String, String>>,
+    workspace_cache: Arc<RemoteWorkspaceCache>,
 }
 
 impl Default for HostHub {
@@ -116,6 +118,7 @@ impl HostHub {
             Arc::new(KeychainCredentialStore),
             Arc::new(EventJournal::load_default()),
             Arc::new(HostSettingsStore::load_default()),
+            Arc::new(RemoteWorkspaceCache::load_default()),
             configured_listen_port(),
         )
     }
@@ -133,6 +136,7 @@ impl HostHub {
             credentials,
             events,
             settings,
+            Arc::new(RemoteWorkspaceCache::load_default()),
             super::DEFAULT_LISTEN_PORT,
         )
     }
@@ -143,6 +147,7 @@ impl HostHub {
         credentials: Arc<dyn CredentialStore>,
         events: Arc<EventJournal>,
         settings: Arc<HostSettingsStore>,
+        workspace_cache: Arc<RemoteWorkspaceCache>,
         listen_port: u16,
     ) -> Self {
         Self {
@@ -156,6 +161,7 @@ impl HostHub {
             listen_port,
             remotes: Mutex::new(HashMap::new()),
             connection_errors: Mutex::new(HashMap::new()),
+            workspace_cache,
         }
     }
 
@@ -397,6 +403,9 @@ impl HostHub {
             }
             return Err(error);
         }
+        if let Err(error) = self.workspace_cache.remove(host_id) {
+            log::warn!("could not remove cached workspace for {host_id}: {error}");
+        }
         self.connection_errors.lock().await.remove(host_id);
         if let Some(client) = self.remotes.lock().await.remove(host_id) {
             let _ = tokio::time::timeout(
@@ -455,7 +464,36 @@ impl HostHub {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
-        self.client(host_id).await?.request(method, params).await
+        if method != "workspace_snapshot" {
+            return self.client(host_id).await?.request(method, params).await;
+        }
+
+        match self.client(host_id).await {
+            Ok(client) => match client.request(method, params).await {
+                Ok(workspace) => {
+                    if let Err(error) = self.workspace_cache.save(host_id, &workspace) {
+                        log::warn!("could not cache workspace for {host_id}: {error}");
+                    }
+                    Ok(workspace)
+                }
+                Err(error) => self.workspace_cache.get(host_id).ok_or(error),
+            },
+            Err(error) => self.workspace_cache.get(host_id).ok_or(error),
+        }
+    }
+
+    pub async fn forget_rejected_remote(&self, host_id: &str) -> Result<(), String> {
+        let credential_error = self.credentials.remove(host_id).err();
+        let peer_error = self.peers.forget_outgoing(host_id).err();
+        let cache_error = self.workspace_cache.remove(host_id).err();
+        self.connection_errors.lock().await.remove(host_id);
+        if let Some(client) = self.remotes.lock().await.remove(host_id) {
+            client.close().await;
+        }
+        credential_error
+            .or(peer_error)
+            .or(cache_error)
+            .map_or(Ok(()), Err)
     }
 
     pub fn remembered_ids(&self) -> Vec<String> {

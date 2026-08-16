@@ -13,6 +13,7 @@ function seedThreadPanels(threadID: string | null = "thread-a") {
     workspace: null,
     remoteSessions: [],
     hostDisconnectNotice: null,
+    hostStatus: null,
     selectedHostID: LOCAL_HOST_ID,
     selectedProjectID: "project",
     selectedThreadID: threadID,
@@ -43,6 +44,7 @@ afterEach(() => {
     queuedMessagesByThread: {},
     sendingMessageByThread: {},
     error: null,
+    errorHostID: null,
     refresh: originalRefresh,
     refreshHostStatus: originalRefreshHostStatus,
     defaultRuntime: { provider: "codex", model: "Default", effort: null, speed: null },
@@ -429,7 +431,106 @@ describe("additive remote hosts", () => {
     vi.restoreAllMocks();
   });
 
-  it("removes a remote session immediately when its socket closes", () => {
+  it("hydrates a remembered offline remote from its cached workspace after restart", async () => {
+    const local = sampleWorkspace("/Users/scott/macbook", "local-project");
+    const cachedRemote = sampleWorkspace("/Users/scott/mini", "remote-project");
+    useAppStore.setState({ workspace: local, remoteSessions: [], hostStatus: null });
+    vi.spyOn(ipc, "hostStatus").mockResolvedValue({
+      id: "local-id",
+      name: "This Mac",
+      protocolVersion: 2,
+      listening: false,
+      bindAddress: null,
+      shareAddress: null,
+      pairing: null,
+      remotes: [{
+        id: "mini",
+        name: "Mac mini",
+        address: "100.64.0.2:7422",
+        capabilities: ["workspace-read"],
+        connected: false,
+        lastEventCursor: 0,
+        error: "Connection lost. Retrying…",
+      }],
+      pairedDevices: [],
+    });
+    vi.spyOn(ipc, "workspaceSnapshot").mockResolvedValue(cachedRemote);
+
+    await useAppStore.getState().refreshHostStatus();
+
+    expect(useAppStore.getState().remoteSessions).toEqual([{
+      host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+      workspace: cachedRemote,
+    }]);
+  });
+
+  it("keeps the in-memory remote snapshot when an offline cache read fails", async () => {
+    const remote = sampleWorkspace("/Users/scott/mini", "remote-project");
+    useAppStore.setState({
+      remoteSessions: [{
+        host: { id: "mini", name: "Old name", kind: "remote", address: "old-address" },
+        workspace: remote,
+      }],
+    });
+    vi.spyOn(ipc, "hostStatus").mockResolvedValue({
+      id: "local-id",
+      name: "This Mac",
+      protocolVersion: 2,
+      listening: false,
+      bindAddress: null,
+      shareAddress: null,
+      pairing: null,
+      remotes: [{
+        id: "mini",
+        name: "Mac mini",
+        address: "100.64.0.2:7422",
+        capabilities: ["workspace-read"],
+        connected: false,
+        lastEventCursor: 0,
+        error: "Connection lost. Retrying…",
+      }],
+      pairedDevices: [],
+    });
+    vi.spyOn(ipc, "workspaceSnapshot").mockRejectedValue(new Error("offline"));
+
+    await useAppStore.getState().refreshHostStatus();
+
+    expect(useAppStore.getState().remoteSessions).toEqual([{
+      host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+      workspace: remote,
+    }]);
+  });
+
+  it("removes a revoked device from Settings immediately", async () => {
+    useAppStore.setState({
+      hostStatus: {
+        id: "mini-id",
+        name: "Mac mini",
+        protocolVersion: 2,
+        listening: true,
+        bindAddress: "100.64.0.2:7422",
+        shareAddress: "100.64.0.2:7422",
+        pairing: null,
+        remotes: [],
+        pairedDevices: [{
+          id: "macbook-id",
+          name: "MacBook Pro",
+          capabilities: ["workspace-read"],
+          createdAt: 1,
+          lastSeenAt: 2,
+        }],
+      },
+      refreshHostStatus: vi.fn().mockResolvedValue(undefined),
+    });
+    const revoke = vi.spyOn(ipc, "hostRevokePeer").mockResolvedValue(undefined);
+
+    await useAppStore.getState().revokePairedDevice("macbook-id");
+
+    expect(revoke).toHaveBeenCalledWith("macbook-id");
+    expect(useAppStore.getState().hostStatus?.pairedDevices).toEqual([]);
+  });
+
+  it("keeps a remote session and its selection when its socket closes", () => {
     const local = sampleWorkspace("/Users/scott/macbook", "local-project");
     useAppStore.setState({
       workspace: local,
@@ -444,14 +545,68 @@ describe("additive remote hosts", () => {
 
     useAppStore.getState().markHostDisconnected("mini");
 
-    expect(useAppStore.getState().remoteSessions).toEqual([]);
-    expect(useAppStore.getState().selectedHostID).toBe(LOCAL_HOST_ID);
-    expect(useAppStore.getState().selectedProjectID).toBeNull();
+    expect(useAppStore.getState().remoteSessions[0]?.host.id).toBe("mini");
+    expect(useAppStore.getState().selectedHostID).toBe("mini");
+    expect(useAppStore.getState().selectedProjectID).toBe("remote-project");
+    expect(useAppStore.getState().selectedThreadID).toBe("thread-a");
     expect(useAppStore.getState().workspace).toBe(local);
     expect(useAppStore.getState().hostDisconnectNotice).toEqual({
       hostID: "mini",
       hostName: "Mac mini",
     });
+  });
+
+  it("shows a named offline message and clears it when that host reconnects", async () => {
+    const local = sampleWorkspace("/Users/scott/macbook", "local-project");
+    useAppStore.setState({
+      workspace: local,
+      selectedHostID: "mini",
+      selectedProjectID: "remote-project",
+      selectedThreadID: "thread-a",
+      remoteSessions: [{
+        host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+        workspace: sampleWorkspace("/Users/scott/mini", "remote-project"),
+      }],
+    });
+    vi.spyOn(ipc, "sendPrompt").mockRejectedValue(
+      new Error("Error invoking remote method 'maxx:invoke': Error: Environment mini is offline"),
+    );
+
+    await expect(useAppStore.getState().sendPrompt("Hi", [])).resolves.toBe(false);
+
+    expect(useAppStore.getState().error).toBe(
+      "Mac mini is offline. Its projects and chats remain available to read, but messages and changes require it to reconnect.",
+    );
+    expect(useAppStore.getState().errorHostID).toBe("mini");
+
+    useAppStore.getState().clearHostConnectionError("other-host");
+    expect(useAppStore.getState().error).not.toBeNull();
+    useAppStore.getState().clearHostConnectionError("mini");
+    expect(useAppStore.getState().error).toBeNull();
+    expect(useAppStore.getState().errorHostID).toBeNull();
+  });
+
+  it("removes a remote session when the host revokes this device", () => {
+    const local = sampleWorkspace("/Users/scott/macbook", "local-project");
+    useAppStore.setState({
+      workspace: local,
+      selectedHostID: "mini",
+      selectedProjectID: "remote-project",
+      selectedThreadID: "thread-a",
+      remoteSessions: [{
+        host: { id: "mini", name: "Mac mini", kind: "remote", address: "100.64.0.2:7422" },
+        workspace: sampleWorkspace("/Users/scott/mini", "remote-project"),
+      }],
+      hostDisconnectNotice: { hostID: "mini", hostName: "Mac mini" },
+    });
+
+    useAppStore.getState().markHostRevoked("mini");
+
+    expect(useAppStore.getState().remoteSessions).toEqual([]);
+    expect(useAppStore.getState().selectedHostID).toBe(LOCAL_HOST_ID);
+    expect(useAppStore.getState().selectedProjectID).toBeNull();
+    expect(useAppStore.getState().selectedThreadID).toBeNull();
+    expect(useAppStore.getState().hostDisconnectNotice).toBeNull();
   });
 
   it("clears the disconnect notice when the remote reconnects", () => {
