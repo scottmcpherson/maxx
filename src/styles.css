@@ -22,6 +22,10 @@
   --font-size-secondary: 12.5px;
   --font-size-meta: 11.5px;
   --line-height-secondary: 1.5;
+  /* Native macOS-style sidebar copy: one size and weight for all primary
+     navigation, project, and chat rows. Smaller text is reserved for metadata. */
+  --sidebar-font-size: 13px;
+  --sidebar-font-weight: 400;
   --purple: #7657ee;
   --green: #6fc58b;
   --red: #e47370;
@@ -274,12 +278,11 @@ body.is-resizing-sidebar .thread-header { transition: none; }
   pointer-events: none;
   -webkit-app-region: no-drag;
 }
-.provider-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); background: transparent; }
 
 /* Cursor-like repository sidebar.
-   Type + contrast tuned toward Codex desktop: slightly larger base, brighter
-   idle list text, and less-dim section chrome so the tree scans more easily. */
+   Type + contrast tuned toward native macOS desktop: a consistent 13px/400
+   base, brighter idle list text, and less-dim section chrome. */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
@@ -288,7 +291,8 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
   flex-direction: column;
   background: var(--bg-sidebar);
   border-right: 1px solid rgba(0,0,0,.2);
-  font-size: 13.5px;
+  font-size: var(--sidebar-font-size);
+  font-weight: var(--sidebar-font-weight);
   --sidebar-text: #dedede;
   --sidebar-text-hover: #e8e8e8;
   --sidebar-label: var(--text-secondary);
@@ -475,7 +479,7 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .sidebar-navigation-scroll { min-height: 0; overflow-y: auto; flex: 1; padding: 2px 0 12px; }
 .repositories-header {
   display: flex; align-items: center;
-  padding: 5px 10px 4px var(--sidebar-content-inset); color: var(--sidebar-label); font-size: 13px;
+  padding: 5px 10px 4px var(--sidebar-content-inset); color: var(--sidebar-label);
 }
 .repositories-disclosure {
   min-width: 0; height: 26px; flex: 1; padding: 0;
@@ -634,7 +638,7 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
   flex: 0 0 auto; max-width: 60px;
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   margin-right: 3px; padding: 2px 0;
-  color: var(--sidebar-meta); font-size: inherit; font-weight: 550; line-height: 1.2;
+  color: var(--sidebar-meta); font-size: inherit; font-weight: inherit; line-height: 1.2;
   transition: opacity .1s; pointer-events: none;
 }
 .project-host-label.is-remote { color: var(--sidebar-label); }
@@ -1891,7 +1895,6 @@ button.git-environment-row:disabled:hover { background: transparent; }
 .context-row { min-height: 28px; display: flex; align-items: center; gap: 8px; color: #aaa; font-size: 11.5px; }
 .context-row svg { color: #777; }
 .context-value { margin-left: auto; max-width: 95px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #747474; font-size: 10.5px; }
-.context-dot { background: var(--purple); }
 .context-session p {
   color: var(--text-secondary);
   font-size: var(--font-size-secondary);
@@ -1917,7 +1920,8 @@ button.git-environment-row:disabled:hover { background: transparent; }
   width: 250px; flex: 0 0 250px; padding: 0 8px 12px;
   background: var(--bg-sidebar);
   border-right: 1px solid rgba(0,0,0,.2);
-  font-size: 13.5px;
+  font-size: var(--sidebar-font-size);
+  font-weight: var(--sidebar-font-weight);
   --sidebar-text: #dedede;
   --sidebar-text-hover: #e8e8e8;
   --sidebar-label: var(--text-secondary);
@@ -1949,7 +1953,7 @@ button.git-environment-row:disabled:hover { background: transparent; }
 }
 .settings-search input {
   flex: 1; min-width: 0; border: 0; background: transparent;
-  color: var(--sidebar-text); font-size: 12.5px;
+  color: var(--sidebar-text); font-size: inherit; font-weight: inherit;
 }
 .settings-search input::placeholder { color: var(--sidebar-meta); }
 .settings-search input:focus { outline: 0; }

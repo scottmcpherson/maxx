@@ -5,6 +5,7 @@ import { summaryToggleAction, summaryToggleActive } from "../summary";
 import { beginWindowDrag } from "../windowDrag";
 import { GitEnvironment } from "./GitEnvironment";
 import { Icons } from "./Icons";
+import { ProviderIcon } from "./ProviderIcon";
 
 /**
  * The summary itself. One body, two containers: the pinned rail and the
@@ -19,9 +20,6 @@ function SummaryBody({
   thread: ChatThread;
   hostID?: string | null;
 }) {
-  const providerColor = useAppStore((state) =>
-    state.workspace?.providerProfiles.find((profile) => profile.provider === thread.provider)?.colorHex,
-  );
   const commands = thread.runtimeEvents.filter((event) => event.kind === EventKind.command).length;
   const fileEvents = thread.runtimeEvents.filter((event) => event.kind === EventKind.fileChange);
   const changedFiles = new Set(fileEvents.flatMap((event) => event.payload.files?.map((file) => file.path) ?? [])).size;
@@ -36,7 +34,7 @@ function SummaryBody({
           <span>{projectName(project)}</span>
         </div>
         <div className="context-row">
-          <span className="provider-dot context-dot" style={{ background: providerColor ?? "#7657ee" }} />
+          <ProviderIcon provider={thread.provider} size={14} />
           <span>{providerDisplayName(thread.provider)}</span>
           <span className="context-value">{thread.model || "Default"}</span>
         </div>
