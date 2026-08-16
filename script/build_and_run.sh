@@ -2,14 +2,14 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="Maxx"
-BUNDLE_ID="com.maxx.app"
+APP_NAME="Maxx Preview"
+BUNDLE_ID="com.maxx.preview"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$ROOT_DIR/release/mac-arm64/Maxx.app"
+APP_BUNDLE="$ROOT_DIR/release/mac-arm64/Maxx Preview.app"
 if [[ "$(uname -m)" == "x86_64" ]]; then
-  APP_BUNDLE="$ROOT_DIR/release/mac/Maxx.app"
+  APP_BUNDLE="$ROOT_DIR/release/mac/Maxx Preview.app"
 fi
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/Maxx"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 RUNTIME_BINARY="$APP_BUNDLE/Contents/Resources/bin/maxx-runtime"
 APP_BINARY_PATTERN="${APP_BINARY//./\.}"
 RUNTIME_BINARY_PATTERN="${RUNTIME_BINARY//./\.}"
@@ -31,7 +31,9 @@ node script/stage_runtime.mjs
 "$ROOT_DIR/node_modules/.bin/tsc" --noEmit
 "$ROOT_DIR/node_modules/.bin/vite" build
 "$ROOT_DIR/node_modules/.bin/tsc" -p electron/tsconfig.json
-"$ROOT_DIR/node_modules/.bin/electron-builder" --mac dir
+"$ROOT_DIR/node_modules/.bin/electron-builder" --mac dir \
+  --config.productName="Maxx Preview" \
+  --config.appId="com.maxx.preview"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE" --args --checkout-build
@@ -53,7 +55,7 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    "$APP_BINARY" --app-smoke
+    "$APP_BINARY" --app-smoke --checkout-build
     open_app
     for _ in {1..50}; do
       pgrep -f "$APP_BINARY_PATTERN" >/dev/null && exit 0

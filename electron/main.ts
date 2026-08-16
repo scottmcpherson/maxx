@@ -41,6 +41,7 @@ const smokeMode = appSmoke || browserSmoke || hermesBrowserSmoke || terminalUiSm
 const smokeUserData = process.argv.find((argument) => argument.startsWith("--browser-smoke-user-data="))?.slice("--browser-smoke-user-data=".length);
 const BEST_BUY_BENCHMARK = "https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat335400050008&id=pcat17071&qp=brand_facet%3DBrand%7EBambu+Lab%5Estorepickupstores_facet%3DStore+Availability+-+In+Store+Pickup%7E885&st=categoryid%24pcmcat335400050008";
 const HERMES_SMOKE_MODEL = "custom:vllm-spark:unsloth/Qwen3.6-35B-A3B-NVFP4";
+const SMOKE_ANNOTATION_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const buildInstance = buildInstanceSettings(
   app.getPath("appData"),
   app.getName(),
@@ -49,8 +50,8 @@ const buildInstance = buildInstanceSettings(
   checkoutBuild,
 );
 
-if (buildInstance.userDataPath) app.setPath("userData", buildInstance.userDataPath);
-else if (smokeMode) app.setPath("userData", smokeUserData || path.join(app.getPath("temp"), `maxx-browser-smoke-${process.pid}`));
+if (smokeMode) app.setPath("userData", smokeUserData || path.join(app.getPath("temp"), `maxx-browser-smoke-${process.pid}`));
+else if (buildInstance.userDataPath) app.setPath("userData", buildInstance.userDataPath);
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "maxx-media", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } },
@@ -66,6 +67,7 @@ let quitting = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
   "workspace_snapshot", "active_turns", "git_status", "git_branches", "git_checkout", "git_create_branch", "git_commit", "git_push",
+  "list_automations", "create_automation", "update_automation", "delete_automation", "run_automation",
   "add_project", "remove_project", "add_thread", "add_chat",
   "add_thread_with_runtime", "remove_thread", "update_thread", "update_profiles",
   "update_title_generation_runtime", "update_agents", "import_agent_image", "send_prompt",
@@ -96,7 +98,7 @@ async function initializeUpdater(): Promise<void> {
   updater = new MaxxUpdater(
     (status) => emitRenderer("updater://status", status),
     () => { quitting = true; },
-    app.isPackaged,
+    app.isPackaged && !buildInstance.userDataPath,
     app.getVersion(),
   );
   await updater.initialize();
@@ -229,6 +231,19 @@ async function createWindow(): Promise<void> {
     dataDirectory: app.getPath("userData"),
     environment: buildInstance.listenPort ? { MAXX_LISTEN_PORT: buildInstance.listenPort } : undefined,
     onEvent: (event, payload) => {
+      if (event === "notification://automation") {
+        const value = payload as { title?: unknown; body?: unknown };
+        if (Notification.isSupported()) {
+          const notification = new Notification({
+            title: typeof value.title === "string" && value.title ? value.title : "Maxx Automation",
+            body: typeof value.body === "string" ? value.body : "An automation finished",
+          });
+          notification.on("click", () => { mainWindow?.show(); mainWindow?.focus(); });
+          notification.show();
+        }
+        emitRenderer(event, payload);
+        return;
+      }
       if (event === "notification://turn-finished") {
         const value = payload as { title?: unknown; terminalState?: unknown };
         if (!mainWindow?.isFocused() && Notification.isSupported()) {
@@ -306,6 +321,33 @@ async function runAppSmoke(): Promise<void> {
   if (voiceWorklet !== true) throw new Error("packaged voice worklet did not load");
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
+  const automation = await runtime!.request("create_automation", {
+    title: "Packaged automation acceptance",
+    kind: "notification",
+    prompt: "Automation delivery verified",
+    schedule: {
+      type: "once",
+      at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      timezone: "UTC",
+    },
+    runtime: null,
+  }, 5_000) as Record<string, JsonValue>;
+  const automationId = String(automation.id ?? "");
+  if (!automationId || automation.status !== "active") throw new Error(`automation creation failed: ${JSON.stringify(automation)}`);
+  await runtime!.request("run_automation", { id: automationId }, 5_000);
+  let automationSmoke: Record<string, JsonValue> | undefined;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const schedules = await runtime!.request("list_automations", {}, 5_000) as Array<Record<string, JsonValue>>;
+    automationSmoke = schedules.find((candidate) => candidate.id === automationId);
+    const lastRun = automationSmoke?.lastRun as Record<string, JsonValue> | undefined;
+    if (lastRun?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const automationLastRun = automationSmoke?.lastRun as Record<string, JsonValue> | undefined;
+  if (automationLastRun?.status !== "completed" || automationSmoke?.status !== "active") {
+    throw new Error(`automation run-now failed: ${JSON.stringify(automationSmoke)}`);
+  }
+  await runtime!.request("delete_automation", { id: automationId }, 5_000);
   // Exercise Git-backed UI against the caller's checkout. A packaged app's
   // resources directory happens to sit under this repository in local builds,
   // but it lives on a read-only, non-Git volume after mounting a downloaded DMG.
@@ -386,6 +428,9 @@ async function runAppSmoke(): Promise<void> {
   // receive that host response instead of deadlocking behind the event.
   runtime!.event("browser.human_input", { tabId: browserTabId });
   await runtime!.request("workspace_snapshot", {}, 5_000);
+  const smokeAnnotationPreview = nativeImage.createFromDataURL(`data:image/png;base64,${SMOKE_ANNOTATION_PNG}`);
+  if (smokeAnnotationPreview.isEmpty()) throw new Error("packaged annotation fixture PNG did not decode");
+  const smokeAnnotationPreviewDataUrl = smokeAnnotationPreview.resize({ width: 96, height: 64, quality: "good" }).toDataURL();
   const turnId = await runtime!.request("send_prompt", {
     projectId,
     threadId,
@@ -405,9 +450,9 @@ async function runAppSmoke(): Promise<void> {
       name: "Example Domain",
       text: "Example Domain",
       instruction: "Make this heading orange",
-      // Exercise the largest preview payload the live annotation capture path
-      // can emit, including transport through Electron and the Rust sidecar.
-      previewDataUrl: `data:image/png;base64,${Buffer.alloc(128 * 1024).toString("base64")}`,
+      // Keep the packaged acceptance fixture visually decodable. Malformed
+      // bytes labeled as PNG mask real preview regressions behind a broken icon.
+      previewDataUrl: smokeAnnotationPreviewDataUrl,
       rect: { x: 10, y: 20, width: 100, height: 30 },
       createdAt: Date.now(),
     }],
@@ -529,7 +574,7 @@ async function runAppSmoke(): Promise<void> {
   if (!projectlessUI.collapsed || !projectlessUI.pinned || !projectlessUI.renamed || !projectlessUI.deleted) {
     throw new Error(`projectless chat behaviors failed: ${JSON.stringify(projectlessUI)}`);
   }
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, emptyChatUI, gitUI, projectlessUI })}\n`);
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, automation: true, emptyChatUI, gitUI, projectlessUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {

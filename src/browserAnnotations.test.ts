@@ -1,5 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { annotationKey, annotationKind, annotationPromptContext, annotationsPromptContext } from "./browserAnnotations";
+import {
+  annotationKey,
+  annotationKind,
+  annotationPopoverPosition,
+  annotationPromptContext,
+  annotationsPromptContext,
+} from "./browserAnnotations";
+
+describe("annotationPopoverPosition", () => {
+  const viewport = { width: 1_000, height: 700 };
+  const popover = { width: 390, height: 150 };
+
+  it("opens below a trigger near the top instead of clipping", () => {
+    expect(annotationPopoverPosition({
+      trigger: { left: 500, right: 650, top: 20, bottom: 49 },
+      popover,
+      viewport,
+      alignRight: true,
+    })).toEqual({ left: 260, top: 57 });
+  });
+
+  it("opens above a trigger near the bottom", () => {
+    expect(annotationPopoverPosition({
+      trigger: { left: 20, right: 170, top: 650, bottom: 679 },
+      popover,
+      viewport,
+      alignRight: false,
+    })).toEqual({ left: 20, top: 492 });
+  });
+
+  it("clamps right-aligned popovers to both viewport edges", () => {
+    expect(annotationPopoverPosition({
+      trigger: { left: 10, right: 90, top: 300, bottom: 329 },
+      popover,
+      viewport,
+      alignRight: true,
+    }).left).toBe(12);
+    expect(annotationPopoverPosition({
+      trigger: { left: 950, right: 990, top: 300, bottom: 329 },
+      popover,
+      viewport,
+      alignRight: false,
+    }).left).toBe(598);
+  });
+});
 
 describe("annotationPromptContext", () => {
   it("describes the exact DOM target without embedding a screenshot", () => {

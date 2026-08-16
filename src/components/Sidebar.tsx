@@ -90,6 +90,8 @@ export function Sidebar() {
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
   const agentsOpen = useAppStore((state) => state.agentsOpen);
   const setAgentsOpen = useAppStore((state) => state.setAgentsOpen);
+  const automationsOpen = useAppStore((state) => state.automationsOpen);
+  const setAutomationsOpen = useAppStore((state) => state.setAutomationsOpen);
   const searchOpen = useAppStore((state) => state.searchOpen);
   const setSearchOpen = useAppStore((state) => state.setSearchOpen);
   const setRenamingThread = useAppStore((state) => state.setRenamingThread);
@@ -377,6 +379,13 @@ export function Sidebar() {
         >
           <Icons.robot size={15} />
           <span>Agents</span>
+        </button>
+        <button
+          className={`nav-row ${automationsOpen ? "active" : ""}`}
+          onClick={() => setAutomationsOpen(true)}
+        >
+          <Icons.clock size={15} />
+          <span>Automations</span>
         </button>
       </nav>
 

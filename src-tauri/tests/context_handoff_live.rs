@@ -77,8 +77,9 @@ async fn run_turn(
         working_directory: std::env::temp_dir().to_string_lossy().to_string(),
         session_id: None,
         ephemeral: false,
+        unattended: false,
         agent_id: None,
-        browser_access: None,
+        host_tools: Vec::new(),
         profile,
     };
 

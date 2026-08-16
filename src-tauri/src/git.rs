@@ -784,9 +784,10 @@ async fn generate_commit_message(
             working_directory: std::env::temp_dir().to_string_lossy().into_owned(),
             session_id: None,
             ephemeral: false,
+            unattended: false,
             profile,
             agent_id: None,
-            browser_access: None,
+            host_tools: Vec::new(),
         };
         (
             request,

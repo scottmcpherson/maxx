@@ -446,6 +446,89 @@ export interface ProviderHealth {
   message: string;
 }
 
+/**
+ * Maxx-owned scheduled work. The scheduler is intentionally provider-neutral:
+ * providers receive an execution request only when Maxx fires the schedule.
+ */
+export type AutomationKind = "notification" | "agent_turn";
+
+export type AutomationStatus = "active" | "paused" | "running" | "needs_attention" | "failed" | "completed";
+
+export type AutomationSchedule =
+  | {
+      type: "once";
+      at: string;
+      timezone: string;
+    }
+  | {
+      type: "interval";
+      everySeconds: number;
+      timezone: string;
+    }
+  | {
+      type: "cron";
+      expression: string;
+      timezone: string;
+    };
+
+export interface AutomationRuntime {
+  provider?: ChatProvider;
+  model?: string;
+  /** Profile is pinned when an agent-turn schedule is created. */
+  profileID?: string | null;
+  /** Optional source context used to create an isolated automation thread. */
+  projectID?: string | null;
+  threadID?: string | null;
+  effort?: string | null;
+  speed?: string | null;
+}
+
+export interface AutomationChangedEnvelope {
+  id: string;
+  change: "created" | "updated" | "deleted" | "run_queued" | "run_started" | "run_finished";
+}
+
+export interface AutomationRun {
+  id: string;
+  scheduledFor: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  status: "queued" | "running" | "completed" | "needs_attention" | "failed";
+  summary?: string | null;
+  error?: string | null;
+}
+
+export interface Automation {
+  id: string;
+  title: string;
+  kind: AutomationKind;
+  prompt: string;
+  schedule: AutomationSchedule;
+  status: AutomationStatus;
+  runtime?: AutomationRuntime | null;
+  nextRunAt?: string | null;
+  lastRun?: AutomationRun | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationCreateRequest {
+  title: string;
+  kind: AutomationKind;
+  prompt: string;
+  schedule: AutomationSchedule;
+  runtime?: AutomationRuntime | null;
+}
+
+export interface AutomationUpdateRequest {
+  title?: string;
+  kind?: AutomationKind;
+  prompt?: string;
+  schedule?: AutomationSchedule;
+  runtime?: AutomationRuntime | null;
+  status?: Extract<AutomationStatus, "active" | "paused">;
+}
+
 export function projectName(project: ChatProject): string {
   if (isChatsProject(project)) return "Chats";
   const parts = project.folderPath.split("/").filter(Boolean);

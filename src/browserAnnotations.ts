@@ -2,6 +2,40 @@ import type { BrowserAnnotation } from "./browser";
 
 export const MAX_BROWSER_ANNOTATIONS = 20;
 
+export interface AnnotationPopoverPosition {
+  left: number;
+  top: number;
+}
+
+export function annotationPopoverPosition({
+  trigger,
+  popover,
+  viewport,
+  alignRight,
+  gap = 8,
+  margin = 12,
+}: {
+  trigger: { left: number; right: number; top: number; bottom: number };
+  popover: { width: number; height: number };
+  viewport: { width: number; height: number };
+  alignRight: boolean;
+  gap?: number;
+  margin?: number;
+}): AnnotationPopoverPosition {
+  const maxLeft = Math.max(margin, viewport.width - popover.width - margin);
+  const preferredLeft = alignRight ? trigger.right - popover.width : trigger.left;
+  const left = Math.min(Math.max(preferredLeft, margin), maxLeft);
+  const roomAbove = trigger.top - gap - margin;
+  const roomBelow = viewport.height - trigger.bottom - gap - margin;
+  const openBelow = popover.height > roomAbove && roomBelow > roomAbove;
+  const preferredTop = openBelow ? trigger.bottom + gap : trigger.top - popover.height - gap;
+  const maxTop = Math.max(margin, viewport.height - popover.height - margin);
+  return {
+    left,
+    top: Math.min(Math.max(preferredTop, margin), maxTop),
+  };
+}
+
 export function annotationKey(annotation: Pick<BrowserAnnotation, "tabId" | "selector">): string {
   return `${annotation.tabId}\u0000${annotation.selector}`;
 }

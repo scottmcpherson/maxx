@@ -19,6 +19,11 @@ import type { GitBranchList, GitCommitResult, GitRepositoryStatus } from "./git"
 import {
   ActiveTurnRecord,
   AgentDefinition,
+  Automation,
+  AutomationChangedEnvelope,
+  AutomationCreateRequest,
+  AutomationRun,
+  AutomationUpdateRequest,
   ChatProvider,
   ChatProject,
   ChatTextSelection,
@@ -77,6 +82,16 @@ export interface ResolvedMediaSource {
 export const ipc = {
   workspaceSnapshot: (hostId?: string | null) =>
     invokeOnHost<WorkspaceDocument>(hostId, "workspace_snapshot"),
+  /** Maxx-owned scheduler APIs. These calls deliberately do not route through a provider host. */
+  listAutomations: () => invoke<Automation[]>("list_automations"),
+  createAutomation: (request: AutomationCreateRequest) =>
+    invoke<Automation>("create_automation", { ...request }),
+  updateAutomation: (id: string, updates: AutomationUpdateRequest) =>
+    invoke<Automation>("update_automation", { id, ...updates }),
+  deleteAutomation: (id: string) => invoke<void>("delete_automation", { id }),
+  runAutomation: (id: string) => invoke<AutomationRun>("run_automation", { id }),
+  onAutomationChanged: (handler: (event: AutomationChangedEnvelope) => void) =>
+    listen<AutomationChangedEnvelope>("automation://changed", handler),
   activeTurns: (hostId?: string | null) =>
     invokeOnHost<ActiveTurnRecord[]>(hostId, "active_turns"),
   gitStatus: (projectId: string, hostId?: string | null, threadId?: string | null) =>

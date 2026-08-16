@@ -8,7 +8,7 @@ use super::{
     yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, SteerRequest,
     TurnRequest,
 };
-use crate::browser_runtime::BrowserProviderAccess;
+use crate::host_tools::HostToolAccess;
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
@@ -500,7 +500,7 @@ async fn ensure_client(
     }
     let configuration = super::launch::launch_configuration(&request.profile)?;
     let (arguments, environment) =
-        codex_launch_settings(configuration.environment, request.browser_access.as_deref())?;
+        codex_launch_settings(configuration.environment, &request.host_tools)?;
     let process = JsonLineProcess::spawn(&LaunchSpec {
         executable: configuration.executable.to_string_lossy().to_string(),
         arguments,
@@ -547,21 +547,32 @@ async fn ensure_client(
 
 fn codex_launch_settings(
     mut environment: HashMap<String, String>,
-    browser_access: Option<&BrowserProviderAccess>,
+    host_tools: &[Arc<HostToolAccess>],
 ) -> Result<(Vec<String>, HashMap<String, String>), String> {
     let mut arguments = vec!["app-server".into()];
-    if let Some(access) = browser_access {
-        environment.insert("MAXX_BROWSER_TOKEN".into(), access.bearer_token.clone());
+    for access in host_tools {
+        let token_environment_variable = access.token_environment_variable();
+        environment.insert(
+            token_environment_variable.clone(),
+            access.bearer_token.clone(),
+        );
         arguments.extend([
             "-c".into(),
             format!(
-                "mcp_servers.maxx_browser.url={}",
+                "mcp_servers.{}.url={}",
+                access.name,
                 serde_json::to_string(&access.endpoint).map_err(|error| error.to_string())?
             ),
             "-c".into(),
-            "mcp_servers.maxx_browser.bearer_token_env_var=\"MAXX_BROWSER_TOKEN\"".into(),
+            format!(
+                "mcp_servers.{}.bearer_token_env_var=\"{}\"",
+                access.name, token_environment_variable
+            ),
             "-c".into(),
-            "mcp_servers.maxx_browser.default_tools_approval_mode=\"approve\"".into(),
+            format!(
+                "mcp_servers.{}.default_tools_approval_mode=\"approve\"",
+                access.name
+            ),
         ]);
     }
     arguments.push("--stdio".into());
@@ -836,6 +847,7 @@ fn codex_elicitation_result(
 #[cfg(test)]
 mod browser_mcp_tests {
     use super::*;
+    use crate::browser_runtime::BrowserProviderAccess;
 
     #[test]
     fn steering_uses_the_same_structured_input_as_a_new_turn() {
@@ -861,8 +873,8 @@ mod browser_mcp_tests {
             endpoint: "http://127.0.0.1:43123/mcp".into(),
             bearer_token: "secret-token".into(),
         };
-        let (arguments, environment) =
-            codex_launch_settings(HashMap::new(), Some(&access)).unwrap();
+        let host_tool = Arc::new(access.as_host_tool());
+        let (arguments, environment) = codex_launch_settings(HashMap::new(), &[host_tool]).unwrap();
 
         assert_eq!(arguments.first().map(String::as_str), Some("app-server"));
         assert_eq!(arguments.last().map(String::as_str), Some("--stdio"));
@@ -884,6 +896,38 @@ mod browser_mcp_tests {
         assert_eq!(
             environment.get("MAXX_BROWSER_TOKEN").map(String::as_str),
             Some("secret-token")
+        );
+    }
+
+    #[test]
+    fn launch_settings_injects_multiple_host_tools_without_leaking_tokens() {
+        let tools = vec![
+            Arc::new(HostToolAccess::new(
+                "maxx_browser",
+                "http://127.0.0.1:43123/mcp",
+                "browser-secret",
+            )),
+            Arc::new(HostToolAccess::new(
+                "maxx_automations",
+                "http://127.0.0.1:43124/mcp",
+                "automation-secret",
+            )),
+        ];
+        let (arguments, environment) = codex_launch_settings(HashMap::new(), &tools).unwrap();
+        assert!(arguments.iter().any(|value| {
+            value == "mcp_servers.maxx_automations.url=\"http://127.0.0.1:43124/mcp\""
+        }));
+        assert_eq!(
+            environment
+                .get("MAXX_AUTOMATIONS_TOKEN")
+                .map(String::as_str),
+            Some("automation-secret")
+        );
+        assert!(
+            arguments
+                .iter()
+                .all(|value| !value.contains("browser-secret")
+                    && !value.contains("automation-secret"))
         );
     }
 

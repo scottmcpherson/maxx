@@ -7,6 +7,7 @@ use super::process::{JsonLineProcess, LaunchSpec};
 use super::{
     yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
 };
+use crate::host_tools::HostToolAccess;
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
@@ -19,20 +20,23 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-pub(crate) const MAXX_BROWSER_TOOL_RULE: &str = "mcp__maxx_browser";
-
-pub(crate) fn browser_mcp_config(access: &crate::browser_runtime::BrowserProviderAccess) -> Value {
-    json!({
-        "mcpServers": {
-            "maxx_browser": {
-                "type": "http",
-                "url": access.endpoint,
-                "headers": {
-                    "Authorization": format!("Bearer {}", access.bearer_token)
-                }
-            }
-        }
-    })
+pub(crate) fn mcp_config(host_tools: &[Arc<HostToolAccess>]) -> Value {
+    let servers = host_tools
+        .iter()
+        .map(|access| {
+            (
+                access.name.clone(),
+                json!({
+                    "type": "http",
+                    "url": access.endpoint,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", access.bearer_token)
+                    }
+                }),
+            )
+        })
+        .collect::<Map<String, Value>>();
+    json!({"mcpServers": servers})
 }
 
 #[derive(Default)]
@@ -51,6 +55,7 @@ struct PendingInteraction {
 #[derive(Default)]
 struct SessionState {
     process: Option<Arc<JsonLineProcess>>,
+    permission_mode: Option<String>,
     normalizer: NormalizerState,
     initialized: bool,
     current_model: Option<String>,
@@ -461,6 +466,7 @@ async fn retire_session(session: &Arc<ClaudeSession>) {
         }
         state.interactions.clear();
         state.initialized = false;
+        state.permission_mode = None;
         state.cancellation_requested = None;
         (
             state.process.take(),
@@ -485,6 +491,19 @@ async fn begin(
     sink: DraftSender,
 ) -> Result<(), String> {
     {
+        let state = session.state.lock().await;
+        if state.current_turn.is_some() {
+            return Err("Claude already has an active turn in this session.".into());
+        }
+        let needs_restart = state.process.is_some()
+            && state.permission_mode.as_deref() != Some(claude_permission_mode(request));
+        drop(state);
+        if needs_restart {
+            // Claude's permission mode is process-scoped. Never reuse an
+            // interactive acceptEdits process for unattended work (or leave a
+            // scheduled manual process in place for an interactive turn).
+            retire_session(session).await;
+        }
         let mut state = session.state.lock().await;
         if state.current_turn.is_some() {
             return Err("Claude already has an active turn in this session.".into());
@@ -568,23 +587,34 @@ async fn begin(
 }
 
 async fn ensure_process(session: &Arc<ClaudeSession>, request: &TurnRequest) -> Result<(), String> {
-    if session.state.lock().await.process.is_some() {
-        return Ok(());
+    {
+        let state = session.state.lock().await;
+        if state.process.is_some() {
+            if state.permission_mode.as_deref() != Some(claude_permission_mode(request)) {
+                return Err(
+                    "Claude permission mode changed; the native session must be restarted.".into(),
+                );
+            }
+            return Ok(());
+        }
     }
     let configuration = super::launch::launch_configuration(&request.profile)?;
     let selected_model = request.selected_model();
     let mut arguments = claude_arguments(request);
-    let browser_config = request
-        .browser_access
-        .as_deref()
-        .map(EphemeralClaudeMcpConfig::create)
+    let host_tools_config = (!request.host_tools.is_empty())
+        .then(|| EphemeralClaudeMcpConfig::create(&request.host_tools))
         .transpose()?;
-    if let Some(config) = &browser_config {
+    if let Some(config) = &host_tools_config {
         arguments.extend([
             "--mcp-config".into(),
             config.path.to_string_lossy().to_string(),
             "--allowedTools".into(),
-            MAXX_BROWSER_TOOL_RULE.into(),
+            request
+                .host_tools
+                .iter()
+                .map(|access| format!("mcp__{}", access.name))
+                .collect::<Vec<_>>()
+                .join(","),
         ]);
     }
     let process = JsonLineProcess::spawn(&LaunchSpec {
@@ -596,6 +626,7 @@ async fn ensure_process(session: &Arc<ClaudeSession>, request: &TurnRequest) -> 
     {
         let mut state = session.state.lock().await;
         state.process = Some(process.clone());
+        state.permission_mode = Some(claude_permission_mode(request).into());
         state.current_model = selected_model;
     }
     let reader_session = session.clone();
@@ -632,7 +663,7 @@ async fn ensure_process(session: &Arc<ClaudeSession>, request: &TurnRequest) -> 
     session.state.lock().await.initialized = true;
     // Claude reads its explicit MCP configuration during startup. Dropping the
     // guard deletes the mode-0600 secret-bearing file immediately afterward.
-    drop(browser_config);
+    drop(host_tools_config);
     Ok(())
 }
 
@@ -645,7 +676,7 @@ fn claude_arguments(request: &TurnRequest) -> Vec<String> {
         "stream-json",
         "--include-partial-messages",
         "--permission-mode",
-        "acceptEdits",
+        claude_permission_mode(request),
     ]
     .iter()
     .map(|s| s.to_string())
@@ -668,14 +699,26 @@ fn claude_arguments(request: &TurnRequest) -> Vec<String> {
     arguments
 }
 
+fn claude_permission_mode(request: &TurnRequest) -> &'static str {
+    if request.unattended {
+        // `plan` is Claude's read-only mode. It still uses the normal approval
+        // flow for actions that need permission, which run_unattended_turn
+        // cancels as needs_attention; unlike dontAsk, it cannot inherit an
+        // allow rule that silently enables source edits.
+        "plan"
+    } else {
+        "acceptEdits"
+    }
+}
+
 struct EphemeralClaudeMcpConfig {
     path: PathBuf,
 }
 
 impl EphemeralClaudeMcpConfig {
-    fn create(access: &crate::browser_runtime::BrowserProviderAccess) -> Result<Self, String> {
+    fn create(host_tools: &[Arc<HostToolAccess>]) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
-            "maxx-claude-browser-mcp-{}.json",
+            "maxx-claude-host-tools-{}.json",
             Uuid::new_v4().simple()
         ));
         let mut options = std::fs::OpenOptions::new();
@@ -687,14 +730,14 @@ impl EphemeralClaudeMcpConfig {
         }
         let mut file = options
             .open(&path)
-            .map_err(|error| format!("Could not create Claude browser MCP config: {error}"))?;
-        let body = browser_mcp_config(access);
+            .map_err(|error| format!("Could not create Claude host-tool MCP config: {error}"))?;
+        let body = mcp_config(host_tools);
         let serialized = serde_json::to_vec(&body)
             .map_err(|error| format!("Could not encode Claude browser MCP config: {error}"))?;
         if let Err(error) = file.write_all(&serialized).and_then(|_| file.sync_all()) {
             let _ = std::fs::remove_file(&path);
             return Err(format!(
-                "Could not write Claude browser MCP config: {error}"
+                "Could not write Claude host-tool MCP config: {error}"
             ));
         }
         Ok(Self { path })
@@ -723,7 +766,8 @@ mod browser_mcp_tests {
             endpoint: "http://127.0.0.1:43123/mcp".into(),
             bearer_token: "secret-token".into(),
         };
-        let guard = EphemeralClaudeMcpConfig::create(&access).unwrap();
+        let host_tool = Arc::new(access.as_host_tool());
+        let guard = EphemeralClaudeMcpConfig::create(&[host_tool]).unwrap();
         let path = guard.path.clone();
         let body: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(
@@ -756,6 +800,22 @@ mod browser_mcp_tests {
             .windows(2)
             .any(|pair| pair == ["--append-system-prompt", "You are Dana."]));
         assert_eq!(request.prompt, "user prompt");
+    }
+
+    #[test]
+    fn unattended_claude_turn_is_read_only_but_interactive_keeps_accept_edits() {
+        let mut unattended = crate::engine::test_request(ChatProvider::Claude);
+        unattended.unattended = true;
+        let unattended_arguments = claude_arguments(&unattended);
+        assert!(unattended_arguments
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "plan"]));
+
+        let interactive = crate::engine::test_request(ChatProvider::Claude);
+        let interactive_arguments = claude_arguments(&interactive);
+        assert!(interactive_arguments
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "acceptEdits"]));
     }
 
     #[test]
@@ -1128,6 +1188,7 @@ async fn connection_closed(
         }
     }
     state.process = None;
+    state.permission_mode = None;
     state.initialized = false;
     for (_, sender) in state.pending_control.drain() {
         let _ = sender.send(Err(error.clone()));

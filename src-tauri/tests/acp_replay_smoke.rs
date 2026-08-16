@@ -60,8 +60,9 @@ async fn session_load_replay_is_not_streamed_into_the_live_turn() {
         working_directory: std::env::temp_dir().to_string_lossy().to_string(),
         session_id: Some("fake-acp-session-1".into()),
         ephemeral: false,
+        unattended: false,
         agent_id: None,
-        browser_access: None,
+        host_tools: Vec::new(),
         profile,
     };
     let collected = collect_turn(&runtime, request).await;
@@ -132,8 +133,9 @@ async fn fresh_session_streams_live_deltas() {
         working_directory: std::env::temp_dir().to_string_lossy().to_string(),
         session_id: None,
         ephemeral: false,
+        unattended: false,
         agent_id: None,
-        browser_access: None,
+        host_tools: Vec::new(),
         profile,
     };
     let collected = collect_turn(&runtime, request).await;

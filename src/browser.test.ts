@@ -84,6 +84,7 @@ describe("shouldShowBrowserContent", () => {
     browserOpen: true,
     settingsOpen: false,
     agentsOpen: false,
+    automationsOpen: false,
     searchOpen: false,
     renameOpen: false,
   };
@@ -99,6 +100,7 @@ describe("shouldShowBrowserContent", () => {
   it("hides behind every full-window surface", () => {
     expect(shouldShowBrowserContent({ ...base, settingsOpen: true })).toBe(false);
     expect(shouldShowBrowserContent({ ...base, agentsOpen: true })).toBe(false);
+    expect(shouldShowBrowserContent({ ...base, automationsOpen: true })).toBe(false);
     expect(shouldShowBrowserContent({ ...base, searchOpen: true })).toBe(false);
     expect(shouldShowBrowserContent({ ...base, renameOpen: true })).toBe(false);
   });

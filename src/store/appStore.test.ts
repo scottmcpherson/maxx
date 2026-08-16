@@ -33,6 +33,7 @@ afterEach(() => {
     selectedThreadID: null,
     renamingThread: null,
     browserOpen: false,
+    automationsOpen: false,
     pendingBrowserReveal: null,
     pendingSideChatRequest: null,
     openSideThreadID: null,
@@ -52,6 +53,21 @@ afterEach(() => {
     terminalModeEnabled: false,
   });
   vi.restoreAllMocks();
+});
+
+describe("automation surface", () => {
+  it("opens exclusively and closes the provider management surfaces", () => {
+    useAppStore.setState({ settingsOpen: true, agentsOpen: true, automationsOpen: false });
+
+    useAppStore.getState().setAutomationsOpen(true);
+
+    expect(useAppStore.getState().automationsOpen).toBe(true);
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    expect(useAppStore.getState().agentsOpen).toBe(false);
+
+    useAppStore.getState().setAutomationsOpen(false);
+    expect(useAppStore.getState().automationsOpen).toBe(false);
+  });
 });
 
 describe("terminal chat creation", () => {

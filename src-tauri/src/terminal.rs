@@ -318,9 +318,23 @@ impl TerminalBroker {
         );
         scope.provider_session_id = Some(session_id.clone());
         scope.file_roots = vec![folder_path.clone().into()];
-        let browser_access = support
+        let mut host_tools = support
             .browser_available
-            .then(|| self.browser.access_for_scope(scope));
+            .then(|| Arc::new(self.browser.access_for_scope(scope).as_host_tool()))
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(access) = state.runtime.automation_access_for(
+            project_id,
+            thread.id,
+            thread.provider,
+            thread.instance_id(),
+            thread.model.clone(),
+            thread.effort.clone(),
+            thread.speed.clone(),
+            true,
+        ) {
+            host_tools.push(access);
+        }
         // Prove the structured runtime is idle and relinquish its connection
         // before using a short-lived reader to establish the native boundary.
         state
@@ -333,7 +347,7 @@ impl TerminalBroker {
                 &thread,
                 &folder_path,
                 &profile,
-                browser_access.clone(),
+                host_tools.clone(),
             ))
             .await;
         let release = state
@@ -343,13 +357,7 @@ impl TerminalBroker {
         let baseline_turn_ids =
             baseline?.map(|turns| turns.into_iter().map(|turn| turn.native_id).collect());
         release?;
-        let launch = terminal_launch(
-            &profile,
-            &thread,
-            &folder_path,
-            &session_id,
-            browser_access.as_deref(),
-        )?;
+        let launch = terminal_launch(&profile, &thread, &folder_path, &session_id, &host_tools)?;
 
         let temporary_removal_paths = if thread.provider == ChatProvider::Hermes {
             launch
@@ -606,11 +614,25 @@ impl TerminalBroker {
             );
             scope.provider_session_id = thread_snapshot.provider_session_id.clone();
             scope.file_roots = vec![folder_path.clone().into()];
-            let browser_access = support
+            let mut host_tools = support
                 .browser_available
-                .then(|| self.browser.access_for_scope(scope));
+                .then(|| Arc::new(self.browser.access_for_scope(scope).as_host_tool()))
+                .into_iter()
+                .collect::<Vec<_>>();
+            if let Some(access) = state.runtime.automation_access_for(
+                project_id,
+                thread_snapshot.id,
+                thread_snapshot.provider,
+                thread_snapshot.instance_id(),
+                thread_snapshot.model.clone(),
+                thread_snapshot.effort.clone(),
+                thread_snapshot.speed.clone(),
+                true,
+            ) {
+                host_tools.push(access);
+            }
             let request =
-                reconciliation_request(&thread_snapshot, &folder_path, &profile, browser_access);
+                reconciliation_request(&thread_snapshot, &folder_path, &profile, host_tools);
             let submitted = session
                 .as_ref()
                 .is_some_and(|session| session.submitted_inputs.load(Ordering::Relaxed) > 0);
@@ -984,7 +1006,7 @@ fn terminal_launch(
     thread: &maxx_core::persist::ChatThread,
     cwd: &str,
     session_id: &str,
-    browser: Option<&crate::browser_runtime::BrowserProviderAccess>,
+    host_tools: &[Arc<crate::host_tools::HostToolAccess>],
 ) -> Result<TerminalLaunch, String> {
     let configuration = launch::launch_configuration(profile)?;
     let profile_home = configuration.home.clone();
@@ -1017,19 +1039,30 @@ fn terminal_launch(
                     ),
                 ]);
             }
-            if let Some(browser) = browser {
-                environment.insert("MAXX_BROWSER_TOKEN".into(), browser.bearer_token.clone());
+            for host_tool in host_tools {
+                let token_environment_variable = host_tool.token_environment_variable();
+                environment.insert(
+                    token_environment_variable.clone(),
+                    host_tool.bearer_token.clone(),
+                );
                 arguments.extend([
                     "-c".into(),
                     format!(
-                        "mcp_servers.maxx_browser.url={}",
-                        serde_json::to_string(&browser.endpoint)
+                        "mcp_servers.{}.url={}",
+                        host_tool.name,
+                        serde_json::to_string(&host_tool.endpoint)
                             .map_err(|error| error.to_string())?
                     ),
                     "-c".into(),
-                    "mcp_servers.maxx_browser.bearer_token_env_var=\"MAXX_BROWSER_TOKEN\"".into(),
+                    format!(
+                        "mcp_servers.{}.bearer_token_env_var=\"{}\"",
+                        host_tool.name, token_environment_variable
+                    ),
                     "-c".into(),
-                    "mcp_servers.maxx_browser.default_tools_approval_mode=\"approve\"".into(),
+                    format!(
+                        "mcp_servers.{}.default_tools_approval_mode=\"approve\"",
+                        host_tool.name
+                    ),
                 ]);
             }
         }
@@ -1041,18 +1074,22 @@ fn terminal_launch(
             if let Some(effort) = nonempty(thread.effort.as_deref()) {
                 arguments.extend(["--effort".into(), effort.into()]);
             }
-            if let Some(browser) = browser {
+            if !host_tools.is_empty() {
                 let path = write_private_temp(
                     "maxx-claude-terminal-mcp",
                     "json",
-                    serde_json::to_vec(&crate::engine::claude::browser_mcp_config(browser))
+                    serde_json::to_vec(&crate::engine::claude::mcp_config(host_tools))
                         .map_err(|error| error.to_string())?,
                 )?;
                 arguments.extend([
                     "--mcp-config".into(),
                     path.to_string_lossy().into_owned(),
                     "--allowedTools".into(),
-                    crate::engine::claude::MAXX_BROWSER_TOOL_RULE.into(),
+                    host_tools
+                        .iter()
+                        .map(|tool| format!("mcp__{}", tool.name))
+                        .collect::<Vec<_>>()
+                        .join(","),
                 ]);
                 temporary_resources.push(TemporaryResource::Remove(path));
             }
@@ -1070,17 +1107,19 @@ fn terminal_launch(
             if let Some(effort) = nonempty(thread.effort.as_deref()) {
                 arguments.extend(["--reasoning-effort".into(), effort.into()]);
             }
-            if let Some(browser) = browser {
+            if !host_tools.is_empty() {
                 let (overlay_home, server_name) =
-                    prepare_grok_terminal_home(&profile_home, &environment, browser)?;
+                    prepare_grok_terminal_home(&profile_home, &environment, host_tools)?;
                 environment.insert(
                     "GROK_HOME".into(),
                     overlay_home.to_string_lossy().into_owned(),
                 );
-                arguments.extend([
-                    "--rules".into(),
-                    format!("{GROK_MAXX_BROWSER_POLICY} The server name is {server_name}."),
-                ]);
+                if host_tools.iter().any(|tool| tool.name == "maxx_browser") {
+                    arguments.extend([
+                        "--rules".into(),
+                        format!("{GROK_MAXX_BROWSER_POLICY} The server name is {server_name}."),
+                    ]);
+                }
                 temporary_resources.push(TemporaryResource::Remove(overlay_home));
             }
         }
@@ -1089,8 +1128,8 @@ fn terminal_launch(
             if !thread.model.eq_ignore_ascii_case("default") {
                 arguments.extend(["--model".into(), thread.model.clone()]);
             }
-            if let Some(browser) = browser {
-                let resource = prepare_cursor_project_mcp(cwd, &mut environment, browser)?;
+            if !host_tools.is_empty() {
+                let resource = prepare_cursor_project_mcp(cwd, &mut environment, host_tools)?;
                 temporary_resources.push(resource);
             }
         }
@@ -1099,8 +1138,11 @@ fn terminal_launch(
             if !thread.model.eq_ignore_ascii_case("default") {
                 arguments.extend(["--model".into(), thread.model.clone()]);
             }
-            if let Some(browser) = browser {
-                crate::engine::opencode::inject_browser_mcp_config(&mut environment, browser)?;
+            if !host_tools.is_empty() {
+                crate::engine::opencode::inject_host_tools_mcp_config(
+                    &mut environment,
+                    host_tools,
+                )?;
             }
         }
         ChatProvider::Pi => {
@@ -1111,14 +1153,26 @@ fn terminal_launch(
             if let Some(effort) = nonempty(thread.effort.as_deref()) {
                 arguments.extend(["--thinking".into(), effort.into()]);
             }
-            if let Some(browser) = browser {
+            if !host_tools.is_empty() {
                 let path = write_private_temp(
-                    "maxx-pi-terminal-browser",
+                    "maxx-pi-terminal-host-tools",
                     "ts",
-                    include_bytes!("../resources/pi-browser-mcp.ts").to_vec(),
+                    include_bytes!("../resources/pi-host-tools-mcp.ts").to_vec(),
                 )?;
-                environment.insert("MAXX_BROWSER_ENDPOINT".into(), browser.endpoint.clone());
-                environment.insert("MAXX_BROWSER_TOKEN".into(), browser.bearer_token.clone());
+                let encoded = serde_json::to_string(
+                    &host_tools
+                        .iter()
+                        .map(|tool| {
+                            serde_json::json!({
+                                "name": tool.name,
+                                "endpoint": tool.endpoint,
+                                "token": tool.bearer_token,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|error| error.to_string())?;
+                environment.insert("MAXX_HOST_TOOLS_JSON".into(), encoded);
                 arguments.extend(["--extension".into(), path.to_string_lossy().into_owned()]);
                 temporary_resources.push(TemporaryResource::Remove(path));
             }
@@ -1137,16 +1191,12 @@ fn terminal_launch(
             if let Some(effort) = nonempty(thread.effort.as_deref()) {
                 arguments.extend(["--reasoning".into(), effort.into()]);
             }
-            if let Some(browser) = browser {
+            if !host_tools.is_empty() {
                 let overlay_home =
-                    prepare_hermes_terminal_home(&profile_home, &environment, browser)?;
+                    prepare_hermes_terminal_home(&profile_home, &mut environment, host_tools)?;
                 environment.insert(
                     "HERMES_HOME".into(),
                     overlay_home.to_string_lossy().into_owned(),
-                );
-                environment.insert(
-                    "MAXX_BROWSER_AUTHORIZATION".into(),
-                    format!("Bearer {}", browser.bearer_token),
                 );
                 temporary_resources.push(TemporaryResource::Remove(overlay_home));
             }
@@ -1164,7 +1214,7 @@ fn reconciliation_request(
     thread: &maxx_core::persist::ChatThread,
     working_directory: &str,
     profile: &ProviderProfile,
-    browser_access: Option<Arc<crate::browser_runtime::BrowserProviderAccess>>,
+    host_tools: Vec<Arc<crate::host_tools::HostToolAccess>>,
 ) -> TurnRequest {
     TurnRequest {
         turn_id: Uuid::new_v4(),
@@ -1180,9 +1230,10 @@ fn reconciliation_request(
         working_directory: working_directory.to_string(),
         session_id: thread.provider_session_id.clone(),
         ephemeral: false,
+        unattended: false,
         profile: profile.clone(),
         agent_id: thread.agent_id,
-        browser_access,
+        host_tools,
     }
 }
 
@@ -1220,7 +1271,7 @@ fn write_private_temp(prefix: &str, extension: &str, bytes: Vec<u8>) -> Result<P
 fn prepare_grok_terminal_home(
     profile_home: &std::path::Path,
     environment: &HashMap<String, String>,
-    browser: &crate::browser_runtime::BrowserProviderAccess,
+    host_tools: &[Arc<crate::host_tools::HostToolAccess>],
 ) -> Result<(PathBuf, String), String> {
     let original_home = environment
         .get("GROK_HOME")
@@ -1263,13 +1314,21 @@ fn prepare_grok_terminal_home(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(format!("Could not read Grok config.toml: {error}")),
         };
-        let server_name = format!("maxx_browser_{}", Uuid::new_v4().simple());
-        let url = serde_json::to_string(&browser.endpoint).map_err(|error| error.to_string())?;
-        let authorization = serde_json::to_string(&format!("Bearer {}", browser.bearer_token))
-            .map_err(|error| error.to_string())?;
-        let injected = format!(
-            "[mcp_servers.{server_name}]\nurl = {url}\nheaders = {{ Authorization = {authorization} }}\nenabled = true\n\n{existing}"
-        );
+        let mut servers = String::new();
+        let mut first_server_name = None;
+        for host_tool in host_tools {
+            let server_name = format!("{}_{}", host_tool.name, Uuid::new_v4().simple());
+            first_server_name.get_or_insert_with(|| server_name.clone());
+            let url =
+                serde_json::to_string(&host_tool.endpoint).map_err(|error| error.to_string())?;
+            let authorization =
+                serde_json::to_string(&format!("Bearer {}", host_tool.bearer_token))
+                    .map_err(|error| error.to_string())?;
+            servers.push_str(&format!(
+                "[mcp_servers.{server_name}]\nurl = {url}\nheaders = {{ Authorization = {authorization} }}\nenabled = true\n\n"
+            ));
+        }
+        let injected = format!("{servers}{existing}");
         let config_path = overlay_home.join("config.toml");
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -1284,7 +1343,7 @@ fn prepare_grok_terminal_home(
         file.write_all(injected.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|error| format!("Could not write Grok terminal config.toml: {error}"))?;
-        Ok(server_name)
+        first_server_name.ok_or_else(|| "at least one Maxx host tool is required".to_string())
     })();
 
     match result {
@@ -1298,8 +1357,8 @@ fn prepare_grok_terminal_home(
 
 fn prepare_hermes_terminal_home(
     profile_home: &std::path::Path,
-    environment: &HashMap<String, String>,
-    browser: &crate::browser_runtime::BrowserProviderAccess,
+    environment: &mut HashMap<String, String>,
+    host_tools: &[Arc<crate::host_tools::HostToolAccess>],
 ) -> Result<PathBuf, String> {
     use serde_yaml_ng::{Mapping, Value};
 
@@ -1350,26 +1409,41 @@ fn prepare_hermes_terminal_home(
         let root = config
             .as_mapping_mut()
             .ok_or("Hermes config.yaml must contain a YAML object.")?;
-        let server_name = format!("maxx_browser_{}", Uuid::new_v4().simple());
-
         let mcp_servers = root
             .entry(Value::String("mcp_servers".into()))
             .or_insert_with(|| Value::Mapping(Mapping::new()))
             .as_mapping_mut()
             .ok_or("Hermes config.yaml mcp_servers must be a YAML object.")?;
-        let mut headers = Mapping::new();
-        headers.insert(
-            Value::String("Authorization".into()),
-            Value::String("${MAXX_BROWSER_AUTHORIZATION}".into()),
-        );
-        let mut server = Mapping::new();
-        server.insert(
-            Value::String("url".into()),
-            Value::String(browser.endpoint.clone()),
-        );
-        server.insert(Value::String("headers".into()), Value::Mapping(headers));
-        server.insert(Value::String("enabled".into()), Value::Bool(true));
-        mcp_servers.insert(Value::String(server_name.clone()), Value::Mapping(server));
+        let mut server_names = Vec::new();
+        for host_tool in host_tools {
+            let server_name = format!("{}_{}", host_tool.name, Uuid::new_v4().simple());
+            let mut headers = Mapping::new();
+            let authorization_environment_variable = if host_tool.name == "maxx_browser" {
+                "MAXX_BROWSER_AUTHORIZATION".into()
+            } else {
+                format!(
+                    "MAXX_{}_AUTHORIZATION",
+                    host_tool
+                        .name
+                        .strip_prefix("maxx_")
+                        .unwrap_or(&host_tool.name)
+                        .to_ascii_uppercase()
+                )
+            };
+            headers.insert(
+                Value::String("Authorization".into()),
+                Value::String(format!("${{{authorization_environment_variable}}}")),
+            );
+            let mut server = Mapping::new();
+            server.insert(
+                Value::String("url".into()),
+                Value::String(host_tool.endpoint.clone()),
+            );
+            server.insert(Value::String("headers".into()), Value::Mapping(headers));
+            server.insert(Value::String("enabled".into()), Value::Bool(true));
+            mcp_servers.insert(Value::String(server_name.clone()), Value::Mapping(server));
+            server_names.push((server_name, authorization_environment_variable, host_tool));
+        }
 
         let agent = root
             .entry(Value::String("agent".into()))
@@ -1381,10 +1455,12 @@ fn prepare_hermes_terminal_home(
             .or_insert_with(|| Value::Sequence(Vec::new()))
             .as_sequence_mut()
             .ok_or("Hermes agent.disabled_toolsets must be a YAML list.")?;
-        for toolset in ["browser", "computer_use"] {
-            let value = Value::String(toolset.into());
-            if !disabled.contains(&value) {
-                disabled.push(value);
+        if host_tools.iter().any(|tool| tool.name == "maxx_browser") {
+            for toolset in ["browser", "computer_use"] {
+                let value = Value::String(toolset.into());
+                if !disabled.contains(&value) {
+                    disabled.push(value);
+                }
             }
         }
 
@@ -1396,11 +1472,20 @@ fn prepare_hermes_terminal_home(
                 .get_mut(Value::String("cli".into()))
                 .and_then(Value::as_sequence_mut)
             {
-                let value = Value::String(server_name);
-                if !cli.contains(&value) {
-                    cli.push(value);
+                for (server_name, _, _) in &server_names {
+                    let value = Value::String(server_name.clone());
+                    if !cli.contains(&value) {
+                        cli.push(value);
+                    }
                 }
             }
+        }
+
+        for (_, authorization_environment_variable, host_tool) in &server_names {
+            environment.insert(
+                authorization_environment_variable.clone(),
+                format!("Bearer {}", host_tool.bearer_token),
+            );
         }
 
         let bytes = serde_yaml_ng::to_string(&config)
@@ -1434,7 +1519,7 @@ fn prepare_hermes_terminal_home(
 fn prepare_cursor_project_mcp(
     cwd: &str,
     environment: &mut HashMap<String, String>,
-    browser: &crate::browser_runtime::BrowserProviderAccess,
+    host_tools: &[Arc<crate::host_tools::HostToolAccess>],
 ) -> Result<TemporaryResource, String> {
     let cursor_directory = PathBuf::from(cwd).join(".cursor");
     let created_directory = if cursor_directory.exists() {
@@ -1486,24 +1571,43 @@ fn prepare_cursor_project_mcp(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or("Cursor .cursor/mcp.json mcpServers must be a JSON object.")?;
-    let server_name = format!("maxx_browser_{}", Uuid::new_v4().simple());
     let executable = std::env::current_exe()
-        .map_err(|error| format!("Could not locate the Maxx browser bridge: {error}"))?;
-    servers.insert(
-        server_name,
-        serde_json::json!({
-            "command": executable.to_string_lossy(),
-            "args": [crate::browser_runtime::BRIDGE_ARGUMENT]
-        }),
-    );
-    environment.insert(
-        crate::browser_runtime::ENDPOINT_ENV.into(),
-        browser.endpoint.clone(),
-    );
-    environment.insert(
-        crate::browser_runtime::TOKEN_ENV.into(),
-        browser.bearer_token.clone(),
-    );
+        .map_err(|error| format!("Could not locate the Maxx MCP bridge: {error}"))?;
+    for host_tool in host_tools {
+        let (bridge_argument, endpoint_env, token_env) = if host_tool.name == "maxx_browser" {
+            (
+                crate::browser_runtime::BRIDGE_ARGUMENT,
+                crate::browser_runtime::ENDPOINT_ENV,
+                crate::browser_runtime::TOKEN_ENV,
+            )
+        } else {
+            (
+                crate::browser_runtime::HOST_TOOL_BRIDGE_ARGUMENT,
+                crate::browser_runtime::HOST_TOOL_ENDPOINT_ENV,
+                crate::browser_runtime::HOST_TOOL_TOKEN_ENV,
+            )
+        };
+        let server_name = format!("{}_{}", host_tool.name, Uuid::new_v4().simple());
+        let mut bridge_environment = serde_json::Map::new();
+        bridge_environment.insert(
+            endpoint_env.into(),
+            serde_json::Value::String(format!("${{{endpoint_env}}}")),
+        );
+        bridge_environment.insert(
+            token_env.into(),
+            serde_json::Value::String(format!("${{{token_env}}}")),
+        );
+        servers.insert(
+            server_name,
+            serde_json::json!({
+                "command": executable.to_string_lossy(),
+                "args": [bridge_argument],
+                "env": bridge_environment
+            }),
+        );
+        environment.insert(endpoint_env.into(), host_tool.endpoint.clone());
+        environment.insert(token_env.into(), host_tool.bearer_token.clone());
+    }
 
     let bytes = serde_json::to_vec_pretty(&config)
         .map_err(|error| format!("Could not encode Cursor mcp.json: {error}"))?;
@@ -1581,7 +1685,7 @@ mod tests {
         let mut thread =
             maxx_core::persist::ChatThread::new("terminal".into(), provider, "Default".into());
         thread.provider_session_id = Some("native-session".into());
-        terminal_launch(&profile, &thread, "/tmp", "native-session", None).unwrap()
+        terminal_launch(&profile, &thread, "/tmp", "native-session", &[]).unwrap()
     }
 
     #[test]
@@ -1707,8 +1811,14 @@ mod tests {
             bearer_token: "claude-terminal-secret".into(),
         };
 
-        let launch =
-            terminal_launch(&profile, &thread, "/tmp", "native-session", Some(&access)).unwrap();
+        let launch = terminal_launch(
+            &profile,
+            &thread,
+            "/tmp",
+            "native-session",
+            &[Arc::new(access.as_host_tool())],
+        )
+        .unwrap();
 
         assert_eq!(
             &launch.arguments[..6],
@@ -1750,7 +1860,7 @@ mod tests {
         );
         assert_eq!(
             launch.arguments.get(config_index + 3).map(String::as_str),
-            Some(crate::engine::claude::MAXX_BROWSER_TOOL_RULE)
+            Some("mcp__maxx_browser")
         );
         assert!(!launch
             .arguments
@@ -1802,8 +1912,14 @@ mod tests {
             bearer_token: "grok-terminal-secret".into(),
         };
 
-        let launch =
-            terminal_launch(&profile, &thread, "/tmp", "native-session", Some(&access)).unwrap();
+        let launch = terminal_launch(
+            &profile,
+            &thread,
+            "/tmp",
+            "native-session",
+            &[Arc::new(access.as_host_tool())],
+        )
+        .unwrap();
         let overlay_home = PathBuf::from(launch.environment.get("GROK_HOME").unwrap());
         assert_ne!(overlay_home, original_home);
         assert_eq!(
@@ -1877,8 +1993,14 @@ mod tests {
             bearer_token: "hermes-terminal-secret".into(),
         };
 
-        let launch =
-            terminal_launch(&profile, &thread, "/tmp", "native-session", Some(&access)).unwrap();
+        let launch = terminal_launch(
+            &profile,
+            &thread,
+            "/tmp",
+            "native-session",
+            &[Arc::new(access.as_host_tool())],
+        )
+        .unwrap();
         let overlay_home = PathBuf::from(launch.environment.get("HERMES_HOME").unwrap());
         assert_ne!(overlay_home, original_home);
         assert!(overlay_home.join("state.db").is_symlink());
@@ -1962,7 +2084,7 @@ mod tests {
             &thread,
             &root.to_string_lossy(),
             "native-session",
-            Some(&access),
+            &[Arc::new(access.as_host_tool())],
         )
         .unwrap();
         let injected: serde_json::Value =
@@ -2014,7 +2136,7 @@ mod tests {
             &thread,
             &clean_root.to_string_lossy(),
             "native-session",
-            Some(&access),
+            &[Arc::new(access.as_host_tool())],
         )
         .unwrap();
         assert!(clean_root.join(".cursor/mcp.json").exists());
@@ -2088,11 +2210,17 @@ mod tests {
             profile.executable_path = Some("/bin/echo".into());
             let thread =
                 maxx_core::persist::ChatThread::new("terminal".into(), provider, "Default".into());
-            let launch =
-                terminal_launch(&profile, &thread, "/tmp", "native-session", Some(&access))
-                    .unwrap();
+            let launch = terminal_launch(
+                &profile,
+                &thread,
+                "/tmp",
+                "native-session",
+                &[Arc::new(access.as_host_tool())],
+            )
+            .unwrap();
             assert!(
                 launch.environment.contains_key("MAXX_BROWSER_TOKEN")
+                    || launch.environment.contains_key("MAXX_HOST_TOOLS_JSON")
                     || provider == ChatProvider::Claude
             );
             assert!(!launch.arguments.join(" ").contains("terminal-test-secret"));

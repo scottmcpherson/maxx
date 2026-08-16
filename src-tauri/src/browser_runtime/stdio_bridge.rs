@@ -12,22 +12,37 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 pub const BRIDGE_ARGUMENT: &str = "--browser-mcp-stdio";
 pub const ENDPOINT_ENV: &str = "MAXX_BROWSER_ENDPOINT";
 pub const TOKEN_ENV: &str = "MAXX_BROWSER_TOKEN";
+pub const HOST_TOOL_BRIDGE_ARGUMENT: &str = "--maxx-host-tool-stdio";
+pub const HOST_TOOL_ENDPOINT_ENV: &str = "MAXX_HOST_TOOL_ENDPOINT";
+pub const HOST_TOOL_TOKEN_ENV: &str = "MAXX_HOST_TOOL_TOKEN";
 
 pub fn requested() -> bool {
-    std::env::args().any(|argument| argument == BRIDGE_ARGUMENT)
+    std::env::args()
+        .any(|argument| argument == BRIDGE_ARGUMENT || argument == HOST_TOOL_BRIDGE_ARGUMENT)
 }
 
 pub fn run_from_environment() -> Result<(), String> {
-    let endpoint = std::env::var(ENDPOINT_ENV)
-        .map_err(|_| format!("{ENDPOINT_ENV} is required for the browser MCP bridge"))?;
-    let bearer_token = std::env::var(TOKEN_ENV)
-        .map_err(|_| format!("{TOKEN_ENV} is required for the browser MCP bridge"))?;
+    let generic = std::env::args().any(|argument| argument == HOST_TOOL_BRIDGE_ARGUMENT);
+    let endpoint_env = if generic {
+        HOST_TOOL_ENDPOINT_ENV
+    } else {
+        ENDPOINT_ENV
+    };
+    let token_env = if generic {
+        HOST_TOOL_TOKEN_ENV
+    } else {
+        TOKEN_ENV
+    };
+    let endpoint = std::env::var(endpoint_env)
+        .map_err(|_| format!("{endpoint_env} is required for the MCP bridge"))?;
+    let bearer_token = std::env::var(token_env)
+        .map_err(|_| format!("{token_env} is required for the MCP bridge"))?;
     validate_endpoint(&endpoint)?;
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("could not start browser MCP bridge runtime: {error}"))?
+        .map_err(|error| format!("could not start MCP bridge runtime: {error}"))?
         .block_on(run(endpoint, bearer_token))
 }
 

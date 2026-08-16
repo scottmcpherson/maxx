@@ -24,8 +24,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::browser_runtime::BrowserProviderAccess;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconciledSessionTurn {
     pub native_id: String,
@@ -59,12 +57,17 @@ pub struct TurnRequest {
     pub session_id: Option<String>,
     /// One-off background work must not appear in provider conversation history.
     pub ephemeral: bool,
+    /// Background scheduled turns may never create or mutate further
+    /// automations and must stop for interactive approval/input.
+    pub unattended: bool,
     pub profile: ProviderProfile,
     /// Preconfigured agent handling this turn, when it is an agent turn.
     pub agent_id: Option<Uuid>,
-    /// Ephemeral MCP authority for the provider-native session. Debug output is
-    /// redacted and the value is never persisted in the workspace document.
-    pub browser_access: Option<Arc<BrowserProviderAccess>>,
+    /// Ephemeral, scoped MCP authorities for the provider-native session.
+    /// Debug output is redacted and the values are never persisted in the
+    /// workspace document. Runtime-owned capabilities (such as the browser)
+    /// are appended before dispatch.
+    pub host_tools: Vec<Arc<crate::host_tools::HostToolAccess>>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,9 +115,10 @@ pub(crate) fn test_request(provider: ChatProvider) -> TurnRequest {
         working_directory: "/tmp".into(),
         session_id: None,
         ephemeral: false,
+        unattended: false,
         profile,
         agent_id: None,
-        browser_access: None,
+        host_tools: Vec::new(),
     }
 }
 

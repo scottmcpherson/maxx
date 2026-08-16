@@ -203,6 +203,7 @@ export interface BrowserVisibilityFlags {
   browserOpen: boolean;
   settingsOpen: boolean;
   agentsOpen: boolean;
+  automationsOpen: boolean;
   searchOpen: boolean;
   renameOpen: boolean;
 }
@@ -214,6 +215,7 @@ export function shouldShowBrowserContent(flags: BrowserVisibilityFlags): boolean
   return flags.browserOpen
     && !flags.settingsOpen
     && !flags.agentsOpen
+    && !flags.automationsOpen
     && !flags.searchOpen
     && !flags.renameOpen;
 }

@@ -42,8 +42,9 @@ async fn fake_claude_turn_streams_and_terminates_exactly_once() {
         working_directory: std::env::temp_dir().to_string_lossy().to_string(),
         session_id: None,
         ephemeral: false,
+        unattended: false,
         agent_id: None,
-        browser_access: None,
+        host_tools: Vec::new(),
         profile,
     };
 

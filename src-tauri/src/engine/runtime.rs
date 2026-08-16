@@ -11,7 +11,7 @@ use maxx_core::contract::*;
 use maxx_core::normalize::ProviderEventDraft;
 use maxx_core::TurnStamper;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
@@ -42,6 +42,7 @@ pub struct Runtime {
     live_turns: Mutex<HashMap<Uuid, LiveTurn>>,
     request_routes: Mutex<HashMap<Uuid, ChatProvider>>,
     browser: Option<Arc<BrowserRuntime>>,
+    automations: RwLock<Option<Arc<crate::automation_service::AutomationService>>>,
 }
 
 impl Runtime {
@@ -70,7 +71,47 @@ impl Runtime {
             live_turns: Mutex::new(HashMap::new()),
             request_routes: Mutex::new(HashMap::new()),
             browser,
+            automations: RwLock::new(None),
         }
+    }
+
+    pub fn set_automation_service(
+        &self,
+        service: Arc<crate::automation_service::AutomationService>,
+    ) {
+        *self
+            .automations
+            .write()
+            .expect("automation runtime lock poisoned") = Some(service);
+    }
+
+    pub fn automation_access_for(
+        &self,
+        project_id: Uuid,
+        thread_id: Uuid,
+        provider: ChatProvider,
+        provider_instance_id: Uuid,
+        model: String,
+        effort: Option<String>,
+        speed: Option<String>,
+        mutations_allowed: bool,
+    ) -> Option<Arc<crate::host_tools::HostToolAccess>> {
+        self.automations
+            .read()
+            .expect("automation runtime lock poisoned")
+            .as_ref()
+            .map(|service| {
+                service.access_for_scope(crate::automation_service::AutomationScope {
+                    project_id,
+                    thread_id,
+                    provider,
+                    provider_instance_id,
+                    model,
+                    effort,
+                    speed,
+                    mutations_allowed,
+                })
+            })
     }
 
     /// Register a turn as live before the engine task starts so inventory is
@@ -120,7 +161,26 @@ impl Runtime {
             scope.provider_session_id = request.session_id.clone();
             scope.agent_id = request.agent_id;
             scope.file_roots = vec![request.working_directory.clone().into()];
-            request.browser_access = Some(browser.access_for_scope(scope));
+            let access = browser.access_for_scope(scope);
+            request
+                .host_tools
+                .retain(|tool| tool.name != "maxx_browser");
+            request.host_tools.push(Arc::new(access.as_host_tool()));
+        }
+        request
+            .host_tools
+            .retain(|tool| tool.name != "maxx_automations");
+        if let Some(access) = self.automation_access_for(
+            project_id,
+            request.thread_id,
+            request.provider,
+            request.provider_instance_id,
+            request.model.clone(),
+            request.effort.clone(),
+            request.speed.clone(),
+            !request.unattended,
+        ) {
+            request.host_tools.push(access);
         }
 
         let stamper = TurnStamper::new(
@@ -371,8 +431,9 @@ mod tests {
             working_directory: "/tmp".into(),
             session_id: None,
             ephemeral: false,
+            unattended: false,
             agent_id: None,
-            browser_access: None,
+            host_tools: Vec::new(),
             profile: ProviderProfile::default_for(ChatProvider::Claude),
         }
     }

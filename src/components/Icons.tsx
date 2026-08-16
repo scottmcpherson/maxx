@@ -82,6 +82,12 @@ export const Icons = {
       <path d="M10.2 19.5a2 2 0 0 0 3.6 0" />
     </IconBase>
   ),
+  clock: (props: IconProps) => (
+    <IconBase {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7v5l3.5 2" />
+    </IconBase>
+  ),
   settings: (props: IconProps) => (
     <IconBase {...props}>
       <circle cx="12" cy="12" r="3" />

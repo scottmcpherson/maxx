@@ -102,6 +102,7 @@ interface AppStoreState {
   unseenThreadIDs: UnseenThreadMap;
   settingsOpen: boolean;
   agentsOpen: boolean;
+  automationsOpen: boolean;
   /** Side thread shown in the reply panel next to the main thread. */
   openSideThreadID: string | null;
   searchOpen: boolean;
@@ -237,6 +238,7 @@ interface AppStoreState {
   ) => Promise<boolean>;
   setSettingsOpen: (open: boolean) => void;
   setAgentsOpen: (open: boolean) => void;
+  setAutomationsOpen: (open: boolean) => void;
   setOpenSideThreadID: (threadID: string | null) => void;
   setSearchOpen: (open: boolean) => void;
   setRenamingThread: (
@@ -420,6 +422,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   unseenThreadIDs: loadUnseenThreadIDs(),
   settingsOpen: false,
   agentsOpen: false,
+  automationsOpen: false,
   openSideThreadID: null,
   searchOpen: false,
   renamingThread: null,
@@ -727,6 +730,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       selectedThreadID: threadID,
       settingsOpen: false,
       agentsOpen: false,
+      automationsOpen: false,
       renamingThread: null,
       openSideThreadID: null,
       browserOpen: state.selectedThreadID === threadID ? state.browserOpen : false,
@@ -770,6 +774,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       newThreadEnvironment: "current",
       settingsOpen: false,
       agentsOpen: false,
+      automationsOpen: false,
       renamingThread: null,
       openSideThreadID: null,
       browserOpen: false,
@@ -1298,17 +1303,21 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
   setSettingsOpen: (open) => set({
     settingsOpen: open,
-    ...(open ? { agentsOpen: false, renamingThread: null } : {}),
+    ...(open ? { agentsOpen: false, automationsOpen: false, renamingThread: null } : {}),
   }),
   setAgentsOpen: (open) => set({
     agentsOpen: open,
-    ...(open ? { settingsOpen: false, renamingThread: null } : {}),
+    ...(open ? { settingsOpen: false, automationsOpen: false, renamingThread: null } : {}),
+  }),
+  setAutomationsOpen: (open) => set({
+    automationsOpen: open,
+    ...(open ? { settingsOpen: false, agentsOpen: false, renamingThread: null } : {}),
   }),
   setOpenSideThreadID: (threadID) => set({ openSideThreadID: threadID }),
   setSearchOpen: (open) => set({ searchOpen: open, ...(open ? { renamingThread: null } : {}) }),
   setRenamingThread: (target) => set({
     renamingThread: target,
-    ...(target ? { settingsOpen: false, agentsOpen: false, searchOpen: false } : {}),
+    ...(target ? { settingsOpen: false, agentsOpen: false, automationsOpen: false, searchOpen: false } : {}),
   }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),

@@ -8,6 +8,7 @@ use super::process::{JsonLineProcess, LaunchSpec};
 use super::{
     yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, TurnRequest,
 };
+use crate::host_tools::HostToolAccess;
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
@@ -23,6 +24,7 @@ use uuid::Uuid;
 
 const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const HERMES_MAXX_BROWSER_POLICY: &str = "Maxx Browser is the only browser-control surface available in this session. Use the maxx_browser MCP tools for every browser action. Reuse the assigned tab, observe before acting, require an observed state change after each interaction, and never launch or attach to Chrome from terminal tools.";
+const HERMES_MAXX_AUTOMATION_POLICY: &str = "Maxx Automations is the only scheduling and reminder surface available in this session. For requests such as remind me, notify me later, schedule a task, or create a cron job, first use tool_describe with the exact name mcp__maxx_automations__schedule when its schema is not loaded, then call that tool. Never substitute terminal sleep, at, cron, launchd, osascript, Apple Reminders, or a harness-native scheduler, and never claim that no reminder tool exists while maxx_automations is available.";
 
 pub struct AcpEngine {
     provider: ChatProvider,
@@ -984,11 +986,7 @@ async fn begin(
     if needs_process {
         let configuration = super::launch::launch_configuration(&request.profile)?;
         let mut environment = configuration.environment;
-        configure_acp_environment(
-            session.provider,
-            request.browser_access.is_some(),
-            &mut environment,
-        );
+        configure_acp_environment(session.provider, &request.host_tools, &mut environment);
         let process = JsonLineProcess::spawn(&LaunchSpec {
             executable: configuration.executable.to_string_lossy().to_string(),
             arguments,
@@ -1049,7 +1047,7 @@ async fn begin(
         let supports_http_mcp = session.state.lock().await.supports_http_mcp;
         let mut params = json!({
             "cwd": request.working_directory,
-            "mcpServers": browser_mcp_servers(request.browser_access.as_deref(), supports_http_mcp)
+            "mcpServers": acp_mcp_servers(&request.host_tools, supports_http_mcp)
         });
         let method = if let Some(saved) = &request.session_id {
             let supported = session.state.lock().await.supports_load_session;
@@ -1116,7 +1114,7 @@ async fn begin(
                 .await
                 .map_err(|error| format!("Hermes could not switch to {model}: {error}"))?;
 
-                if request.browser_access.is_some() {
+                if !request.host_tools.is_empty() {
                     let supports_load = session.state.lock().await.supports_load_session;
                     if !supports_load {
                         return Err(
@@ -1135,8 +1133,8 @@ async fn begin(
                         json!({
                             "cwd": request.working_directory,
                             "sessionId": session_id,
-                            "mcpServers": browser_mcp_servers(
-                                request.browser_access.as_deref(),
+                            "mcpServers": acp_mcp_servers(
+                                &request.host_tools,
                                 supports_http_mcp,
                             )
                         }),
@@ -1207,57 +1205,86 @@ async fn begin(
 
 fn configure_acp_environment(
     provider: ChatProvider,
-    has_maxx_browser: bool,
+    host_tools: &[Arc<HostToolAccess>],
     environment: &mut HashMap<String, String>,
 ) {
-    if provider != ChatProvider::Hermes || !has_maxx_browser {
+    if provider != ChatProvider::Hermes || host_tools.is_empty() {
         return;
     }
-    environment.insert(
-        "HERMES_ACP_DISABLED_TOOLSETS".into(),
-        "browser,computer_use".into(),
-    );
     environment.insert("HERMES_ACP_SKIP_CONFIGURED_MCP".into(), "1".into());
-    environment.insert(
-        "HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT".into(),
-        HERMES_MAXX_BROWSER_POLICY.into(),
-    );
+    let mut policies = Vec::new();
+    if host_tools.iter().any(|tool| tool.name == "maxx_browser") {
+        environment.insert(
+            "HERMES_ACP_DISABLED_TOOLSETS".into(),
+            "browser,computer_use".into(),
+        );
+        policies.push(HERMES_MAXX_BROWSER_POLICY);
+    }
+    if host_tools
+        .iter()
+        .any(|tool| tool.name == "maxx_automations")
+    {
+        policies.push(HERMES_MAXX_AUTOMATION_POLICY);
+    }
+    if !policies.is_empty() {
+        environment.insert(
+            "HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT".into(),
+            policies.join("\n\n"),
+        );
+    }
 }
 
-fn browser_mcp_servers(
-    browser_access: Option<&crate::browser_runtime::BrowserProviderAccess>,
-    supports_http_mcp: bool,
-) -> Vec<Value> {
-    let Some(access) = browser_access else {
-        return Vec::new();
-    };
+fn acp_mcp_servers(host_tools: &[Arc<HostToolAccess>], supports_http_mcp: bool) -> Vec<Value> {
     if supports_http_mcp {
-        return vec![json!({
-            "type": "http",
-            "name": "maxx_browser",
-            "url": access.endpoint,
-            "headers": [{
-                "name": "Authorization",
-                "value": format!("Bearer {}", access.bearer_token)
-            }]
-        })];
+        return host_tools
+            .iter()
+            .map(|access| {
+                json!({
+                    "type": "http",
+                    "name": access.name,
+                    "url": access.endpoint,
+                    "headers": [{
+                        "name": "Authorization",
+                        "value": format!("Bearer {}", access.bearer_token)
+                    }]
+                })
+            })
+            .collect();
     }
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
-            log::error!("could not resolve Maxx executable for browser MCP stdio bridge: {error}");
+            log::error!("could not resolve Maxx MCP stdio bridge: {error}");
             return Vec::new();
         }
     };
-    vec![json!({
-        "name": "maxx_browser",
-        "command": executable,
-        "args": [crate::browser_runtime::BRIDGE_ARGUMENT],
-        "env": [
-            {"name": crate::browser_runtime::ENDPOINT_ENV, "value": access.endpoint},
-            {"name": crate::browser_runtime::TOKEN_ENV, "value": access.bearer_token}
-        ]
-    })]
+    host_tools
+        .iter()
+        .map(|access| {
+            let (bridge_argument, endpoint_env, token_env) = if access.name == "maxx_browser" {
+                (
+                    crate::browser_runtime::BRIDGE_ARGUMENT,
+                    crate::browser_runtime::ENDPOINT_ENV,
+                    crate::browser_runtime::TOKEN_ENV,
+                )
+            } else {
+                (
+                    crate::browser_runtime::HOST_TOOL_BRIDGE_ARGUMENT,
+                    crate::browser_runtime::HOST_TOOL_ENDPOINT_ENV,
+                    crate::browser_runtime::HOST_TOOL_TOKEN_ENV,
+                )
+            };
+            json!({
+                "name": access.name,
+                "command": executable,
+                "args": [bridge_argument],
+                "env": [
+                    {"name": endpoint_env, "value": access.endpoint},
+                    {"name": token_env, "value": access.bearer_token}
+                ]
+            })
+        })
+        .collect()
 }
 
 fn acp_current_model(response: &Value) -> Option<String> {
@@ -1678,7 +1705,12 @@ mod browser_mcp_tests {
     fn hermes_with_maxx_browser_gets_an_exclusive_browser_surface() {
         let mut environment = HashMap::from([("PATH".into(), "/bin".into())]);
 
-        configure_acp_environment(ChatProvider::Hermes, true, &mut environment);
+        let browser = Arc::new(HostToolAccess::new(
+            "maxx_browser",
+            "http://127.0.0.1:43123/mcp",
+            "secret-token",
+        ));
+        configure_acp_environment(ChatProvider::Hermes, &[browser], &mut environment);
 
         assert_eq!(
             environment
@@ -1698,11 +1730,61 @@ mod browser_mcp_tests {
     }
 
     #[test]
+    fn hermes_with_browser_and_automations_gets_both_host_tool_policies() {
+        let mut environment = HashMap::new();
+        let tools = vec![
+            Arc::new(HostToolAccess::new(
+                "maxx_browser",
+                "http://127.0.0.1:43123/mcp",
+                "browser-secret",
+            )),
+            Arc::new(HostToolAccess::new(
+                "maxx_automations",
+                "http://127.0.0.1:43124/mcp",
+                "automation-secret",
+            )),
+        ];
+
+        configure_acp_environment(ChatProvider::Hermes, &tools, &mut environment);
+
+        let policy = &environment["HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT"];
+        assert!(policy.contains("only browser-control surface"));
+        assert!(policy.contains("mcp__maxx_automations__schedule"));
+        assert!(policy.contains("remind me"));
+        assert!(policy.contains("Never substitute terminal sleep"));
+    }
+
+    #[test]
     fn other_acp_sessions_keep_their_native_tool_surface() {
         let mut environment = HashMap::new();
-        configure_acp_environment(ChatProvider::Hermes, false, &mut environment);
-        configure_acp_environment(ChatProvider::Cursor, true, &mut environment);
+        configure_acp_environment(ChatProvider::Hermes, &[], &mut environment);
+        let browser = Arc::new(HostToolAccess::new(
+            "maxx_browser",
+            "http://127.0.0.1:43123/mcp",
+            "secret-token",
+        ));
+        configure_acp_environment(ChatProvider::Cursor, &[browser], &mut environment);
         assert!(environment.is_empty());
+    }
+
+    #[test]
+    fn hermes_automation_overlay_keeps_browser_toolsets_and_advertises_scheduler() {
+        let mut environment = HashMap::new();
+        let automation = Arc::new(HostToolAccess::new(
+            "maxx_automations",
+            "http://127.0.0.1:43124/mcp",
+            "automation-secret",
+        ));
+        configure_acp_environment(ChatProvider::Hermes, &[automation], &mut environment);
+        assert_eq!(
+            environment
+                .get("HERMES_ACP_SKIP_CONFIGURED_MCP")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(!environment.contains_key("HERMES_ACP_DISABLED_TOOLSETS"));
+        assert!(environment["HERMES_ACP_EPHEMERAL_SYSTEM_PROMPT"]
+            .contains("mcp__maxx_automations__schedule"));
     }
 
     #[test]
@@ -1712,7 +1794,8 @@ mod browser_mcp_tests {
             endpoint: "http://127.0.0.1:43123/mcp".into(),
             bearer_token: "secret-token".into(),
         };
-        let stdio = browser_mcp_servers(Some(&access), false);
+        let host_tool = Arc::new(access.as_host_tool());
+        let stdio = acp_mcp_servers(&[host_tool.clone()], false);
         assert_eq!(stdio.len(), 1);
         assert_eq!(stdio[0]["name"], "maxx_browser");
         assert_eq!(
@@ -1727,10 +1810,10 @@ mod browser_mcp_tests {
             ])
         );
         assert!(!stdio[0]["command"].as_str().unwrap().is_empty());
-        assert!(browser_mcp_servers(None, true).is_empty());
+        assert!(acp_mcp_servers(&[], true).is_empty());
 
         assert_eq!(
-            browser_mcp_servers(Some(&access), true),
+            acp_mcp_servers(&[host_tool], true),
             vec![json!({
                 "type": "http",
                 "name": "maxx_browser",
@@ -1740,6 +1823,29 @@ mod browser_mcp_tests {
                     "value": "Bearer secret-token"
                 }]
             })]
+        );
+    }
+
+    #[test]
+    fn emits_all_scoped_host_tools_for_http_acp() {
+        let tools = vec![
+            Arc::new(HostToolAccess::new(
+                "maxx_browser",
+                "http://127.0.0.1:43123/mcp",
+                "browser-secret",
+            )),
+            Arc::new(HostToolAccess::new(
+                "maxx_automations",
+                "http://127.0.0.1:43124/mcp",
+                "automation-secret",
+            )),
+        ];
+        let servers = acp_mcp_servers(&tools, true);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1]["name"], "maxx_automations");
+        assert_eq!(
+            servers[1]["headers"][0]["value"],
+            "Bearer automation-secret"
         );
     }
 

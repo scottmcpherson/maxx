@@ -55,6 +55,19 @@ impl fmt::Debug for BrowserProviderAccess {
     }
 }
 
+impl BrowserProviderAccess {
+    /// Adapt the browser credential to the provider-neutral host-tool shape.
+    /// The browser session binding remains owned by `BrowserRuntime`; adapters
+    /// only need the authenticated MCP transport details.
+    pub fn as_host_tool(&self) -> crate::host_tools::HostToolAccess {
+        crate::host_tools::HostToolAccess::new(
+            "maxx_browser",
+            self.endpoint.clone(),
+            self.bearer_token.clone(),
+        )
+    }
+}
+
 pub struct BrowserRuntime {
     pub sessions: Arc<BrowserSessionRegistry>,
     pub broker: Arc<BrowserBroker>,

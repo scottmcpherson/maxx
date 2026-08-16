@@ -807,8 +807,9 @@ pub async fn send_prompt(
             working_directory: folder_path,
             session_id: thread.provider_session_id.clone(),
             ephemeral: false,
+            unattended: false,
             agent_id: None,
-            browser_access: None,
+            host_tools: Vec::new(),
             profile,
         };
         let title_job = is_first_user_message.then(|| crate::title::TitleGenerationJob {
@@ -837,6 +838,95 @@ pub async fn send_prompt(
     }
     tokio::spawn(state_arc.run_turn(project_id, request));
     Ok(turn_id)
+}
+
+/// Run a prompt in a dedicated automation thread and wait for its terminal
+/// outcome. This path is intentionally separate from interactive chat: it
+/// never generates a title and cancels on approval or user-input requests.
+pub async fn run_automation_prompt(
+    state: Arc<AppState>,
+    project_id: Uuid,
+    thread_id: Uuid,
+    prompt: String,
+) -> Result<crate::state::TurnExecutionOutcome, String> {
+    if state
+        .runtime
+        .active_turns()
+        .await
+        .iter()
+        .any(|turn| turn.thread_id == thread_id)
+    {
+        return Err("The automation chat already has a running turn.".into());
+    }
+    let turn_id = Uuid::new_v4();
+    let request = {
+        let mut workspace = state.workspace.lock().await;
+        let profiles = workspace.provider_profiles.clone();
+        let project = workspace
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .ok_or("The automation project no longer exists.")?;
+        let project_folder = project.folder_path.clone();
+        let thread = project
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == thread_id)
+            .ok_or("The dedicated automation chat no longer exists.")?;
+        if thread.surface != ChatSurface::Gui {
+            return Err("The dedicated automation chat is not in GUI mode.".into());
+        }
+        let folder_path = thread.working_directory.clone().unwrap_or(project_folder);
+        thread.messages.push(ChatMessage {
+            id: Uuid::new_v4(),
+            role: ChatRole::User,
+            content: prompt.clone(),
+            attachments: Vec::new(),
+            annotations: Vec::new(),
+            text_selections: Vec::new(),
+            created_at: AppleDate::now(),
+            source_event_id: None,
+            agent_id: None,
+        });
+        thread.last_turn_id = Some(turn_id);
+        thread.updated_at = AppleDate::now();
+        let provider = thread.provider;
+        let instance_id = thread.instance_id();
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.id == instance_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut profile = ProviderProfile::default_for(provider);
+                profile.id = instance_id;
+                profile
+            });
+        TurnRequest {
+            turn_id,
+            thread_id,
+            provider_instance_id: instance_id,
+            provider,
+            model: thread.model.clone(),
+            effort: thread.effort.clone(),
+            speed: thread.speed.clone(),
+            agent_instructions: None,
+            prompt,
+            attachments: Vec::new(),
+            working_directory: folder_path,
+            session_id: thread.provider_session_id.clone(),
+            ephemeral: false,
+            unattended: true,
+            profile,
+            agent_id: None,
+            host_tools: Vec::new(),
+        }
+    };
+    state.save().await;
+    state
+        .runtime
+        .track_turn(project_id, thread_id, turn_id, request.provider)
+        .await;
+    Ok(state.clone().run_unattended_turn(project_id, request).await)
 }
 
 pub struct SteerPromptCommand {
@@ -1045,8 +1135,9 @@ fn prepare_agent_turn(
         working_directory: folder_path,
         session_id: thread.provider_session_id.clone(),
         ephemeral: false,
+        unattended: false,
         agent_id: Some(agent.id),
-        browser_access: None,
+        host_tools: Vec::new(),
         profile,
     }
 }

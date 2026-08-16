@@ -5,6 +5,7 @@
 
 use super::process::{JsonLineProcess, LaunchSpec};
 use super::{yield_draft, yield_error, DraftSender, ProviderEngine, TurnRequest};
+use crate::host_tools::HostToolAccess;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use maxx_core::contract::*;
@@ -494,14 +495,14 @@ async fn ensure_server(
             Err(error) => return Err(error.clone()),
         }
     };
-    if configured.is_some() && request.browser_access.is_some() {
+    if configured.is_some() && !request.host_tools.is_empty() {
         return Err(
-            "OpenCode browser tools require a Maxx-owned per-thread server; a configured external server cannot receive scoped browser authority."
+            "OpenCode host tools require a Maxx-owned per-thread server; a configured external server cannot receive scoped Maxx authority."
                 .into(),
         );
     }
-    if let Some(access) = request.browser_access.as_deref() {
-        inject_browser_mcp_config(&mut environment, access)?;
+    if !request.host_tools.is_empty() {
+        inject_host_tools_mcp_config(&mut environment, &request.host_tools)?;
     }
 
     let base_url = if let Some(configured) = configured {
@@ -562,9 +563,9 @@ async fn ensure_server(
     Ok(base_url)
 }
 
-pub(crate) fn inject_browser_mcp_config(
+pub(crate) fn inject_host_tools_mcp_config(
     environment: &mut HashMap<String, String>,
-    access: &crate::browser_runtime::BrowserProviderAccess,
+    host_tools: &[Arc<HostToolAccess>],
 ) -> Result<(), String> {
     let mut config = match environment.get("OPENCODE_CONFIG_CONTENT") {
         Some(existing) => serde_json::from_str::<Value>(existing)
@@ -572,27 +573,29 @@ pub(crate) fn inject_browser_mcp_config(
         None => json!({}),
     };
     let root = config.as_object_mut().ok_or_else(|| {
-        "OPENCODE_CONFIG_CONTENT must contain a JSON object before Maxx can add browser tools."
+        "OPENCODE_CONFIG_CONTENT must contain a JSON object before Maxx can add host tools."
             .to_string()
     })?;
     let mcp = root.entry("mcp").or_insert_with(|| json!({}));
     let servers = mcp.as_object_mut().ok_or_else(|| {
-        "OPENCODE_CONFIG_CONTENT.mcp must be an object before Maxx can add browser tools."
-            .to_string()
+        "OPENCODE_CONFIG_CONTENT.mcp must be an object before Maxx can add host tools.".to_string()
     })?;
-    servers.insert(
-        "maxx_browser".into(),
-        json!({
-            "type": "remote",
-            "url": access.endpoint,
-            "enabled": true,
-            "oauth": false,
-            "headers": {
-                "Authorization": "Bearer {env:MAXX_BROWSER_TOKEN}"
-            }
-        }),
-    );
-    environment.insert("MAXX_BROWSER_TOKEN".into(), access.bearer_token.clone());
+    for access in host_tools {
+        let token_environment_variable = access.token_environment_variable();
+        servers.insert(
+            access.name.clone(),
+            json!({
+                "type": "remote",
+                "url": access.endpoint,
+                "enabled": true,
+                "oauth": false,
+                "headers": {
+                    "Authorization": format!("Bearer {{env:{token_environment_variable}}}")
+                }
+            }),
+        );
+        environment.insert(token_environment_variable, access.bearer_token.clone());
+    }
     environment.insert(
         "OPENCODE_CONFIG_CONTENT".into(),
         serde_json::to_string(&config).map_err(|error| error.to_string())?,
@@ -851,7 +854,7 @@ mod browser_mcp_tests {
             "OPENCODE_CONFIG_CONTENT".into(),
             r#"{"theme":"maxx","mcp":{"existing":{"type":"local","command":["ok"]}}}"#.into(),
         )]);
-        inject_browser_mcp_config(&mut environment, &access).unwrap();
+        inject_host_tools_mcp_config(&mut environment, &[Arc::new(access.as_host_tool())]).unwrap();
 
         let config = environment.get("OPENCODE_CONFIG_CONTENT").unwrap();
         assert!(!config.contains("secret-token"));
@@ -863,6 +866,33 @@ mod browser_mcp_tests {
             "Bearer {env:MAXX_BROWSER_TOKEN}"
         );
         assert_eq!(environment["MAXX_BROWSER_TOKEN"], "secret-token");
+    }
+
+    #[test]
+    fn merges_multiple_host_tools_with_secrets_only_in_environment() {
+        let tools = vec![
+            Arc::new(HostToolAccess::new(
+                "maxx_browser",
+                "http://127.0.0.1:43123/mcp",
+                "browser-secret",
+            )),
+            Arc::new(HostToolAccess::new(
+                "maxx_automations",
+                "http://127.0.0.1:43124/mcp",
+                "automation-secret",
+            )),
+        ];
+        let mut environment = HashMap::new();
+        inject_host_tools_mcp_config(&mut environment, &tools).unwrap();
+        let config = environment.get("OPENCODE_CONFIG_CONTENT").unwrap();
+        assert!(config.contains("maxx_automations"));
+        assert!(!config.contains("automation-secret"));
+        assert_eq!(
+            environment
+                .get("MAXX_AUTOMATIONS_TOKEN")
+                .map(String::as_str),
+            Some("automation-secret")
+        );
     }
 
     #[test]

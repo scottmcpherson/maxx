@@ -46,6 +46,13 @@ pub struct TurnFinishedEnvelope {
     pub terminal_state: Option<ProviderTurnTerminalState>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TurnExecutionOutcome {
+    pub terminal_state: Option<ProviderTurnTerminalState>,
+    pub assistant_text: String,
+    pub needs_attention: Option<String>,
+}
+
 pub fn workspace_path() -> PathBuf {
     if let Some(directory) = std::env::var_os("MAXX_DATA_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(directory).join("workspace.json");
@@ -113,6 +120,29 @@ impl AppState {
         project_id: Uuid,
         request: TurnRequest,
     ) -> Option<ProviderTurnTerminalState> {
+        self.run_turn_with_policy(project_id, request, false)
+            .await
+            .terminal_state
+    }
+
+    /// Execute a background turn without granting implicit approval or
+    /// inventing user input. The first interactive request is persisted and
+    /// emitted normally, then the provider is cancelled and the caller gets a
+    /// durable `needs_attention` reason.
+    pub async fn run_unattended_turn(
+        self: Arc<Self>,
+        project_id: Uuid,
+        request: TurnRequest,
+    ) -> TurnExecutionOutcome {
+        self.run_turn_with_policy(project_id, request, true).await
+    }
+
+    async fn run_turn_with_policy(
+        self: Arc<Self>,
+        project_id: Uuid,
+        request: TurnRequest,
+        unattended: bool,
+    ) -> TurnExecutionOutcome {
         let thread_id = request.thread_id;
         let turn_id = request.turn_id;
         let provider = request.provider;
@@ -122,8 +152,22 @@ impl AppState {
         let mut assistant_text = String::new();
         let mut assistant_source_event: Option<Uuid> = None;
         let mut terminal_state: Option<ProviderTurnTerminalState> = None;
+        let mut needs_attention: Option<String> = None;
 
-        while let Some(event) = events.recv().await {
+        loop {
+            let next = if needs_attention.is_some() {
+                tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                events.recv().await
+            };
+            let Some(event) = next else { break };
+            let interaction_requested = unattended
+                && needs_attention.is_none()
+                && (event.kind.is(RuntimeEventKind::APPROVAL_REQUEST)
+                    || event.kind.is(RuntimeEventKind::USER_INPUT_REQUEST));
             if event.kind.is(RuntimeEventKind::ASSISTANT_TEXT_DELTA) {
                 if let Some(text) = &event.payload.text {
                     if assistant_source_event.is_none() {
@@ -177,6 +221,13 @@ impl AppState {
                     event,
                 },
             );
+            if interaction_requested {
+                needs_attention = Some(
+                    "The scheduled agent requested approval or user input. Open its automation chat to continue safely."
+                        .into(),
+                );
+                self.runtime.cancel(turn_id).await;
+            }
         }
 
         let mut thread_title = String::new();
@@ -188,7 +239,7 @@ impl AppState {
                     thread.messages.push(ChatMessage {
                         id: Uuid::new_v4(),
                         role: ChatRole::Assistant,
-                        content: assistant_text,
+                        content: assistant_text.clone(),
                         attachments: Vec::new(),
                         annotations: Vec::new(),
                         text_selections: Vec::new(),
@@ -218,7 +269,11 @@ impl AppState {
             "notification://turn-finished",
             &serde_json::json!({"title": thread_title, "terminalState": terminal_state}),
         );
-        terminal_state
+        TurnExecutionOutcome {
+            terminal_state,
+            assistant_text,
+            needs_attention,
+        }
     }
 }
 

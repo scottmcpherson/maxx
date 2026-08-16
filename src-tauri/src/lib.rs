@@ -1,4 +1,6 @@
 pub mod attachments;
+pub mod automation;
+pub mod automation_service;
 pub mod browser_runtime;
 pub mod commands;
 pub mod engine;
@@ -6,6 +8,7 @@ pub mod events;
 pub mod git;
 pub mod host;
 pub mod host_session;
+pub mod host_tools;
 pub mod media;
 pub mod sidecar;
 pub mod state;

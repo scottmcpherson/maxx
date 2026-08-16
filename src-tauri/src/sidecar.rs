@@ -44,6 +44,7 @@ impl EventSink for SidecarEvents {
 
 struct SidecarState {
     app: Arc<AppState>,
+    automations: Arc<crate::automation_service::AutomationService>,
     browser: Arc<BrowserRuntime>,
     voice: Arc<VoiceState>,
     hosts: Arc<HostHub>,
@@ -200,6 +201,35 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
         }
     }
     match method {
+        "list_automations" => value(state.automations.list().await),
+        "create_automation" => {
+            let request = serde_json::from_value::<
+                crate::automation_service::AutomationCreateRequest,
+            >(params)
+            .map_err(|error| format!("invalid automation request: {error}"))?;
+            value(state.automations.create(request, None).await)
+        }
+        "update_automation" => {
+            let id = required::<Uuid>(&params, "id")?;
+            let request = serde_json::from_value::<
+                crate::automation_service::AutomationUpdateRequest,
+            >(params)
+            .map_err(|error| format!("invalid automation update: {error}"))?;
+            value(state.automations.update(id, request).await)
+        }
+        "delete_automation" => {
+            state
+                .automations
+                .delete(required::<Uuid>(&params, "id")?)
+                .await?;
+            Ok(Value::Null)
+        }
+        "run_automation" => value(
+            state
+                .automations
+                .run_now(required::<Uuid>(&params, "id")?)
+                .await,
+        ),
         "host_status" => value(Ok(state.hosts.status().await)),
         "host_discovery" => value(Ok(state.hosts.discovery().await)),
         "host_listen" => {
@@ -1063,8 +1093,16 @@ async fn run_async() -> Result<(), String> {
     )
     .await
     .map_err(|error| error.to_string())?;
+    let app = Arc::new(AppState::load(browser.clone(), events.clone()));
+    let automation_path = crate::state::workspace_path().with_file_name("automations.sqlite3");
+    let automations =
+        crate::automation_service::AutomationService::start(automation_path, events.clone())
+            .await?;
+    app.runtime.set_automation_service(automations.clone());
+    automations.bind_app(&app)?;
     let state = Arc::new(SidecarState {
-        app: Arc::new(AppState::load(browser.clone(), events.clone())),
+        app,
+        automations,
         browser: browser.clone(),
         voice: Arc::new(VoiceState::default()),
         hosts,
@@ -1187,6 +1225,7 @@ async fn run_async() -> Result<(), String> {
             _ => {}
         }
     }
+    state.automations.shutdown().await;
     state.app.terminals.shutdown().await;
     match tokio::time::timeout(std::time::Duration::from_secs(5), browser.shutdown()).await {
         Ok(result) => result.map_err(|error| error.to_string()),

@@ -60,9 +60,10 @@ impl TitleGenerationCandidate {
             working_directory,
             session_id: None,
             ephemeral: true,
+            unattended: false,
             profile: self.profile.clone(),
             agent_id: None,
-            browser_access: None,
+            host_tools: Vec::new(),
         }
     }
 }

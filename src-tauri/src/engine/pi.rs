@@ -8,6 +8,7 @@ use super::{
     yield_draft, yield_error, DraftSender, ProviderEngine, ReconciledSessionTurn, SteerRequest,
     TurnRequest,
 };
+use crate::host_tools::HostToolAccess;
 use async_trait::async_trait;
 use maxx_core::contract::*;
 use maxx_core::normalize::{normalize, NormalizerState, ProviderEventDraft};
@@ -41,7 +42,7 @@ struct SessionState {
     current_turn: Option<(Uuid, DraftSender)>,
     steer_ready_turn: Option<Uuid>,
     pending_commands: HashMap<String, oneshot::Sender<Result<Value, String>>>,
-    browser_extension: Option<PiBrowserExtension>,
+    host_tools_extension: Option<PiHostToolsExtension>,
     interactions: HashMap<Uuid, PendingInteraction>,
 }
 
@@ -507,7 +508,7 @@ async fn retire_session(session: &Arc<PiSession>) {
         }
         state.interactions.clear();
         state.session_id = None;
-        state.browser_extension = None;
+        state.host_tools_extension = None;
         (
             state.process.take(),
             state.current_turn.take().map(|(_, sink)| sink),
@@ -608,17 +609,25 @@ async fn ensure_process(session: &Arc<PiSession>, request: &TurnRequest) -> Resu
     let configuration = super::launch::launch_configuration(&request.profile)?;
     let mut arguments = pi_arguments(request);
     let mut environment = configuration.environment;
-    let browser_extension = request
-        .browser_access
-        .as_deref()
-        .map(PiBrowserExtension::create)
+    let host_tools_extension = (!request.host_tools.is_empty())
+        .then(|| PiHostToolsExtension::create(&request.host_tools))
         .transpose()?;
-    if let (Some(access), Some(extension)) = (
-        request.browser_access.as_deref(),
-        browser_extension.as_ref(),
-    ) {
-        environment.insert("MAXX_BROWSER_ENDPOINT".into(), access.endpoint.clone());
-        environment.insert("MAXX_BROWSER_TOKEN".into(), access.bearer_token.clone());
+    if let Some(extension) = host_tools_extension.as_ref() {
+        let encoded = serde_json::to_string(
+            &request
+                .host_tools
+                .iter()
+                .map(|access| {
+                    serde_json::json!({
+                        "name": access.name,
+                        "endpoint": access.endpoint,
+                        "token": access.bearer_token,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| format!("Could not encode Maxx host-tool configuration: {error}"))?;
+        environment.insert("MAXX_HOST_TOOLS_JSON".into(), encoded);
         arguments.extend([
             "--extension".into(),
             extension.path.to_string_lossy().to_string(),
@@ -633,7 +642,7 @@ async fn ensure_process(session: &Arc<PiSession>, request: &TurnRequest) -> Resu
     {
         let mut state = session.state.lock().await;
         state.process = Some(process.clone());
-        state.browser_extension = browser_extension;
+        state.host_tools_extension = host_tools_extension;
     }
 
     let reader_session = session.clone();
@@ -655,7 +664,7 @@ async fn ensure_process(session: &Arc<PiSession>, request: &TurnRequest) -> Resu
                             }
                         }
                         state.process = None;
-                        state.browser_extension = None;
+                        state.host_tools_extension = None;
                         state.session_id = None;
                         let pending: Vec<_> = state.pending_commands.drain().collect();
                         (state.current_turn.take().map(|(_, s)| s), pending)
@@ -694,14 +703,14 @@ fn pi_arguments(request: &TurnRequest) -> Vec<String> {
     arguments
 }
 
-struct PiBrowserExtension {
+struct PiHostToolsExtension {
     path: PathBuf,
 }
 
-impl PiBrowserExtension {
-    fn create(_access: &crate::browser_runtime::BrowserProviderAccess) -> Result<Self, String> {
+impl PiHostToolsExtension {
+    fn create(_host_tools: &[Arc<HostToolAccess>]) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
-            "maxx-pi-browser-mcp-{}.ts",
+            "maxx-pi-host-tools-mcp-{}.ts",
             Uuid::new_v4().simple()
         ));
         let mut options = std::fs::OpenOptions::new();
@@ -713,19 +722,19 @@ impl PiBrowserExtension {
         }
         let mut file = options
             .open(&path)
-            .map_err(|error| format!("Could not create Pi browser extension: {error}"))?;
+            .map_err(|error| format!("Could not create Pi host-tool extension: {error}"))?;
         if let Err(error) = file
-            .write_all(include_bytes!("../../resources/pi-browser-mcp.ts"))
+            .write_all(include_bytes!("../../resources/pi-host-tools-mcp.ts"))
             .and_then(|_| file.sync_all())
         {
             let _ = std::fs::remove_file(&path);
-            return Err(format!("Could not write Pi browser extension: {error}"));
+            return Err(format!("Could not write Pi host-tool extension: {error}"));
         }
         Ok(Self { path })
     }
 }
 
-impl Drop for PiBrowserExtension {
+impl Drop for PiHostToolsExtension {
     fn drop(&mut self) {
         if let Err(error) = std::fs::remove_file(&self.path) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -917,10 +926,11 @@ mod browser_mcp_tests {
             endpoint: "http://127.0.0.1:43123/mcp".into(),
             bearer_token: "secret-token".into(),
         };
-        let guard = PiBrowserExtension::create(&access).unwrap();
+        let host_tool = Arc::new(access.as_host_tool());
+        let guard = PiHostToolsExtension::create(&[host_tool]).unwrap();
         let path = guard.path.clone();
         let source = std::fs::read_to_string(&path).unwrap();
-        assert!(source.contains("MAXX_BROWSER_ENDPOINT"));
+        assert!(source.contains("MAXX_HOST_TOOLS_JSON"));
         assert!(!source.contains("secret-token"));
         #[cfg(unix)]
         {

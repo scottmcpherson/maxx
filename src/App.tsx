@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { shouldShowBrowserContent, MIN_BROWSER_WIDTH } from "./browser";
 import { AgentsView } from "./components/AgentsView";
+import { AutomationsView } from "./components/AutomationsView";
 import { SidePanel } from "./components/SidePanel";
 import { BrowserResizer, useBrowserWidth } from "./components/BrowserResizer";
 import { Sidebar } from "./components/Sidebar";
@@ -44,6 +45,7 @@ export default function App() {
   const bootstrap = useAppStore((s) => s.bootstrap);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const agentsOpen = useAppStore((s) => s.agentsOpen);
+  const automationsOpen = useAppStore((s) => s.automationsOpen);
   const searchOpen = useAppStore((s) => s.searchOpen);
   const renameOpen = useAppStore((s) => s.renamingThread !== null);
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
@@ -78,6 +80,7 @@ export default function App() {
     browserOpen: true,
     settingsOpen,
     agentsOpen,
+    automationsOpen,
     searchOpen,
     renameOpen,
   });
@@ -315,7 +318,9 @@ export default function App() {
             commitWidth={commitWidth}
             hidden={!sidebarOpen}
           />
-          {agentsOpen ? (
+          {automationsOpen ? (
+            <AutomationsView />
+          ) : agentsOpen ? (
             <AgentsView />
           ) : (
             <ThreadView summaryFits={summaryFits} browserExpanded={browserExpandedActive} />
