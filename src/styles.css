@@ -3296,6 +3296,7 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
 }
 .host-folder-actions .primary:hover:not(:disabled) { background: #8063ef; }
 .host-connect-card { margin-top: 14px; }
+.host-connect-intro-row.has-discovery { border-bottom: 0; }
 .host-listening-row,
 .host-pairing-row,
 .host-action-row { align-items: center; }
@@ -3342,10 +3343,30 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   color: var(--text-dim);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   font-size: 12px;
+  min-width: 74px;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
 }
 .host-copy-field button:hover { background: var(--bg-hover); color: var(--text); }
+.host-copy-field button.is-copied {
+  border-color: rgba(111, 197, 139, .45);
+  background: rgba(111, 197, 139, .12);
+  color: var(--green);
+}
+.host-copy-icon {
+  display: inline-flex;
+  animation: host-copy-icon-in 180ms ease-out;
+}
+@keyframes host-copy-icon-in {
+  from { opacity: 0; transform: scale(.7) rotate(-12deg); }
+  to { opacity: 1; transform: scale(1) rotate(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .host-copy-field button { transition: none; }
+  .host-copy-icon { animation: none; }
+}
 .host-text-input {
   height: 30px;
   padding: 0 8px;
@@ -3402,12 +3423,13 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   font-size: 11.5px;
   line-height: 1.45;
 }
+.host-pairing-row + .host-access-summary { padding-top: 10px; }
 .host-empty-state { padding: 11px 13px 12px; }
 .host-discovery-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 8px;
-  padding: 0 14px 12px;
+  padding: 12px 14px;
 }
 .host-discovery-device {
   position: relative;

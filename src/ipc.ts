@@ -344,6 +344,7 @@ export const ipc = {
     invoke<RemoteHostStatus>("host_connect", { address, code }),
   hostDisconnect: (hostId: string) => invoke<void>("host_disconnect", { hostId }),
   hostRevokePeer: (peerId: string) => invoke<void>("host_revoke_peer", { peerId }),
+  writeClipboardText: (text: string) => invoke<void>("clipboard_write_text", { text }),
   listFolder: (path: string, hostId?: string | null) =>
     invokeOnHost<FolderEntry[]>(hostId, "list_folder", { path }),
   createFolder: (parent: string, name: string, hostId?: string | null) =>

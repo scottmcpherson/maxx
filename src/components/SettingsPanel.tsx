@@ -623,7 +623,7 @@ function ConnectionsSettingsSection() {
       </section>
 
       <section className="settings-card host-connect-card" aria-label="Connect to another Maxx">
-        <div className="settings-row">
+        <div className={`settings-row host-connect-intro-row${discovery?.peers.length ? " has-discovery" : ""}`}>
           <span className="settings-row-copy">
             <strong>Connect to another Maxx</strong>
             <small>Use the address and one-time pairing code shown on that Mac.</small>
@@ -754,7 +754,7 @@ function CopyableValue({ value, label }: { value: string; label: string }) {
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(value);
+      await ipc.writeClipboardText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1400);
     } catch {
@@ -765,8 +765,15 @@ function CopyableValue({ value, label }: { value: string; label: string }) {
   return (
     <div className="host-copy-field">
       <code aria-label={label}>{value}</code>
-      <button type="button" onClick={() => void copy()} aria-label={`Copy ${label}`}>
-        {copied ? <Icons.check size={13} /> : <Icons.copy size={13} />}
+      <button
+        type="button"
+        className={copied ? "is-copied" : undefined}
+        onClick={() => void copy()}
+        aria-label={`${copied ? "Copied" : "Copy"} ${label}`}
+      >
+        <span key={copied ? "copied" : "copy"} className="host-copy-icon" aria-hidden="true">
+          {copied ? <Icons.check size={13} /> : <Icons.copy size={13} />}
+        </span>
         <span>{copied ? "Copied" : "Copy"}</span>
       </button>
     </div>

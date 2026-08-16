@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -272,6 +273,11 @@ async function runAppSmoke(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!state.bridge || !state.newChat || !state.projects) throw new Error(`packaged renderer did not become ready: ${JSON.stringify(state)}`);
+  const clipboardProbe = `maxx-app-smoke-${Date.now()}`;
+  await mainWindow!.webContents.executeJavaScript(
+    `globalThis.maxx.invoke("clipboard_write_text", ${JSON.stringify({ text: clipboardProbe })})`,
+  );
+  if (clipboard.readText() !== clipboardProbe) throw new Error("packaged clipboard bridge did not write the expected text");
   const emptyChatDeadline = Date.now() + 10_000;
   let emptyChatUI = { heading: "", chooseProject: false, environment: false, branch: false };
   while (Date.now() < emptyChatDeadline) {
@@ -858,6 +864,10 @@ function registerIPC(): void {
         // The picker already authorized every path it returned. Keeping this
         // acknowledgement preserves the async attachment flow without
         // accepting arbitrary renderer-supplied file paths.
+        return null;
+      case "clipboard_write_text":
+        if (typeof params.text !== "string") throw new Error("Clipboard text must be a string");
+        clipboard.writeText(params.text);
         return null;
       case "window_toggle_maximize":
         if (mainWindow?.isMaximized()) mainWindow.unmaximize(); else mainWindow?.maximize();
