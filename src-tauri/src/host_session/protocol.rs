@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_NAME: &str = "maxx-environment";
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -36,6 +36,7 @@ impl Capability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccessPreset {
+    Voice,
     Standard,
     Full,
 }
@@ -43,6 +44,7 @@ pub enum AccessPreset {
 impl AccessPreset {
     pub fn capabilities(self) -> Vec<Capability> {
         match self {
+            Self::Voice => vec![Capability::VoiceControl],
             Self::Standard => Capability::standard(),
             Self::Full => Capability::full(),
         }
@@ -114,6 +116,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "import_agent_image" => Some(Capability::SettingsManage),
         "voice_status"
         | "voice_test_stt"
+        | "voice_list_models"
         | "voice_list_voices"
         | "update_voice_settings"
         | "voice_start"
@@ -194,5 +197,13 @@ mod tests {
             Some(Capability::WorkspaceRead)
         );
         assert_eq!(required_capability("future_unreviewed_method"), None);
+    }
+
+    #[test]
+    fn voice_preset_grants_only_speech_processing() {
+        assert_eq!(
+            AccessPreset::Voice.capabilities(),
+            vec![Capability::VoiceControl]
+        );
     }
 }

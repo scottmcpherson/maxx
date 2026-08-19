@@ -32,7 +32,8 @@ export class VoiceConversationController {
   private activeTurnID: string | null = null;
   private finalSubmitted = false;
   private spoken = "";
-  private finishedTurnID: string | null = null;
+  /** Terminal turn IDs remain fenced off from delayed remote runtime events. */
+  private readonly finalizedTurnIDs = new Set<string>();
 
   constructor(
     private readonly threadID: string,
@@ -45,6 +46,10 @@ export class VoiceConversationController {
 
   get snapshot(): ConversationSnapshot {
     return this.value;
+  }
+
+  get boundThreadID(): string {
+    return this.threadID;
   }
 
   get interruptTarget(): { turnID: string; spokenText: string } | null {
@@ -84,7 +89,6 @@ export class VoiceConversationController {
     ) return;
     if (this.finalSubmitted) return;
     this.finalSubmitted = true;
-    this.finishedTurnID = null;
     this.value = transitionConversation(this.value, { type: "transcriptFinal" });
     this.emit({ type: "submitTranscript", text: final });
   }
@@ -98,6 +102,11 @@ export class VoiceConversationController {
   assistantDelta(event: AssistantDelta): void {
     if (event.threadID !== this.threadID || this.seenEvents.has(event.id)) return;
     this.seenEvents.add(event.id);
+    // A provider/runtime event can arrive after the terminal event when the
+    // host refreshes a thread from a remote transport. The terminal event is
+    // the stream boundary; accepting text after it would enqueue audio after
+    // playback completion has already been scheduled.
+    if (this.finalizedTurnIDs.has(event.turnID)) return;
     if (this.value.state !== "waitingForModel" && this.value.state !== "speaking") return;
     if (this.activeTurnID && event.turnID !== this.activeTurnID) return;
     this.activeTurnID = event.turnID;
@@ -106,16 +115,22 @@ export class VoiceConversationController {
     }
   }
 
-  modelFinished(turnID: string): void {
-    if (this.activeTurnID && turnID !== this.activeTurnID) return;
-    if (this.finishedTurnID === turnID) return;
-    this.finishedTurnID = turnID;
+  modelFinished(turnID: string): boolean {
+    if (this.activeTurnID && turnID !== this.activeTurnID) return false;
+    if (this.finalizedTurnIDs.has(turnID)) return false;
+    this.finalizedTurnIDs.add(turnID);
+    // Keep the stale-event fence bounded for long-lived conversations.
+    if (this.finalizedTurnIDs.size > 256) {
+      const oldest = this.finalizedTurnIDs.values().next().value;
+      if (oldest) this.finalizedTurnIDs.delete(oldest);
+    }
     this.activeTurnID = turnID;
     for (const phrase of this.phrases.flush()) {
       this.emit({ type: "speak", turnID, phrase });
     }
     this.value = transitionConversation(this.value, { type: "modelFinished" });
     if (this.value.state === "listening") this.emit({ type: "restartListening" });
+    return true;
   }
 
   /** Bind the canonical turn before its first assistant delta arrives. */

@@ -26,8 +26,9 @@ Maxx will use three boundaries:
 1. **Maxx owns conversation orchestration.** It owns turns, model selection,
    tools, interruption, state, persistence, and the canonical transcript.
 2. **Speech providers own speech processing.** STT and TTS are replaceable
-   provider adapters. The first local provider will be an OpenAI-compatible
-   Voice Service running alongside MLX Audio.
+   provider adapters. Maxx connects directly to standard OpenAI-compatible
+   audio APIs; its optional Voice Service is only needed when an underlying
+   engine lacks named-voice discovery or another normalized capability.
 3. **The client owns capture and playback.** The Maxx UI receiving microphone
    input also plays the response, even when STT, TTS, or LLM compute happens on
    another machine.
@@ -74,13 +75,15 @@ The Phase 1–5 implementation extends the original dictation foundation with:
   `AudioWorklet`.
 - Audio is resampled to 16 kHz mono PCM16 and emitted in approximately 100 ms
   chunks.
-- The Rust sidecar owns bounded streaming STT and TTS sessions, provider
+- The Rust sidecar owns bounded STT and TTS sessions, provider
   credentials, audio ordering, cancellation, and remote-host routing.
 - Partial and final transcripts are normalized before reaching the composer.
-- Voice control is represented in cross-host protocol version 6.
-- xAI and OpenAI-compatible STT are provider adapters behind the same settings
-  and normalized event contract.
-- Named-voice discovery, bounded streamed PCM playback, phrase synthesis, and
+- Voice control is represented in cross-host protocol version 7, including a
+  least-privilege **Voice processing only** pairing preset.
+- xAI realtime STT and standard OpenAI-compatible multipart STT are provider
+  adapters behind the same settings and normalized event contract.
+- Standard model discovery, named-voice discovery, validated PCM16 WAV
+  playback, phrase synthesis, and
   cancellation are implemented without changing the selected LLM runtime.
 - A renderer-owned conversation state machine keeps capture and playback on the
   visible client while speech compute and model execution may use different
@@ -126,8 +129,11 @@ The initial normalized event vocabulary should remain small:
 
 ## Local Voice Service
 
-The local service is a reusable speech provider, not an Open WebUI-specific
-proxy. It should provide:
+The local service is an optional reusable speech provider, not a required Maxx
+bridge and not an Open WebUI-specific proxy. A user whose STT and TTS engines
+already expose the routes below configures those endpoints directly in Maxx.
+Use the service only to add a missing normalized capability, such as a stable
+named-voice catalog. It should provide:
 
 - An OpenAI-compatible STT endpoint.
 - An OpenAI-compatible TTS endpoint.
@@ -190,6 +196,12 @@ Provider configuration should follow Maxx's existing runtime/provider pattern:
 choose a provider, configure an endpoint and credentials if necessary, test the
 connection, and then select the discovered model or voice.
 
+For remote speech processing, pair the speech computer with **Voice processing
+only**, choose it as the processing host, and enter endpoint URLs as seen from
+that computer (for example, `http://127.0.0.1:8000/v1`). Microphone capture and
+speaker playback stay on the visible client. No separately started Maxx bridge
+is part of the normal setup.
+
 ### Composer and conversation
 
 - Keep the existing microphone action for reviewed dictation.
@@ -222,7 +234,8 @@ Important behavior:
 - Server or client VAD determines when an utterance is complete.
 - A final transcript creates a normal user turn in the selected Maxx thread.
 - Assistant text is sent to TTS in sentence or phrase-sized chunks.
-- Playback begins before the full response is complete.
+- Playback begins before the full assistant response is complete because text
+  is synthesized in phrase-sized requests.
 - New user speech cancels pending TTS and stops playback when interruption is
   enabled.
 - Maxx records only text in the canonical chat transcript unless the user

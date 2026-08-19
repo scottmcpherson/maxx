@@ -61,8 +61,12 @@ export function isVoiceHostAvailable(
 ): boolean {
   if (isLocalHost(hostID)) return true;
   const session = remoteSessions.find((candidate) => candidate.host.id === hostID);
+  if (!session) return false;
+  // A null status is the bootstrap/refreshing state; keep an already-loaded
+  // remote usable until the first authoritative host-status snapshot arrives.
+  if (!hostStatus) return true;
   const status = hostStatus?.remotes.find((candidate) => candidate.id === hostID);
-  return Boolean(session && status?.connected !== false) || status?.connected === true;
+  return status?.connected === true;
 }
 
 /**
@@ -120,10 +124,18 @@ export function useVoiceConversation(options: {
   const activeBindingKeyRef = useRef<string | null>(null);
 
   const captureRef = useRef<MicrophoneCapture | null>(null);
+  const captureEpochRef = useRef(0);
   const captureStartPromiseRef = useRef<Promise<void> | null>(null);
+  const captureStopPromiseRef = useRef<Promise<void> | null>(null);
   const sessionRef = useRef<number | null>(null);
   const sessionHostRef = useRef<string>(settings.speechHostID);
-  const sessionOwnerRef = useRef<{ session: number; epoch: number } | null>(null);
+  const sessionOwnerRef = useRef<{
+    session: number;
+    epoch: number;
+    generation: number;
+    hostID: string;
+  } | null>(null);
+  const sessionStopOwnerRef = useRef<{ session: number; epoch: number } | null>(null);
   const sessionSequenceRef = useRef(0);
   const sessionStoppingRef = useRef(false);
   const sttEpochRef = useRef(0);
@@ -141,6 +153,11 @@ export function useVoiceConversation(options: {
     binding: VoiceConversationBinding;
     turn: { turnID: string; spokenText: string };
   } | null>(null);
+  const terminationInFlightRef = useRef(new Map<string, Promise<void>>());
+  const cleanupPromiseRef = useRef<Promise<void> | null>(null);
+  const teardownBarrierRef = useRef<Promise<void> | null>(null);
+  const startAfterCleanupKeyRef = useRef<string | null>(null);
+  const startRef = useRef<() => void>(() => {});
   const generationRef = useRef(0);
   const playbackGenerationRef = useRef(0);
   const telemetryRef = useRef<VoiceLatencyTelemetry | null>(null);
@@ -166,45 +183,89 @@ export function useVoiceConversation(options: {
   }, []);
   notifyRef.current = notify;
 
-  const cleanupResources = useCallback(async () => {
-    generationRef.current += 1;
-    playbackGenerationRef.current += 1;
+  const currentInterruptTarget = useCallback((target: VoiceConversationBinding | null) => {
+    const controller = controllerRef.current;
+    const known = controller?.interruptTarget;
+    if (known) return known;
+    if (voiceTurnIDRef.current) {
+      return { turnID: voiceTurnIDRef.current, spokenText: "" };
+    }
+    const state = controller?.snapshot.state;
+    if (
+      !target
+      || (!pendingVoiceTurnRef.current && state !== "waitingForModel" && state !== "speaking")
+    ) return null;
+    const turnID = useAppStore.getState().activeTurnByThread[target.threadID];
+    return turnID ? { turnID, spokenText: "" } : null;
+  }, []);
 
+  const stopCapture = useCallback(async () => {
+    captureEpochRef.current += 1;
     const capture = captureRef.current;
     captureRef.current = null;
-    if (capture) await capture.stop().catch(() => {});
-
-    const pendingCaptureStart = captureStartPromiseRef.current;
-    const pendingSttStart = sttStartPromiseRef.current;
-    const pendingSttStop = sttStopPromiseRef.current;
-    sttStopRequestedRef.current = true;
-    sttEpochRef.current += 1;
-
-    const session = sessionRef.current;
-    const sessionHost = sessionHostRef.current;
-    sessionRef.current = null;
-    sessionOwnerRef.current = null;
-    sessionStoppingRef.current = false;
-    if (session !== null && !pendingSttStop) {
-      try {
-        await ipc.voiceStop(session, sessionHost);
-      } catch {
-        /* The speech host may already have disconnected. */
-      }
+    if (!capture) {
+      await captureStartPromiseRef.current?.catch(() => {});
+      return;
     }
 
-    // Both starts can be in flight before their refs are populated. Their
-    // generation checks dispose any late microphone/socket that finishes now.
-    await pendingCaptureStart?.catch(() => {});
-    await pendingSttStart?.catch(() => {});
-    await pendingSttStop?.catch(() => {});
-    await queueRef.current?.cancel();
-    vadRef.current.reset();
-    finalTextRef.current = null;
-    voiceTurnIDRef.current = null;
-    pendingVoiceTurnRef.current = false;
-    spokenPlaybackRef.current.clear();
+    const stop = capture.stop();
+    const tracked = stop.finally(() => {
+      if (captureStopPromiseRef.current === tracked) captureStopPromiseRef.current = null;
+    });
+    captureStopPromiseRef.current = tracked;
+    await tracked.catch(() => {});
   }, []);
+
+  const cleanupResources = useCallback((): Promise<void> => {
+    const existing = cleanupPromiseRef.current;
+    if (existing) return existing;
+
+    const cleanup = (async () => {
+      // Invalidate every callback before waiting on any resource. A new
+      // session cannot start until this promise settles, so the final cleanup
+      // below cannot clear state belonging to a replacement conversation.
+      generationRef.current += 1;
+      playbackGenerationRef.current += 1;
+      sttStopRequestedRef.current = true;
+      sttEpochRef.current += 1;
+
+      await stopCapture();
+      const pendingCaptureStart = captureStartPromiseRef.current;
+      const pendingSttStart = sttStartPromiseRef.current;
+      const pendingSttStop = sttStopPromiseRef.current;
+
+      const session = sessionRef.current;
+      const sessionHost = sessionHostRef.current;
+      sessionRef.current = null;
+      sessionOwnerRef.current = null;
+      sessionStopOwnerRef.current = null;
+      sessionStoppingRef.current = false;
+      if (session !== null && !pendingSttStop) {
+        try {
+          await ipc.voiceStop(session, sessionHost);
+        } catch {
+          /* The speech host may already have disconnected. */
+        }
+      }
+
+      // Both starts can be in flight before their refs are populated. Their
+      // generation checks dispose any late microphone/socket that finishes now.
+      await pendingCaptureStart?.catch(() => {});
+      await pendingSttStart?.catch(() => {});
+      await pendingSttStop?.catch(() => {});
+      await queueRef.current?.cancel();
+      vadRef.current.reset();
+      finalTextRef.current = null;
+      voiceTurnIDRef.current = null;
+      pendingVoiceTurnRef.current = false;
+      spokenPlaybackRef.current.clear();
+    })();
+    const tracked = cleanup.finally(() => {
+      if (cleanupPromiseRef.current === tracked) cleanupPromiseRef.current = null;
+    });
+    cleanupPromiseRef.current = tracked;
+    return tracked;
+  }, [stopCapture]);
 
   const terminateCanonicalTurn = useCallback(async (
     target: VoiceConversationBinding | null,
@@ -226,35 +287,70 @@ export function useVoiceConversation(options: {
     turn: { turnID: string; spokenText: string } | null,
   ): Promise<void> => {
     if (!target || !turn) return Promise.resolve();
+    const key = `${target.executionHostID}\0${target.projectID}\0${target.threadID}\0${turn.turnID}`;
+    const existing = terminationInFlightRef.current.get(key);
+    if (existing) return existing;
     const work = terminationPromiseRef.current.then(() => terminateCanonicalTurn(target, turn));
     terminationPromiseRef.current = work.catch(() => {});
+    terminationInFlightRef.current.set(key, work);
+    void work.finally(() => {
+      if (terminationInFlightRef.current.get(key) === work) {
+        terminationInFlightRef.current.delete(key);
+      }
+    });
     return work;
   }, [terminateCanonicalTurn]);
+
+  const scheduleTeardown = useCallback((
+    target: VoiceConversationBinding | null,
+    turn: { turnID: string; spokenText: string } | null,
+  ): Promise<void> => {
+    const existing = teardownBarrierRef.current;
+    if (existing) return existing;
+    const barrier = queueTermination(target, turn)
+      .catch(() => {})
+      .then(() => cleanupResources());
+    const tracked = barrier.finally(() => {
+      if (teardownBarrierRef.current === tracked) teardownBarrierRef.current = null;
+    });
+    teardownBarrierRef.current = tracked;
+    return tracked;
+  }, [cleanupResources, queueTermination]);
 
   const runEffectRef = useRef<(effect: ConversationEffect, token: object) => void>(() => {});
 
   const fail = useCallback((reason: unknown) => {
-    const controller = controllerRef.current;
     const target = activeBindingRef.current;
-    const turn = controller?.interruptTarget
-      ?? (voiceTurnIDRef.current ? { turnID: voiceTurnIDRef.current, spokenText: "" } : null);
+    const turn = currentInterruptTarget(target);
     controllerTokenRef.current = null;
     activeRef.current = false;
-    controller?.fail(String(reason));
-    void queueTermination(target, turn)
-      .catch(() => {})
-      .finally(() => cleanupResources());
+    controllerRef.current?.fail(String(reason));
+    void scheduleTeardown(target, turn);
     notify();
-  }, [cleanupResources, notify, queueTermination]);
+  }, [currentInterruptTarget, notify, scheduleTeardown]);
 
   const ensureCapture = useCallback(async () => {
     if (captureRef.current) return;
     if (captureStartPromiseRef.current) return captureStartPromiseRef.current;
     const generation = generationRef.current;
+    const captureEpoch = captureEpochRef.current;
     const start = async () => {
+      const pendingCleanup = cleanupPromiseRef.current ?? teardownBarrierRef.current;
+      if (pendingCleanup) await pendingCleanup;
+      if (
+        !activeRef.current
+        || generation !== generationRef.current
+        || captureEpoch !== captureEpochRef.current
+        || controllerRef.current?.snapshot.muted
+      ) return;
       const capture = await startMicrophoneCapture(
         (chunk) => {
-          if (!activeRef.current || generation !== generationRef.current || settingsRef.current.isEnabled === false) return;
+          if (
+            !activeRef.current
+            || generation !== generationRef.current
+            || captureEpoch !== captureEpochRef.current
+            || settingsRef.current.isEnabled === false
+          ) return;
           if (controllerRef.current?.snapshot.muted) return;
           const state = controllerRef.current?.snapshot.state;
           if (!settingsRef.current.allowInterruption && (state === "speaking" || state === "waitingForModel")) return;
@@ -270,7 +366,12 @@ export function useVoiceConversation(options: {
         {
           inputDeviceId: settingsRef.current.inputDeviceID,
           onLevel: (level) => {
-            if (!activeRef.current || controllerRef.current?.snapshot.muted) return;
+            if (
+              !activeRef.current
+              || generation !== generationRef.current
+              || captureEpoch !== captureEpochRef.current
+              || controllerRef.current?.snapshot.muted
+            ) return;
             const event = vadRef.current.update(level);
             if (event === "speech.started") {
               const wasSpeaking = controllerRef.current?.snapshot.state === "speaking"
@@ -292,11 +393,13 @@ export function useVoiceConversation(options: {
       if (
         !activeRef.current
         || generation !== generationRef.current
+        || captureEpoch !== captureEpochRef.current
         || controllerRef.current?.snapshot.muted
       ) {
         await capture.stop().catch(() => {});
         return;
       }
+      captureEpochRef.current = captureEpoch;
       captureRef.current = capture;
     };
     const promise = start().finally(() => {
@@ -322,6 +425,15 @@ export function useVoiceConversation(options: {
     const epoch = ++sttEpochRef.current;
     sttStopRequestedRef.current = false;
     const start = async () => {
+      const pendingCleanup = cleanupPromiseRef.current ?? teardownBarrierRef.current;
+      if (pendingCleanup) await pendingCleanup;
+      if (
+        !activeRef.current
+        || generation !== generationRef.current
+        || epoch !== sttEpochRef.current
+        || sttStopRequestedRef.current
+        || controllerRef.current?.snapshot.muted
+      ) return;
       try {
         const session = await ipc.voiceStart(currentSettings, currentSettings.speechHostID);
         if (
@@ -335,7 +447,13 @@ export function useVoiceConversation(options: {
           return;
         }
         sessionRef.current = session;
-        sessionOwnerRef.current = { session, epoch };
+        sessionOwnerRef.current = {
+          session,
+          epoch,
+          generation,
+          hostID: currentSettings.speechHostID,
+        };
+        sessionStopOwnerRef.current = null;
         sessionHostRef.current = currentSettings.speechHostID;
         sessionSequenceRef.current = 0;
         sessionStoppingRef.current = false;
@@ -361,7 +479,7 @@ export function useVoiceConversation(options: {
     });
     sttStartPromiseRef.current = promise;
     return promise;
-  }, [fail]);
+  }, [cleanupPromiseRef, fail]);
   startSttSessionRef.current = startSttSession;
 
   const stopSttSession = useCallback(async () => {
@@ -373,14 +491,21 @@ export function useVoiceConversation(options: {
     const session = sessionRef.current;
     const owner = sessionOwnerRef.current;
     if (session === null || !owner) return;
-    if (sttStopPromiseRef.current) return sttStopPromiseRef.current;
+    if (
+      sessionStopOwnerRef.current?.session === owner.session
+      && sessionStopOwnerRef.current?.epoch === owner.epoch
+    ) {
+      return sttStopPromiseRef.current ?? Promise.resolve();
+    }
 
     sessionStoppingRef.current = true;
+    sessionStopOwnerRef.current = { session: owner.session, epoch: owner.epoch };
     const stop = ipc.voiceStop(session, sessionHostRef.current)
       .catch((reason) => {
         if (sessionOwnerRef.current?.session === owner.session && sessionOwnerRef.current?.epoch === owner.epoch) {
           sessionRef.current = null;
           sessionOwnerRef.current = null;
+          sessionStopOwnerRef.current = null;
           sessionStoppingRef.current = false;
         }
         if (activeRef.current && !controllerRef.current?.snapshot.muted) {
@@ -390,19 +515,33 @@ export function useVoiceConversation(options: {
       .finally(() => {
         // A successful command drains asynchronously. The matching stopped
         // event, not command completion, releases ownership and restarts STT.
-        sttStopPromiseRef.current = null;
+        if (
+          sessionStopOwnerRef.current?.session === owner.session
+          && sessionStopOwnerRef.current?.epoch === owner.epoch
+        ) {
+          sttStopPromiseRef.current = null;
+        }
       });
     sttStopPromiseRef.current = stop;
     return stop;
   }, [fail]);
   finishUtteranceRef.current = stopSttSession;
 
-  const handleVoiceEvent = useCallback((event: VoiceEvent) => {
-    if (!activeRef.current || event.session !== sessionRef.current || sessionOwnerRef.current?.session !== event.session) return;
+  const handleVoiceEvent = useCallback((event: VoiceEvent, sourceHostID: string) => {
+    const owner = sessionOwnerRef.current;
+    if (
+      !activeRef.current
+      || sourceHostID !== sessionHostRef.current
+      || event.session !== sessionRef.current
+      || owner?.session !== event.session
+      || owner.hostID !== sourceHostID
+      || owner.generation !== generationRef.current
+    ) return;
     if (event.kind === "state") {
       if (event.state === "stopped") {
         sessionRef.current = null;
         sessionOwnerRef.current = null;
+        sessionStopOwnerRef.current = null;
         sessionStoppingRef.current = false;
         sttStopPromiseRef.current = null;
         sttStopRequestedRef.current = false;
@@ -446,7 +585,8 @@ export function useVoiceConversation(options: {
     mountedRef.current = true;
     let dispose: (() => void) | undefined;
     let cancelled = false;
-    void ipc.onVoiceEvent(handleVoiceEvent, settings.speechHostID).then((unlisten) => {
+    const sourceHostID = settings.speechHostID;
+    void ipc.onVoiceEvent((event) => handleVoiceEvent(event, sourceHostID), sourceHostID).then((unlisten) => {
       if (cancelled) unlisten();
       else dispose = unlisten;
     });
@@ -479,9 +619,15 @@ export function useVoiceConversation(options: {
     if (!currentBinding) return;
     switch (effect.type) {
       case "submitTranscript": {
+        const submitGeneration = generationRef.current;
         const submit = async () => {
           await terminationPromiseRef.current;
-          if (controllerTokenRef.current !== token || !activeRef.current || activeBindingRef.current !== currentBinding) return;
+          if (
+            controllerTokenRef.current !== token
+            || !activeRef.current
+            || generationRef.current !== submitGeneration
+            || activeBindingRef.current !== currentBinding
+          ) return;
           const state = useAppStore.getState();
           if (
             state.selectedProjectID !== currentBinding.projectID
@@ -504,7 +650,12 @@ export function useVoiceConversation(options: {
           }
           pendingVoiceTurnRef.current = true;
           const sent = await sendPromptRef.current(effect.text, []);
-          if (controllerTokenRef.current !== token || !activeRef.current || activeBindingRef.current !== currentBinding) {
+          if (
+            controllerTokenRef.current !== token
+            || !activeRef.current
+            || generationRef.current !== submitGeneration
+            || activeBindingRef.current !== currentBinding
+          ) {
             const staleTurn = useAppStore.getState().activeTurnByThread[currentBinding.threadID];
             if (staleTurn) {
               await queueTermination(currentBinding, { turnID: staleTurn, spokenText: "" }).catch(() => {});
@@ -527,6 +678,7 @@ export function useVoiceConversation(options: {
         break;
       }
       case "speak": {
+        if (!activeRef.current || activeBindingRef.current !== currentBinding) return;
         const generation = playbackGenerationRef.current;
         controllerRef.current?.playbackStarted();
         notify();
@@ -589,10 +741,10 @@ export function useVoiceConversation(options: {
       case "stopSession":
         activeRef.current = false;
         controllerTokenRef.current = null;
-        void terminationPromiseRef.current.finally(() => cleanupResources());
+        void scheduleTeardown(currentBinding, currentInterruptTarget(currentBinding));
         break;
     }
-  }, [cleanupResources, fail, notify, queueTermination, stopSttSession]);
+  }, [currentInterruptTarget, fail, notify, scheduleTeardown, stopSttSession]);
   runEffectRef.current = runEffect;
 
   const start = useCallback(() => {
@@ -601,7 +753,19 @@ export function useVoiceConversation(options: {
       setSnapshot({ ...IDLE_CONVERSATION, state: "error", error: "Conversation requires a TTS endpoint, model, and named voice." });
       return;
     }
-    if (controllerRef.current && snapshot.state !== "ended" && snapshot.state !== "error") return;
+    if (controllerRef.current && !["ended", "error"].includes(controllerRef.current.snapshot.state)) return;
+    const pendingCleanup = cleanupPromiseRef.current ?? teardownBarrierRef.current;
+    if (pendingCleanup) {
+      if (startAfterCleanupKeyRef.current !== bindingKey) {
+        startAfterCleanupKeyRef.current = bindingKey;
+        void pendingCleanup.finally(() => {
+          if (startAfterCleanupKeyRef.current !== bindingKey) return;
+          startAfterCleanupKeyRef.current = null;
+          if (mountedRef.current && bindingKeyRef.current === bindingKey) startRef.current();
+        });
+      }
+      return;
+    }
     const token = {};
     const controller = new VoiceConversationController(
       binding.thread.id,
@@ -643,34 +807,29 @@ export function useVoiceConversation(options: {
           fail(`Could not open the microphone: ${String(reason)}`);
         }
       });
-  }, [binding, enabled, ensureCapture, fail, notify, settings.allowInterruption, settings.mode, settings.ttsApiBase, settings.ttsModel, snapshot.state, voiceConfigKey]);
+  }, [binding, bindingKey, cleanupPromiseRef, ensureCapture, fail, notify, settings.allowInterruption, settings.mode, settings.ttsApiBase, settings.ttsModel, voiceConfigKey]);
+  startRef.current = start;
 
   const end = useCallback(() => {
     const controller = controllerRef.current;
     if (!controller || snapshot.state === "ended") return;
     const target = activeBindingRef.current;
-    const turn = controller.interruptTarget
-      ?? (voiceTurnIDRef.current ? { turnID: voiceTurnIDRef.current, spokenText: "" } : null);
+    const turn = currentInterruptTarget(target);
     controllerTokenRef.current = null;
     activeRef.current = false;
     controller.end();
-    void queueTermination(target, turn)
-      .catch(() => {})
-      .finally(() => cleanupResources());
+    void scheduleTeardown(target, turn);
     notify();
-  }, [cleanupResources, notify, queueTermination, snapshot.state]);
+  }, [currentInterruptTarget, notify, scheduleTeardown, snapshot.state]);
 
   const mute = useCallback(() => {
     controllerRef.current?.mute(true);
-    const capture = captureRef.current;
-    captureRef.current = null;
-    if (capture) void capture.stop().catch(() => {});
     vadRef.current.reset();
     // Keep ownership until the matching stopped event. Clearing it when the
     // command resolves can erase a replacement session started by that event.
-    void stopSttSession();
+    void Promise.all([stopCapture(), stopSttSession()]);
     notify();
-  }, [notify, stopSttSession]);
+  }, [notify, stopCapture, stopSttSession]);
 
   const unmute = useCallback(() => {
     controllerRef.current?.mute(false);
@@ -679,7 +838,13 @@ export function useVoiceConversation(options: {
     if (!token) return;
     activeRef.current = true;
     notify();
-    void ensureCapture()
+    const pendingCaptureStop = captureStopPromiseRef.current;
+    const pendingSttStop = sttStopPromiseRef.current;
+    void Promise.all([
+      pendingCaptureStop ?? Promise.resolve(),
+      pendingSttStop ?? Promise.resolve(),
+    ])
+      .then(() => ensureCapture())
       .then(() => {
         if (controllerTokenRef.current !== token || !activeRef.current) return;
         return startSttSessionRef.current();
@@ -699,25 +864,35 @@ export function useVoiceConversation(options: {
 
   const retry = useCallback(() => {
     if (!binding || !enabled) return;
-    if (!controllerRef.current) {
+    // Failures deliberately invalidate the old controller token before
+    // cleanup. Recreate the controller through start() rather than trying to
+    // resume an instance whose effects can no longer reach the hook.
+    if (!controllerRef.current || !controllerTokenRef.current) {
       start();
       return;
     }
     controllerRef.current?.retry();
     const token = controllerTokenRef.current;
     if (!token) return;
-    activeRef.current = true;
-    generationRef.current += 1;
-    playbackGenerationRef.current += 1;
-    sttStopRequestedRef.current = false;
     notify();
     const pendingTermination = reconnectTerminationRef.current;
     reconnectTerminationRef.current = null;
-    const prepare = pendingTermination
+    activeRef.current = false;
+    const prepare = Promise.all([
+      pendingTermination
       ? queueTermination(pendingTermination.binding, pendingTermination.turn)
-      : Promise.resolve();
+        : Promise.resolve(),
+      cleanupPromiseRef.current ?? teardownBarrierRef.current ?? Promise.resolve(),
+    ]);
     void prepare
-      .then(() => ensureCapture())
+      .then(() => {
+        if (controllerTokenRef.current !== token || !mountedRef.current) return;
+        generationRef.current += 1;
+        playbackGenerationRef.current += 1;
+        sttStopRequestedRef.current = false;
+        activeRef.current = true;
+        return ensureCapture();
+      })
       .then(() => {
         if (controllerTokenRef.current !== token || !activeRef.current) return;
         return startSttSessionRef.current();
@@ -737,22 +912,18 @@ export function useVoiceConversation(options: {
   useEffect(() => {
     if (bindingKeyRef.current === bindingKey) return;
     bindingKeyRef.current = bindingKey;
-    const previousController = controllerRef.current;
     const previousBinding = activeBindingRef.current;
-    const previousTurn = previousController?.interruptTarget
-      ?? (voiceTurnIDRef.current ? { turnID: voiceTurnIDRef.current, spokenText: "" } : null);
+    const previousTurn = currentInterruptTarget(previousBinding);
     controllerTokenRef.current = null;
     activeRef.current = false;
     controllerRef.current = null;
     activeBindingRef.current = null;
     activeBindingKeyRef.current = null;
     reconnectTerminationRef.current = null;
-    void queueTermination(previousBinding, previousTurn)
-      .catch(() => {})
-      .finally(() => cleanupResources());
+    void scheduleTeardown(previousBinding, previousTurn);
     setSnapshot(IDLE_CONVERSATION);
     setTelemetry(null);
-  }, [bindingKey, cleanupResources, queueTermination]);
+  }, [bindingKey, currentInterruptTarget, scheduleTeardown]);
 
   useEffect(() => {
     const thread = binding?.thread;
@@ -777,35 +948,27 @@ export function useVoiceConversation(options: {
     const monitoredHostIDs = [settings.speechHostID, binding.executionHostID];
     const missingHost = monitoredHostIDs.some((hostID) => !isLocalHost(hostID) && !isVoiceHostAvailable(hostID, remoteSessions, hostStatus));
     if (!missingHost) return;
-    const controller = controllerRef.current;
     const target = activeBindingRef.current;
-    const turn = controller?.interruptTarget
-      ?? (voiceTurnIDRef.current ? { turnID: voiceTurnIDRef.current, spokenText: "" } : null);
+    const turn = currentInterruptTarget(target);
     controllerRef.current?.connectionLost();
     reconnectTerminationRef.current = target && turn ? { binding: target, turn } : null;
     activeRef.current = false;
-    void queueTermination(target, turn)
-      .catch(() => {})
-      .finally(() => cleanupResources());
+    void scheduleTeardown(target, turn);
     notify();
-  }, [binding, cleanupResources, hostStatus, notify, queueTermination, remoteSessions, settings.speechHostID]);
+  }, [binding, currentInterruptTarget, hostStatus, notify, remoteSessions, scheduleTeardown, settings.speechHostID]);
 
   useEffect(() => {
     return () => {
-      const controller = controllerRef.current;
       const target = activeBindingRef.current;
-      const turn = controller?.interruptTarget
-        ?? (voiceTurnIDRef.current ? { turnID: voiceTurnIDRef.current, spokenText: "" } : null);
+      const turn = currentInterruptTarget(target);
       controllerTokenRef.current = null;
       mountedRef.current = false;
       activeRef.current = false;
-      void queueTermination(target, turn)
-        .catch(() => {})
-        .finally(() => cleanupResources());
+      void scheduleTeardown(target, turn);
       telemetryRef.current = null;
       void queueRef.current?.dispose();
     };
-  }, [cleanupResources, queueTermination]);
+  }, [scheduleTeardown]);
 
   const isActive = snapshot.state !== "idle" && snapshot.state !== "ended";
   const canStart = enabled
@@ -840,6 +1003,7 @@ export function processRuntimeEvent(
   fail: (reason: unknown) => void,
   markModelToken: () => void,
 ): void {
+  if (event.threadID !== controller.boundThreadID) return;
   if (event.kind === EventKind.assistantTextDelta || event.kind === "assistant.text.done") {
     if (voiceTurnIDRef.current && event.turnID !== voiceTurnIDRef.current) return;
     if (!voiceTurnIDRef.current && !pendingVoiceTurnRef.current) return;
@@ -866,7 +1030,7 @@ export function processRuntimeEvent(
     notify();
     return;
   }
-  controller.modelFinished(event.turnID);
+  if (!controller.modelFinished(event.turnID)) return;
   notify();
   void waitForPlayback(event.turnID, generation);
 }

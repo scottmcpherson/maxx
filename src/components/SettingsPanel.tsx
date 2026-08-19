@@ -28,6 +28,7 @@ import type { VoiceAudioDevices } from "../voice/devices";
 import { DEFAULT_VOICE_SETTINGS, VOICE_LANGUAGES } from "../voice/types";
 import type {
   VoiceCredentialStatus,
+  VoiceModel,
   VoiceProfile,
   VoiceProviderTestResult,
   VoiceSettings,
@@ -602,6 +603,7 @@ function ConnectionsSettingsSection() {
                     aria-label="Pairing access"
                     onChange={(event) => setPreset(event.target.value as AccessPreset)}
                   >
+                    <option value="voice">Voice processing only</option>
                     <option value="standard">Standard access</option>
                     <option value="full">Full access</option>
                   </select>
@@ -802,6 +804,8 @@ function VoiceSettingsSection() {
   const [status, setStatus] = useState<VoiceCredentialStatus | null>(null);
   const [testResult, setTestResult] = useState<VoiceProviderTestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  const [sttModels, setSttModels] = useState<VoiceModel[]>([]);
+  const [sttModelsError, setSttModelsError] = useState<string | null>(null);
   const [devices, setDevices] = useState<VoiceAudioDevices>({ inputs: [], outputs: [] });
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [voiceCatalog, setVoiceCatalog] = useState<VoiceProfile[]>([]);
@@ -809,6 +813,7 @@ function VoiceSettingsSection() {
   const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
   const [ttsEndpointDraft, setTtsEndpointDraft] = useState(settings.ttsApiBase);
   const [ttsModelDraft, setTtsModelDraft] = useState(settings.ttsModel);
+  const [voiceDraft, setVoiceDraft] = useState(settings.voiceID);
   const [ttsTestText, setTtsTestText] = useState("This is a Maxx voice test.");
   const [ttsTesting, setTtsTesting] = useState(false);
   const [ttsTestMessage, setTtsTestMessage] = useState<string | null>(null);
@@ -816,6 +821,27 @@ function VoiceSettingsSection() {
 
   // Re-probed after every change: turning the opt-in on should immediately
   // show whose sign-in was found, not wait for the next dictation attempt.
+  useEffect(() => {
+    let current = true;
+    if (settings.sttProvider !== "openai-compatible" || !settings.sttApiBase.trim()) {
+      setSttModels([]);
+      setSttModelsError(null);
+      return () => { current = false; };
+    }
+    void ipc.voiceListModels(settings, settings.speechHostID)
+      .then((models) => {
+        if (!current) return;
+        setSttModels(models);
+        setSttModelsError(models.length === 0 ? "No models were advertised; enter the model ID manually." : null);
+      })
+      .catch((reason) => {
+        if (!current) return;
+        setSttModels([]);
+        setSttModelsError(`Model discovery unavailable; enter the model ID manually. ${String(reason)}`);
+      });
+    return () => { current = false; };
+  }, [settings.sttProvider, settings.sttApiBase, settings.speechHostID]);
+
   useEffect(() => {
     let current = true;
     void ipc
@@ -859,7 +885,8 @@ function VoiceSettingsSection() {
   useEffect(() => {
     setTtsEndpointDraft(settings.ttsApiBase);
     setTtsModelDraft(settings.ttsModel);
-  }, [settings.ttsApiBase, settings.ttsModel]);
+    setVoiceDraft(settings.voiceID);
+  }, [settings.ttsApiBase, settings.ttsModel, settings.voiceID]);
 
   useEffect(() => {
     let current = true;
@@ -867,7 +894,7 @@ function VoiceSettingsSection() {
     if (!endpoint) {
       setVoiceCatalog([]);
       setVoiceCatalogLoading(false);
-      setVoiceCatalogError("Configure a TTS endpoint to load named voices.");
+      setVoiceCatalogError("Configure a TTS endpoint, then choose or enter a voice ID.");
       return () => { current = false; };
     }
 
@@ -877,12 +904,12 @@ function VoiceSettingsSection() {
       .then((voices) => {
         if (!current) return;
         setVoiceCatalog(voices);
-        if (voices.length === 0) setVoiceCatalogError("The selected speech host returned no voices.");
+        if (voices.length === 0) setVoiceCatalogError("No voice catalog is available; enter the provider's voice ID manually.");
       })
       .catch((reason) => {
         if (!current) return;
         setVoiceCatalog([]);
-        setVoiceCatalogError(`Could not load voices from ${settings.speechHostID === "local" ? "this computer" : "the remote speech host"}: ${String(reason)}`);
+        setVoiceCatalogError(`Voice discovery is unavailable; enter the provider's voice ID manually. ${String(reason)}`);
       })
       .finally(() => {
         if (current) setVoiceCatalogLoading(false);
@@ -923,12 +950,14 @@ function VoiceSettingsSection() {
   const commitTtsSettings = () => {
     const ttsApiBase = ttsEndpointDraft.trim();
     const ttsModel = ttsModelDraft.trim();
-    if (ttsApiBase === settings.ttsApiBase && ttsModel === settings.ttsModel) return;
-    update({ ttsApiBase, ttsModel });
+    const voiceID = voiceDraft.trim();
+    const catalogVoice = voiceCatalog.find((voice) => voice.id === voiceID);
+    const nextModel = catalogVoice?.model ?? ttsModel;
+    if (ttsApiBase === settings.ttsApiBase && nextModel === settings.ttsModel && voiceID === settings.voiceID) return;
+    update({ ttsApiBase, ttsModel: nextModel, voiceID });
   };
 
-  const selectedVoice = voiceCatalog.find((voice) => voice.id === settings.voiceID);
-  const voiceIsSelected = Boolean(selectedVoice);
+  const voiceIsSelected = Boolean(settings.voiceID.trim());
 
   const testVoice = () => {
     if (!settings.ttsApiBase.trim() || !settings.ttsModel.trim()) {
@@ -936,7 +965,7 @@ function VoiceSettingsSection() {
       return;
     }
     if (!voiceIsSelected) {
-      setTtsTestMessage("Select a named catalog voice before testing voice.");
+      setTtsTestMessage("Choose or enter a voice ID before testing voice.");
       return;
     }
     if (!ttsTestText.trim()) {
@@ -1030,7 +1059,7 @@ function VoiceSettingsSection() {
             <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Speech-to-text provider</strong>
-            <small>Choose xAI streaming STT or an OpenAI-compatible streaming endpoint.</small>
+            <small>Choose xAI realtime transcription or a standard OpenAI-compatible audio API.</small>
           </span>
           <select
             aria-label="Speech-to-text provider"
@@ -1059,15 +1088,23 @@ function VoiceSettingsSection() {
         <div className="settings-row">
           <span className="settings-row-copy">
             <strong>STT model</strong>
-            <small>Optional for xAI; required for OpenAI-compatible services.</small>
+            <small>{settings.sttProvider === "xai"
+              ? "Optional; leave blank to use the provider default."
+              : sttModelsError ?? (sttModels.length > 0
+                ? `${sttModels.length} model${sttModels.length === 1 ? "" : "s"} discovered. Choose one or enter an exact ID.`
+                : "Required for OpenAI-compatible services.")}</small>
           </span>
           <input
             aria-label="Speech-to-text model"
             type="text"
+            list={settings.sttProvider === "openai-compatible" ? "voice-stt-models" : undefined}
             defaultValue={settings.sttModel}
             placeholder={settings.sttProvider === "xai" ? "Provider default" : "whisper-1"}
             onBlur={(event) => update({ sttModel: event.target.value.trim() })}
           />
+          <datalist id="voice-stt-models">
+            {sttModels.map((model) => <option key={model.id} value={model.id} />)}
+          </datalist>
         </div>
 
         {settings.sttProvider === "xai" && <div className="settings-row">
@@ -1110,7 +1147,9 @@ function VoiceSettingsSection() {
         <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Test transcription</strong>
-            <small>{testResult?.message ?? "Open and close the selected provider's streaming connection."}</small>
+            <small>{testResult?.message ?? (settings.sttProvider === "xai"
+              ? "Open and close the selected provider's realtime connection."
+              : "Upload a short silent WAV to verify the standard transcription route.")}</small>
           </span>
           <button className="secondary-button" type="button" disabled={testing} onClick={testConnection}>
             {testing ? "Testing…" : "Test connection"}
@@ -1233,11 +1272,11 @@ function VoiceSettingsSection() {
         <div className="voice-settings-group">
           <header className="voice-settings-group-header">
             <h2>Speech output</h2>
-            <p>Stream synthesized replies from {speechHostLabel} to local playback.</p>
+            <p>Send synthesized replies from {speechHostLabel} to local playback.</p>
           </header>
           <section className="settings-card voice-settings" aria-label="Speech output settings">
         <div className="settings-row">
-          <span className="settings-row-copy"><strong>TTS provider</strong><small>The current synthesis adapter uses the OpenAI-compatible streaming contract.</small></span>
+          <span className="settings-row-copy"><strong>TTS provider</strong><small>Uses the standard OpenAI-compatible speech endpoint and self-describing WAV audio.</small></span>
           <select aria-label="Text-to-speech provider" value={settings.ttsProvider} disabled>
             <option value="openai-compatible">OpenAI-compatible</option>
           </select>
@@ -1267,32 +1306,29 @@ function VoiceSettingsSection() {
         <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Voice</strong>
-            <small>Catalog from {speechHostLabel}. {voiceCatalogLoading ? "Loading voices…" : voiceCatalogError ?? "Choose a named provider voice."}</small>
+            <small>Catalog from {speechHostLabel}. {voiceCatalogLoading ? "Loading voices…" : voiceCatalogError ?? "Choose a discovered voice or enter the provider's voice ID."}</small>
           </span>
-          <select
+          <input
             aria-label="Text-to-speech voice"
-            value={settings.voiceID}
-            disabled={voiceCatalogLoading || voiceCatalog.length === 0}
-            onChange={(event) => {
-              const voice = voiceCatalog.find((candidate) => candidate.id === event.target.value);
-              if (voice) update({ voiceID: voice.id, ttsModel: voice.model });
-            }}
-          >
-            <option value="">Select a named voice</option>
-            {settings.voiceID && !voiceCatalog.some((voice) => voice.id === settings.voiceID) && (
-              <option value={settings.voiceID} disabled>Unavailable selection ({settings.voiceID})</option>
-            )}
+            type="text"
+            list="voice-tts-voices"
+            value={voiceDraft}
+            placeholder="alloy"
+            onChange={(event) => setVoiceDraft(event.target.value)}
+            onBlur={commitTtsSettings}
+          />
+          <datalist id="voice-tts-voices">
             {voiceCatalog.map((voice) => (
               <option key={voice.id} value={voice.id}>
                 {voice.name} · {voice.model} · {voice.language}
               </option>
             ))}
-          </select>
+          </datalist>
         </div>
         <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Test voice</strong>
-            <small>Streams a short phrase, starts playback on its first PCM chunk, and can be canceled at any time.</small>
+            <small>Requests a short WAV phrase, validates its audio format, and plays it on this computer.</small>
           </span>
           <div className="settings-voice-test-actions">
             <input

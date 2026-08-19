@@ -61,6 +61,41 @@ describe("VoiceConversationController", () => {
     expect(effects.at(-1)).toEqual({ type: "restartListening" });
   });
 
+  it("drops assistant deltas that arrive after the model stream is terminal", () => {
+    const { value, effects } = controller();
+    value.start();
+    value.transcriptFinal("Question");
+    value.modelStarted("turn-a");
+    value.modelFinished("turn-a");
+    value.assistantDelta({
+      id: "late-delta",
+      threadID: "thread-a",
+      turnID: "turn-a",
+      text: "Must not be spoken.",
+    });
+
+    expect(effects.some((effect) => effect.type === "speak")).toBe(false);
+  });
+
+  it("does not bind a late prior-turn delta to the next pending turn", () => {
+    const { value, effects } = controller();
+    value.start();
+    value.transcriptFinal("First");
+    value.modelStarted("turn-a");
+    value.modelFinished("turn-a");
+    value.playbackFinished();
+
+    value.transcriptFinal("Second");
+    value.assistantDelta({
+      id: "late-prior-turn",
+      threadID: "thread-a",
+      turnID: "turn-a",
+      text: "Old answer.",
+    });
+
+    expect(effects.filter((effect) => effect.type === "speak")).toHaveLength(0);
+  });
+
   it("barge-in cancels speech and the partial model turn before accepting speech", () => {
     const { value, effects } = controller();
     value.start();

@@ -159,7 +159,6 @@ impl Default for VoiceSettings {
 pub const DEFAULT_API_BASE: &str = "https://api.x.ai";
 pub const DEFAULT_LANGUAGE: &str = "en";
 const XAI_STT_PATH: &str = "v1/stt";
-const OPENAI_STT_STREAM_PATH: &str = "v1/audio/transcriptions/stream";
 
 fn default_speech_host_id() -> String {
     "local".into()
@@ -205,10 +204,13 @@ impl VoiceSettings {
     /// Refuses a plaintext base: the bearer travels in a request header, and
     /// no configuration mistake should be able to put it on the wire in clear.
     pub fn stt_ws_url(&self) -> Result<String, String> {
-        match self.stt_provider {
-            SttProvider::Xai => self.xai_stt_ws_url(),
-            SttProvider::OpenaiCompatible => self.openai_stt_ws_url(),
+        if self.stt_provider != SttProvider::Xai {
+            return Err(
+                "OpenAI-compatible transcription uses HTTP multipart uploads, not a WebSocket."
+                    .into(),
+            );
         }
+        self.xai_stt_ws_url()
     }
 
     fn xai_stt_ws_url(&self) -> Result<String, String> {
@@ -244,10 +246,17 @@ impl VoiceSettings {
         ))
     }
 
-    /// The local service exposes streaming STT as a documented extension to
-    /// OpenAI's batch `/v1/audio/transcriptions` route. Standard OpenAI
-    /// transcription is request/response and cannot provide interim results.
-    fn openai_stt_ws_url(&self) -> Result<String, String> {
+    /// Standard OpenAI-compatible batch transcription endpoint.
+    pub fn stt_transcriptions_url(&self) -> Result<String, String> {
+        self.openai_stt_http_url("audio/transcriptions")
+    }
+
+    /// Standard OpenAI-compatible model catalog endpoint.
+    pub fn stt_models_url(&self) -> Result<String, String> {
+        self.openai_stt_http_url("models")
+    }
+
+    fn openai_stt_http_url(&self, suffix: &str) -> Result<String, String> {
         let base = self.stt_api_base.trim().trim_end_matches('/');
         if base.is_empty() {
             return Err(
@@ -255,36 +264,22 @@ impl VoiceSettings {
             );
         }
         let (scheme, host) = if let Some(host) = strip_scheme(base, "https://") {
-            ("wss", host)
+            ("https", host)
         } else if let Some(host) = strip_scheme(base, "http://") {
-            ("ws", host)
-        } else if let Some(host) = strip_scheme(base, "wss://") {
-            ("wss", host)
-        } else if let Some(host) = strip_scheme(base, "ws://") {
-            ("ws", host)
+            ("http", host)
         } else {
-            ("ws", base)
+            return Err("The OpenAI-compatible STT endpoint must use http:// or https://.".into());
         };
         validate_endpoint_host(host, "OpenAI-compatible STT")?;
         let path = if host.ends_with("/v1") {
-            OPENAI_STT_STREAM_PATH
-                .strip_prefix("v1/")
-                .expect("stream path has a v1 prefix")
+            suffix.to_string()
         } else {
-            OPENAI_STT_STREAM_PATH
+            format!("v1/{suffix}")
         };
-        let model = percent_encode_query_component(self.stt_model.trim());
-        Ok(format!(
-            "{scheme}://{host}/{path}?sample_rate={rate}&encoding=pcm&interim_results=true&language={language}&model={model}",
-            rate = VOICE_SAMPLE_RATE,
-            language = language_for_api(&self.language),
-            model = model,
-        ))
+        Ok(format!("{scheme}://{host}/{path}"))
     }
 
-    /// HTTP endpoint for the OpenAI-compatible streaming TTS contract.
-    /// `response_format=pcm` is selected by the Rust adapter so the renderer
-    /// never has to guess how to decode provider output.
+    /// HTTP endpoint for the OpenAI-compatible TTS contract.
     pub fn tts_speech_url(&self) -> Result<String, String> {
         self.openai_tts_http_url("audio/speech")
     }
@@ -341,18 +336,6 @@ fn validate_endpoint_host(host: &str, provider: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn percent_encode_query_component(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_compatible_url_uses_the_streaming_extension() {
+    fn openai_compatible_url_uses_the_standard_transcription_route() {
         let settings = VoiceSettings {
             stt_provider: SttProvider::OpenaiCompatible,
             stt_api_base: "http://127.0.0.1:8001/v1".into(),
@@ -590,8 +573,8 @@ mod tests {
             ..VoiceSettings::default()
         };
         assert_eq!(
-            settings.stt_ws_url().unwrap(),
-            "ws://127.0.0.1:8001/v1/audio/transcriptions/stream?sample_rate=16000&encoding=pcm&interim_results=true&language=en&model=whisper%20large%2Fv3"
+            settings.stt_transcriptions_url().unwrap(),
+            "http://127.0.0.1:8001/v1/audio/transcriptions"
         );
     }
 
@@ -602,7 +585,7 @@ mod tests {
             stt_api_base: "   ".into(),
             ..VoiceSettings::default()
         };
-        let error = settings.stt_ws_url().unwrap_err();
+        let error = settings.stt_transcriptions_url().unwrap_err();
         assert!(error.contains("Configure an OpenAI-compatible STT endpoint"));
     }
 

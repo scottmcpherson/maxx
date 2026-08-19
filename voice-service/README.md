@@ -44,6 +44,31 @@ For a deterministic local HTTP smoke test, use `--backend deterministic`
 explicitly. This fixture emits a short WAV tone and is not a speech model.
 There is no implicit fallback when a backend or reference file is missing.
 
+### MLX Audio HTTP deployment
+
+When `mlx_audio.server` already runs on the same computer, use the included
+loopback HTTP adapter. It implements both TTS and STT, so do not pass a
+separate `--stt-backend`:
+
+```sh
+MLX_AUDIO_BASE_URL=http://127.0.0.1:8000 \
+voice-service serve \
+  --registry /path/to/voice-data/registry.json \
+  --voice-data-dir /path/to/voice-data \
+  --backend voice_service.mlx_http_backend:MlxHttpBackend \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+The adapter only accepts a loopback MLX Audio URL. Raw Qwen3-TTS output
+defaults to 24 kHz mono PCM16; set `MLX_AUDIO_TTS_SAMPLE_RATE` or
+`MLX_AUDIO_TTS_CHANNELS` only when the deployed model emits a different
+format. `MLX_AUDIO_HTTP_TIMEOUT_SECONDS` controls the bounded upstream timeout
+and defaults to 600 seconds so a cold model load can finish. Streaming Maxx
+STT input is bounded 16 kHz mono PCM16; the adapter submits the completed
+utterance to MLX Audio as a WAV and emits one authoritative final transcript
+instead of inventing partial text.
+
 ## Backend contract
 
 Inject `MlxAudioBackend` with an object exposing the TTS method below. The same

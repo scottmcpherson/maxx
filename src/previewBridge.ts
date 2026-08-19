@@ -141,7 +141,7 @@ const remoteHost: RemoteHostStatus = {
 let hostStatus: HostStatus = {
   id: "browser-preview",
   name: "This computer",
-  protocolVersion: 6,
+  protocolVersion: 7,
   listening: true,
   bindAddress: "127.0.0.1:7422",
   shareAddress: "this-mac.tailnet.ts.net:7422",
@@ -305,6 +305,9 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
         message: "Voice provider checks require the desktop app.",
       };
       break;
+    case "voice_list_models":
+      result = [{ id: "preview-stt" }];
+      break;
     case "voice_list_voices":
       result = [{ id: "preview-voice", name: "Preview Voice", model: "preview-tts", language: "en" }];
       break;
@@ -390,7 +393,15 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
       ];
       break;
     case "host_create_pairing":
-      result = { code: "MAXX-4821", expiresAt: now() + 600, capabilities: params.preset === "full" ? ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control", "settings-manage", "voice-control"] : ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"] };
+      result = {
+        code: "MAXX-4821",
+        expiresAt: now() + 600,
+        capabilities: params.preset === "voice"
+          ? ["voice-control"]
+          : params.preset === "full"
+            ? ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control", "settings-manage", "voice-control"]
+            : ["workspace-read", "workspace-write", "agent-run", "terminal-control", "browser-control"],
+      };
       hostStatus = { ...hostStatus, pairing: result as HostStatus["pairing"] };
       break;
     case "host_cancel_pairing":

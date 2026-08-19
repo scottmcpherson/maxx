@@ -18,6 +18,7 @@ import type {
   VoiceCredentialStatus,
   VoiceEvent,
   VoiceProviderTestResult,
+  VoiceModel,
   VoiceSettings,
   VoiceProfile,
   VoiceTtsReadResult,
@@ -487,6 +488,8 @@ export const ipc = {
     invokeOnHost<VoiceProviderTestResult>(hostId, "voice_test_stt", settings ? { settings } : {}),
   voiceListVoices: (settings: VoiceSettings, hostId?: string | null) =>
     invokeOnHost<VoiceProfile[]>(hostId, "voice_list_voices", { settings }),
+  voiceListModels: (settings: VoiceSettings, hostId?: string | null) =>
+    invokeOnHost<VoiceModel[]>(hostId, "voice_list_models", { settings }),
   voiceTtsStart: (
     settings: VoiceSettings,
     text: string,

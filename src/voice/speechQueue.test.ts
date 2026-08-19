@@ -71,6 +71,32 @@ describe("SpeechSynthesisQueue", () => {
     expect(settled).toBe(true);
   });
 
+  it("keeps a drain open when another phrase arrives before the stream is idle", async () => {
+    const runner = new FakeRunner();
+    const queue = new SpeechSynthesisQueue(runner);
+    const first = queue.enqueue(DEFAULT_VOICE_SETTINGS, "first");
+    const second = queue.enqueue(DEFAULT_VOICE_SETTINGS, "second");
+    const drained = queue.drain();
+    let settled = false;
+    void drained.then(() => { settled = true; });
+
+    await Promise.resolve();
+    runner.pending.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const late = queue.enqueue(DEFAULT_VOICE_SETTINGS, "late");
+    expect(settled).toBe(false);
+    runner.pending.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    runner.pending.shift()?.();
+    await expect(Promise.all([first, second, late, drained])).resolves.toEqual([
+      true,
+      true,
+      true,
+      undefined,
+    ]);
+  });
+
   it("bounds queued phrase count and buffered text", async () => {
     const runner = new FakeRunner();
     const byCount = new SpeechSynthesisQueue(runner, { maxPhrases: 2, maxCharacters: 100 });

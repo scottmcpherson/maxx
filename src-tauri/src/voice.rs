@@ -28,6 +28,7 @@ use futures_util::{SinkExt, StreamExt};
 use maxx_core::voice::{
     microphone_help, parse_grok_credential, SttProvider, SttServerEvent, Transcript,
     TranscriptStitcher, VoiceSettings, IDLE_TIMEOUT_SECS, NO_SPEECH_TIMEOUT_SECS,
+    VOICE_SAMPLE_RATE,
 };
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,8 @@ use crate::state::AppState;
 /// pathological hang.
 const BACKLOG_MAX_CHUNKS: usize = 256;
 const MAX_AUDIO_CHUNK_BYTES: usize = 16 * 1024;
+const MAX_STT_AUDIO_BYTES: usize = 32 * 1024 * 1024;
+const MAX_STT_RESPONSE_BYTES: usize = 1 * 1024 * 1024;
 /// Audio IPC requests are allowed to arrive a little out of order because
 /// local and remote JSON dispatch each run requests concurrently. Keep the
 /// acceptance window and bytes bounded so a missing sequence cannot turn into
@@ -173,6 +176,12 @@ pub struct VoiceCatalogEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VoiceModelEntry {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VoiceTtsDescriptor {
     pub session: u64,
     pub mime_type: String,
@@ -192,6 +201,7 @@ pub struct VoiceTtsError {
 pub struct VoiceTtsReadResult {
     pub chunks: Vec<VoiceTtsChunk>,
     pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -217,6 +227,17 @@ struct RawVoiceCatalogEntry {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawModelCatalog {
+    object: String,
+    data: Vec<RawModelCatalogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModelCatalogEntry {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProviderErrorEnvelope {
     error: ProviderErrorBody,
 }
@@ -227,6 +248,11 @@ struct ProviderErrorBody {
     code: Option<String>,
     #[serde(rename = "type")]
     error_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TranscriptionResponse {
+    text: String,
 }
 
 /// Hand-written so a log line, a panic message or an `unwrap` in a test can
@@ -498,7 +524,7 @@ pub async fn voice_status(
                 model: settings.stt_model,
             });
         }
-        if settings.stt_ws_url().is_err() {
+        if settings.stt_transcriptions_url().is_err() {
             return Ok(VoiceCredentialStatus {
                 source: "none".into(),
                 detail: "The OpenAI-compatible STT endpoint is invalid.".into(),
@@ -534,9 +560,8 @@ pub async fn voice_status(
     })
 }
 
-/// Open and close the selected provider's streaming STT connection. This is a
-/// real transport check, not a settings-only validation, and never returns a
-/// credential or raw provider response body.
+/// Exercise the selected provider's real transcription route without exposing
+/// credentials or raw provider responses.
 pub async fn voice_test_stt(
     state: Arc<AppState>,
     settings_override: Option<VoiceSettings>,
@@ -557,7 +582,11 @@ pub async fn voice_test_stt(
             message: "Choose an STT model before testing the OpenAI-compatible service.".into(),
         });
     }
-    let endpoint = match settings.stt_ws_url() {
+    let endpoint_result = match settings.stt_provider {
+        SttProvider::Xai => settings.stt_ws_url(),
+        SttProvider::OpenaiCompatible => settings.stt_transcriptions_url(),
+    };
+    let endpoint = match endpoint_result {
         Ok(endpoint) => endpoint,
         Err(message) => {
             return Ok(VoiceProviderTestResult {
@@ -570,6 +599,31 @@ pub async fn voice_test_stt(
             });
         }
     };
+    if settings.stt_provider == SttProvider::OpenaiCompatible {
+        let wav = pcm16_wav(
+            &vec![0; (VOICE_SAMPLE_RATE / 10) as usize * 2],
+            VOICE_SAMPLE_RATE,
+            1,
+        );
+        return Ok(match transcribe_openai(&settings, &endpoint, wav).await {
+            Ok(_) => VoiceProviderTestResult {
+                provider: settings.stt_provider,
+                endpoint,
+                model: settings.stt_model,
+                ok: true,
+                code: "ok".into(),
+                message: "The transcription service accepted a standard audio upload.".into(),
+            },
+            Err(message) => VoiceProviderTestResult {
+                provider: settings.stt_provider,
+                endpoint,
+                model: settings.stt_model,
+                ok: false,
+                code: "stt_connection_failed".into(),
+                message,
+            },
+        });
+    }
     let bearer = match settings.stt_provider {
         SttProvider::Xai => match resolve_bearer(&settings) {
             Ok(resolved) => Some(resolved.bearer),
@@ -584,7 +638,7 @@ pub async fn voice_test_stt(
                 });
             }
         },
-        SttProvider::OpenaiCompatible => None,
+        SttProvider::OpenaiCompatible => unreachable!(),
     };
     match connect(&endpoint, bearer.as_deref(), settings.stt_provider).await {
         Ok(mut socket) => {
@@ -625,8 +679,10 @@ pub async fn update_voice_settings(
 }
 
 fn validate_voice_settings_for_save(settings: &VoiceSettings) -> Result<(), String> {
-    if settings.stt_provider == SttProvider::Xai || !settings.stt_api_base.trim().is_empty() {
+    if settings.stt_provider == SttProvider::Xai {
         settings.stt_ws_url()?;
+    } else if !settings.stt_api_base.trim().is_empty() {
+        settings.stt_transcriptions_url()?;
     }
     // Incomplete TTS setup is valid while the form is being filled in, but a
     // nonempty endpoint must already be structurally safe to persist.
@@ -652,6 +708,25 @@ pub async fn voice_list_voices(
         .map_err(|error| format!("Could not reach the voice catalog: {error}"))?;
     let body = response_body_or_error(response, MAX_TTS_CATALOG_BYTES, "voice catalog").await?;
     Ok(parse_voice_catalog(&body)?.voices)
+}
+
+/// Discover model identifiers from the standard OpenAI-compatible catalog.
+pub async fn voice_list_models(
+    state: Arc<AppState>,
+    settings_override: Option<VoiceSettings>,
+) -> Result<Vec<VoiceModelEntry>, String> {
+    let settings = voice_settings(&state, settings_override).await;
+    if settings.stt_provider != SttProvider::OpenaiCompatible {
+        return Ok(Vec::new());
+    }
+    let endpoint = settings.stt_models_url()?;
+    let client = tts_http_client()?;
+    let response = tokio::time::timeout(TTS_CONNECT_TIMEOUT, client.get(endpoint).send())
+        .await
+        .map_err(|_| "Timed out connecting to the model catalog.".to_string())?
+        .map_err(|error| format!("Could not reach the model catalog: {error}"))?;
+    let body = response_body_or_error(response, MAX_TTS_CATALOG_BYTES, "model catalog").await?;
+    parse_model_catalog(&body)
 }
 
 /// Start one independent streaming TTS phrase. Multiple sessions may coexist;
@@ -696,8 +771,7 @@ pub async fn voice_tts_start(
         "model": model,
         "input": text,
         "voice": voice_id,
-        "response_format": "pcm",
-        "stream": true,
+        "response_format": "wav",
     });
     let client = tts_http_client()?;
     let response = tokio::time::timeout(
@@ -710,19 +784,15 @@ pub async fn voice_tts_start(
     if !response.status().is_success() {
         return Err(provider_response_error(response, "speech synthesis").await);
     }
-    let metadata = parse_pcm_metadata(response.headers())?;
+    let wav = read_response_bytes(response, MAX_TTS_RESPONSE_BYTES, "speech audio").await?;
+    let (metadata, pcm) = parse_pcm16_wav(&wav)?;
     let frame_bytes = metadata.channels as usize * 2;
     let session_id = voice.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let cancel = CancellationToken::new();
     let (sender, receiver) = mpsc::channel(TTS_QUEUE_CAPACITY);
     let producer_cancel = cancel.clone();
     let created_at = Instant::now();
-    let task = tokio::spawn(stream_tts_response(
-        response,
-        sender,
-        producer_cancel,
-        frame_bytes,
-    ));
+    let task = tokio::spawn(stream_tts_bytes(pcm, sender, producer_cancel, frame_bytes));
     let session = Arc::new(TtsSession {
         frame_bytes,
         cancel,
@@ -991,57 +1061,68 @@ fn tts_http_client() -> Result<Client, String> {
         .map_err(|error| format!("Could not initialize the speech HTTP client: {error}"))
 }
 
-fn parse_pcm_metadata(headers: &reqwest::header::HeaderMap) -> Result<PcmMetadata, String> {
-    let content_type = required_header(headers, "content-type")?;
-    let media_type = content_type
-        .split(';')
-        .next()
-        .map(str::trim)
-        .unwrap_or_default();
-    if !media_type.eq_ignore_ascii_case("audio/pcm") {
-        return Err("Speech service returned a non-PCM audio content type.".into());
+fn parse_pcm16_wav(wav: &[u8]) -> Result<(PcmMetadata, Vec<u8>), String> {
+    if wav.len() < 12 || &wav[..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        return Err("Speech service returned an invalid WAV file.".into());
     }
-    let sample_rate = parse_positive_header(headers, "x-maxx-audio-sample-rate", 8_000, 192_000)?;
-    // Renderer playback accepts mono or stereo PCM only; keep the transport
-    // contract bounded to the same maximum as the frontend decoder.
-    let channels = parse_positive_header(headers, "x-maxx-audio-channels", 1, 2)? as u16;
-    let sample_format = required_header(headers, "x-maxx-audio-sample-format")?;
-    if !sample_format.eq_ignore_ascii_case("s16le") {
-        return Err("Speech service must return little-endian signed 16-bit PCM.".into());
+    let mut offset = 12usize;
+    let mut format = None;
+    let mut data = None;
+    while offset.saturating_add(8) <= wav.len() {
+        let chunk_id = &wav[offset..offset + 4];
+        let chunk_len = u32::from_le_bytes(
+            wav[offset + 4..offset + 8]
+                .try_into()
+                .expect("four-byte WAV chunk length"),
+        ) as usize;
+        let start = offset + 8;
+        let end = start
+            .checked_add(chunk_len)
+            .filter(|end| *end <= wav.len())
+            .ok_or_else(|| "Speech service returned a truncated WAV file.".to_string())?;
+        if chunk_id == b"fmt " {
+            if chunk_len < 16 {
+                return Err("Speech service returned invalid WAV format metadata.".into());
+            }
+            let audio_format = u16::from_le_bytes(wav[start..start + 2].try_into().unwrap());
+            let channels = u16::from_le_bytes(wav[start + 2..start + 4].try_into().unwrap());
+            let sample_rate = u32::from_le_bytes(wav[start + 4..start + 8].try_into().unwrap());
+            let block_align = u16::from_le_bytes(wav[start + 12..start + 14].try_into().unwrap());
+            let bits_per_sample =
+                u16::from_le_bytes(wav[start + 14..start + 16].try_into().unwrap());
+            if audio_format != 1 || bits_per_sample != 16 {
+                return Err("Speech service must return 16-bit PCM WAV audio.".into());
+            }
+            if !(1..=2).contains(&channels) || !(8_000..=192_000).contains(&sample_rate) {
+                return Err("Speech service returned unsupported WAV playback metadata.".into());
+            }
+            if block_align != channels.saturating_mul(2) {
+                return Err("Speech service returned inconsistent WAV frame metadata.".into());
+            }
+            format = Some((sample_rate, channels, block_align as usize));
+        } else if chunk_id == b"data" {
+            data = Some((start, end));
+        }
+        offset = end.saturating_add(chunk_len % 2);
     }
-    Ok(PcmMetadata {
-        sample_rate,
-        channels,
-        content_type: "audio/pcm".into(),
-    })
-}
-
-fn required_header(headers: &reqwest::header::HeaderMap, name: &str) -> Result<String, String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("Speech service omitted required {name} metadata."))
-}
-
-fn parse_positive_header(
-    headers: &reqwest::header::HeaderMap,
-    name: &str,
-    minimum: u32,
-    maximum: u32,
-) -> Result<u32, String> {
-    let raw = required_header(headers, name)?;
-    let value = raw
-        .parse::<u32>()
-        .map_err(|_| format!("Speech service returned invalid {name} metadata."))?;
-    if !(minimum..=maximum).contains(&value) {
-        return Err(format!(
-            "Speech service returned out-of-range {name} metadata."
-        ));
+    let (sample_rate, channels, frame_bytes) =
+        format.ok_or_else(|| "Speech service WAV omitted format metadata.".to_string())?;
+    let (start, end) = data.ok_or_else(|| "Speech service WAV omitted audio data.".to_string())?;
+    let pcm = wav[start..end].to_vec();
+    if pcm.is_empty() {
+        return Err("Speech service returned no audio.".into());
     }
-    Ok(value)
+    if pcm.len() % frame_bytes != 0 {
+        return Err("Speech service returned an incomplete PCM16 frame.".into());
+    }
+    Ok((
+        PcmMetadata {
+            sample_rate,
+            channels,
+            content_type: "audio/pcm".into(),
+        },
+        pcm,
+    ))
 }
 
 fn parse_voice_catalog(body: &[u8]) -> Result<VoiceCatalog, String> {
@@ -1071,6 +1152,25 @@ fn parse_voice_catalog(body: &[u8]) -> Result<VoiceCatalog, String> {
         });
     }
     Ok(VoiceCatalog { voices: data })
+}
+
+fn parse_model_catalog(body: &[u8]) -> Result<Vec<VoiceModelEntry>, String> {
+    let raw: RawModelCatalog = serde_json::from_slice(body)
+        .map_err(|_| "Model catalog response was malformed JSON.".to_string())?;
+    if raw.object != "list" {
+        return Err("Model catalog response did not declare an object list.".into());
+    }
+    let mut models = Vec::with_capacity(raw.data.len());
+    for entry in raw.data {
+        let id = entry.id.trim();
+        if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+            return Err("Model catalog contained an invalid model entry.".into());
+        }
+        models.push(VoiceModelEntry { id: id.to_string() });
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    Ok(models)
 }
 
 async fn response_body_or_error(
@@ -1149,101 +1249,36 @@ fn is_safe_provider_code(code: &str) -> bool {
         })
 }
 
-async fn stream_tts_response(
-    response: Response,
+async fn stream_tts_bytes(
+    pcm: Vec<u8>,
     sender: mpsc::Sender<TtsMessage>,
     cancel: CancellationToken,
     frame_bytes: usize,
 ) {
-    let mut stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    let mut total = 0usize;
-    loop {
-        let next = tokio::select! {
-            _ = cancel.cancelled() => return,
-            next = tokio::time::timeout(TTS_READ_TIMEOUT, stream.next()) => next,
-        };
-        let next = match next {
-            Err(_) => {
-                send_tts_error(
-                    &sender,
-                    &cancel,
-                    "tts_read_timeout",
-                    "Timed out while reading speech audio.",
-                )
-                .await;
-                return;
-            }
-            Ok(next) => next,
-        };
-        let Some(result) = next else { break };
-        let chunk = match result {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                send_tts_error(
-                    &sender,
-                    &cancel,
-                    "tts_stream_failed",
-                    &format!("Could not read speech audio: {error}"),
-                )
-                .await;
-                return;
-            }
-        };
-        total = total.saturating_add(chunk.len());
-        if total > MAX_TTS_RESPONSE_BYTES {
+    let mut offset = 0usize;
+    while offset < pcm.len() {
+        let mut end = (offset + TTS_PROVIDER_CHUNK_BYTES).min(pcm.len());
+        end -= end.saturating_sub(offset) % frame_bytes;
+        if end == offset {
             send_tts_error(
                 &sender,
                 &cancel,
-                "tts_response_too_large",
-                "Speech audio exceeded the maximum response size.",
+                "tts_pcm_misaligned",
+                "Speech service returned an incomplete PCM16 frame.",
             )
             .await;
             return;
         }
-        pending.extend_from_slice(&chunk);
-        let complete = pending.len() - pending.len() % frame_bytes;
-        let mut offset = 0;
-        while offset < complete {
-            let mut end = (offset + TTS_PROVIDER_CHUNK_BYTES).min(complete);
-            end -= end.saturating_sub(offset) % frame_bytes;
-            if end == offset {
-                break;
-            }
-            if !send_tts_message(
-                &sender,
-                &cancel,
-                TtsMessage::Audio(pending[offset..end].to_vec()),
-            )
-            .await
-            {
-                return;
-            }
-            offset = end;
-        }
-        if complete > 0 {
-            pending.drain(..complete);
-        }
-    }
-    if !pending.is_empty() {
-        send_tts_error(
+        if !send_tts_message(
             &sender,
             &cancel,
-            "tts_pcm_misaligned",
-            "Speech service returned an incomplete PCM16 frame.",
+            TtsMessage::Audio(pcm[offset..end].to_vec()),
         )
-        .await;
-        return;
-    }
-    if total == 0 {
-        send_tts_error(
-            &sender,
-            &cancel,
-            "tts_audio_empty",
-            "Speech service returned no audio.",
-        )
-        .await;
-        return;
+        .await
+        {
+            return;
+        }
+        offset = end;
     }
     let _ = send_tts_message(&sender, &cancel, TtsMessage::Done).await;
 }
@@ -1254,6 +1289,7 @@ async fn send_tts_message(
     message: TtsMessage,
 ) -> bool {
     tokio::select! {
+        biased;
         _ = cancel.cancelled() => false,
         result = sender.send(message) => result.is_ok(),
     }
@@ -1301,7 +1337,10 @@ pub async fn voice_start(
     } else if settings.stt_model.trim().is_empty() {
         return Err("Choose an STT model for the OpenAI-compatible provider.".into());
     }
-    let url = settings.stt_ws_url()?;
+    let endpoint = match settings.stt_provider {
+        SttProvider::Xai => settings.stt_ws_url()?,
+        SttProvider::OpenaiCompatible => settings.stt_transcriptions_url()?,
+    };
 
     stop_active(&voice).await;
 
@@ -1312,7 +1351,14 @@ pub async fn voice_start(
     let task_events = state.events.clone();
     let session_events = task_events.clone();
     let task = tokio::spawn(async move {
-        run_session(task_events, id, settings, url, audio_rx, stop_rx).await;
+        match settings.stt_provider {
+            SttProvider::Xai => {
+                run_streaming_session(task_events, id, settings, endpoint, audio_rx, stop_rx).await;
+            }
+            SttProvider::OpenaiCompatible => {
+                run_batch_session(task_events, id, settings, endpoint, audio_rx, stop_rx).await;
+            }
+        }
     });
 
     *voice.active.lock().await = Some(ActiveSession {
@@ -1450,7 +1496,7 @@ enum PumpOutcome {
     Failed,
 }
 
-async fn run_session(
+async fn run_streaming_session(
     events: Arc<dyn EventSink>,
     id: u64,
     settings: VoiceSettings,
@@ -1553,6 +1599,215 @@ async fn run_session(
             state: VoiceSessionState::Stopped,
         },
     );
+}
+
+async fn run_batch_session(
+    events: Arc<dyn EventSink>,
+    id: u64,
+    settings: VoiceSettings,
+    endpoint: String,
+    mut audio_rx: mpsc::Receiver<AudioChunk>,
+    mut stop_rx: mpsc::Receiver<()>,
+) {
+    voice_emit(
+        events.as_ref(),
+        VoiceEvent::State {
+            session: id,
+            state: VoiceSessionState::Listening,
+        },
+    );
+    let mut pcm = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            stopped = stop_rx.recv() => {
+                if stopped.is_some() {
+                    while let Ok(chunk) = audio_rx.try_recv() {
+                        if !append_stt_audio(&mut pcm, &chunk.bytes) {
+                            emit_batch_limit_error(events.as_ref(), id);
+                            emit_stopped(events.as_ref(), id);
+                            return;
+                        }
+                    }
+                }
+                break;
+            }
+            chunk = audio_rx.recv() => {
+                let Some(chunk) = chunk else { break };
+                log::trace!("voice session {id} buffering audio sequence {}", chunk.sequence);
+                if !append_stt_audio(&mut pcm, &chunk.bytes) {
+                    emit_batch_limit_error(events.as_ref(), id);
+                    emit_stopped(events.as_ref(), id);
+                    return;
+                }
+            }
+        }
+    }
+
+    if pcm.is_empty() {
+        voice_emit(
+            events.as_ref(),
+            VoiceEvent::Error {
+                session: id,
+                code: "stt_no_audio".into(),
+                message: "No microphone audio was captured.".into(),
+                hint: Some(microphone_help().to_string()),
+            },
+        );
+        emit_stopped(events.as_ref(), id);
+        return;
+    }
+
+    voice_emit(
+        events.as_ref(),
+        VoiceEvent::State {
+            session: id,
+            state: VoiceSessionState::Connecting,
+        },
+    );
+    let wav = pcm16_wav(&pcm, VOICE_SAMPLE_RATE, 1);
+    match transcribe_openai(&settings, &endpoint, wav).await {
+        Ok(text) if !text.trim().is_empty() => voice_emit(
+            events.as_ref(),
+            VoiceEvent::Final {
+                session: id,
+                text: text.trim().to_string(),
+            },
+        ),
+        Ok(_) => voice_emit(
+            events.as_ref(),
+            VoiceEvent::Error {
+                session: id,
+                code: "stt_no_speech".into(),
+                message: "No speech was detected in the recording.".into(),
+                hint: Some(microphone_help().to_string()),
+            },
+        ),
+        Err(message) => voice_emit(
+            events.as_ref(),
+            VoiceEvent::Error {
+                session: id,
+                code: "stt_transcription_failed".into(),
+                message,
+                hint: None,
+            },
+        ),
+    }
+    emit_stopped(events.as_ref(), id);
+}
+
+fn append_stt_audio(target: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    if target.len().saturating_add(chunk.len()) > MAX_STT_AUDIO_BYTES {
+        return false;
+    }
+    target.extend_from_slice(chunk);
+    true
+}
+
+fn emit_batch_limit_error(events: &dyn EventSink, id: u64) {
+    voice_emit(
+        events,
+        VoiceEvent::Error {
+            session: id,
+            code: "stt_audio_too_large".into(),
+            message: "This recording is too long to transcribe in one request.".into(),
+            hint: Some("Finish the utterance sooner and try again.".into()),
+        },
+    );
+}
+
+fn emit_stopped(events: &dyn EventSink, id: u64) {
+    voice_emit(
+        events,
+        VoiceEvent::State {
+            session: id,
+            state: VoiceSessionState::Stopped,
+        },
+    );
+}
+
+async fn transcribe_openai(
+    settings: &VoiceSettings,
+    endpoint: &str,
+    wav: Vec<u8>,
+) -> Result<String, String> {
+    let model = require_nonempty(
+        &settings.stt_model,
+        "Choose an STT model before transcribing.",
+    )?;
+    let language = maxx_core::voice::language_for_api(&settings.language);
+    let (boundary, body) = transcription_multipart(&model, language, &wav);
+    let client = tts_http_client()?;
+    let response = tokio::time::timeout(
+        TTS_READ_TIMEOUT,
+        client
+            .post(endpoint)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send(),
+    )
+    .await
+    .map_err(|_| "Timed out waiting for the transcription service.".to_string())?
+    .map_err(|error| format!("Could not reach the transcription service: {error}"))?;
+    let body = response_body_or_error(response, MAX_STT_RESPONSE_BYTES, "transcription").await?;
+    let response: TranscriptionResponse = serde_json::from_slice(&body)
+        .map_err(|_| "The transcription service returned malformed JSON.".to_string())?;
+    Ok(response.text)
+}
+
+fn transcription_multipart(model: &str, language: &str, wav: &[u8]) -> (String, Vec<u8>) {
+    let mut boundary = "----MaxxVoiceAudioBoundary7MA4YWxkTrZu0gW".to_string();
+    while wav
+        .windows(boundary.len())
+        .any(|bytes| bytes == boundary.as_bytes())
+        || model.contains(&boundary)
+        || language.contains(&boundary)
+    {
+        boundary.push('X');
+    }
+    let mut body = Vec::with_capacity(wav.len() + 1024);
+    append_multipart_text(&mut body, &boundary, "model", model);
+    append_multipart_text(&mut body, &boundary, "language", language);
+    append_multipart_text(&mut body, &boundary, "response_format", "json");
+    body.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"recording.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (boundary, body)
+}
+
+fn append_multipart_text(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn pcm16_wav(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let data_len = u32::try_from(pcm.len()).unwrap_or(u32::MAX);
+    let block_align = channels.saturating_mul(2);
+    let byte_rate = sample_rate.saturating_mul(u32::from(block_align));
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&data_len.saturating_add(36).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
 }
 
 type Socket =
@@ -1911,20 +2166,56 @@ mod tests {
     }
 
     #[test]
-    fn pcm_metadata_requires_declared_s16le_format_and_bounds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("content-type", "audio/pcm".parse().unwrap());
-        headers.insert("x-maxx-audio-sample-rate", "16000".parse().unwrap());
-        headers.insert("x-maxx-audio-channels", "1".parse().unwrap());
-        headers.insert("x-maxx-audio-sample-format", "s16le".parse().unwrap());
-        let metadata = parse_pcm_metadata(&headers).unwrap();
+    fn model_catalog_parser_normalizes_standard_list() {
+        let models = parse_model_catalog(
+            br#"{"object":"list","data":[{"id":"parakeet"},{"id":"whisper"},{"id":"parakeet"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["parakeet", "whisper"]
+        );
+        assert!(parse_model_catalog(br#"{"object":"catalog","data":[]}"#).is_err());
+    }
+
+    #[test]
+    fn wav_parser_uses_self_describing_pcm_metadata() {
+        let wav = pcm16_wav(&[1, 0, 2, 0], 16_000, 1);
+        let (metadata, pcm) = parse_pcm16_wav(&wav).unwrap();
         assert_eq!(metadata.sample_rate, 16_000);
         assert_eq!(metadata.channels, 1);
-        headers.remove("x-maxx-audio-channels");
-        assert!(parse_pcm_metadata(&headers).is_err());
-        headers.insert("x-maxx-audio-channels", "1".parse().unwrap());
-        headers.insert("x-maxx-audio-sample-format", "f32le".parse().unwrap());
-        assert!(parse_pcm_metadata(&headers).is_err());
+        assert_eq!(pcm, [1, 0, 2, 0]);
+        assert!(parse_pcm16_wav(b"not a wav").is_err());
+
+        let mut floating_point = wav;
+        floating_point[20..22].copy_from_slice(&3_u16.to_le_bytes());
+        assert!(parse_pcm16_wav(&floating_point).is_err());
+    }
+
+    #[test]
+    fn transcription_upload_is_standard_multipart() {
+        let wav = pcm16_wav(&[0, 0], 16_000, 1);
+        let (boundary, body) = transcription_multipart("parakeet", "en", &wav);
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(body_text.contains("name=\"model\"\r\n\r\nparakeet"));
+        assert!(body_text.contains("name=\"language\"\r\n\r\nen"));
+        assert!(body_text.contains("filename=\"recording.wav\""));
+        assert!(body.windows(4).any(|bytes| bytes == b"RIFF"));
+        assert!(body.ends_with(format!("\r\n--{boundary}--\r\n").as_bytes()));
+    }
+
+    #[test]
+    fn successful_tts_read_omits_absent_error() {
+        let value = serde_json::to_value(VoiceTtsReadResult {
+            chunks: Vec::new(),
+            done: true,
+            error: None,
+        })
+        .unwrap();
+        assert!(value.get("error").is_none());
     }
 
     #[test]
@@ -2081,56 +2372,6 @@ mod tests {
         assert!(result.error.is_none());
     }
 
-    async fn loopback_tts_url() -> Option<(String, JoinHandle<()>)> {
-        use axum::body::Body;
-        use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
-        use axum::http::StatusCode;
-        use axum::response::Response as HttpResponse;
-        use axum::routing::post;
-        use axum::Router;
-        use futures_util::stream;
-        use std::convert::Infallible;
-        use tokio::net::TcpListener;
-
-        let app = Router::new().route(
-            "/v1/audio/speech",
-            post(|| async {
-                let chunks = stream::iter(vec![
-                    Ok::<_, Infallible>(vec![1, 0, 2, 0]),
-                    Ok::<_, Infallible>(vec![3, 0, 4, 0]),
-                ]);
-                let mut response = HttpResponse::new(Body::from_stream(chunks));
-                *response.status_mut() = StatusCode::OK;
-                response
-                    .headers_mut()
-                    .insert(CONTENT_TYPE, HeaderValue::from_static("audio/pcm"));
-                response.headers_mut().insert(
-                    HeaderName::from_static("x-maxx-audio-sample-rate"),
-                    HeaderValue::from_static("16000"),
-                );
-                response.headers_mut().insert(
-                    HeaderName::from_static("x-maxx-audio-channels"),
-                    HeaderValue::from_static("1"),
-                );
-                response.headers_mut().insert(
-                    HeaderName::from_static("x-maxx-audio-sample-format"),
-                    HeaderValue::from_static("s16le"),
-                );
-                response
-            }),
-        );
-        let listener = match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
-            Err(error) => panic!("could not bind loopback test server: {error}"),
-        };
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        Some((format!("http://{address}"), task))
-    }
-
     struct RecordingEvents {
         values: std::sync::Mutex<Vec<serde_json::Value>>,
         notify: tokio::sync::Notify,
@@ -2283,31 +2524,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_tts_stream_delivers_ordered_audio_before_done() {
-        let Some((base, server)) = loopback_tts_url().await else {
-            return;
-        };
-        let response = Client::new()
-            .post(format!("{base}/v1/audio/speech"))
-            .send()
-            .await
-            .unwrap();
+    async fn tts_pcm_queue_delivers_ordered_audio_before_done() {
         let (sender, mut receiver) = mpsc::channel(TTS_QUEUE_CAPACITY);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(stream_tts_response(response, sender, cancel, 2));
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-                .await
-                .unwrap()
-                .unwrap(),
-            TtsMessage::Audio(ref bytes) if bytes == &[1, 0, 2, 0]
+        let task = tokio::spawn(stream_tts_bytes(
+            vec![1, 0, 2, 0, 3, 0, 4, 0],
+            sender,
+            cancel,
+            2,
         ));
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), receiver.recv())
                 .await
                 .unwrap()
                 .unwrap(),
-            TtsMessage::Audio(ref bytes) if bytes == &[3, 0, 4, 0]
+            TtsMessage::Audio(ref bytes) if bytes == &[1, 0, 2, 0, 3, 0, 4, 0]
         ));
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -2317,23 +2548,14 @@ mod tests {
             TtsMessage::Done
         ));
         task.await.unwrap();
-        server.abort();
     }
 
     #[tokio::test]
     async fn tts_stream_cancellation_stops_before_audio_is_enqueued() {
-        let Some((base, server)) = loopback_tts_url().await else {
-            return;
-        };
-        let response = Client::new()
-            .post(format!("{base}/v1/audio/speech"))
-            .send()
-            .await
-            .unwrap();
         let (sender, mut receiver) = mpsc::channel(TTS_QUEUE_CAPACITY);
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let task = tokio::spawn(stream_tts_response(response, sender, cancel, 2));
+        let task = tokio::spawn(stream_tts_bytes(vec![1, 0], sender, cancel, 2));
         assert!(
             tokio::time::timeout(Duration::from_secs(2), receiver.recv())
                 .await
@@ -2341,6 +2563,5 @@ mod tests {
                 .is_none()
         );
         task.await.unwrap();
-        server.abort();
     }
 }

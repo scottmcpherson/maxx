@@ -90,6 +90,9 @@ export class VoiceTtsStream implements AsyncIterable<Pcm16Chunk>, AsyncIterator<
     isCurrent: () => boolean,
     limits: VoiceTtsLimits = {},
   ) {
+    if (!start || typeof start !== "object") {
+      throw new VoiceTtsError("The speech host returned an invalid TTS session.");
+    }
     if (!Number.isSafeInteger(start.session) || start.session < 0) {
       throw new VoiceTtsError("The speech host returned an invalid TTS session.");
     }
@@ -151,13 +154,25 @@ export class VoiceTtsStream implements AsyncIterable<Pcm16Chunk>, AsyncIterator<
         continue;
       }
       this.emptyReads = 0;
-      const decoded = response.chunks.map((item) => ({
-        item,
-        pcm: decodeBase64Pcm16(item.chunk),
-      }));
-      const readBytes = decoded.reduce((total, entry) => total + entry.pcm.byteLength, 0);
-      if (readBytes > this.maxReadBytes) {
-        throw new VoiceTtsBoundsError("A TTS read exceeded the renderer read bound.");
+      const decoded: Array<{ item: VoiceTtsChunk; pcm: ArrayBuffer }> = [];
+      let readBytes = 0;
+      let expectedSequence = this.lastSequence + 1;
+      for (const item of response.chunks) {
+        if (item.sequence !== expectedSequence) {
+          throw new VoiceTtsSequenceError(
+            `TTS audio sequence ${String(item.sequence)} is out of order; expected ${expectedSequence}.`,
+          );
+        }
+        const remainingReadBytes = this.maxReadBytes - readBytes;
+        const remainingTotalBytes = this.maxTotalBytes - this.totalBytes - readBytes;
+        const remainingBytes = Math.min(remainingReadBytes, remainingTotalBytes);
+        if (remainingBytes < 2) {
+          throw new VoiceTtsBoundsError("TTS audio exceeded the renderer playback bound.");
+        }
+        const pcm = decodeBase64Pcm16(item.chunk, remainingBytes);
+        readBytes += pcm.byteLength;
+        decoded.push({ item, pcm });
+        expectedSequence += 1;
       }
       for (const entry of decoded) {
         this.acceptChunk(entry.item, entry.pcm);
@@ -181,10 +196,10 @@ export class VoiceTtsStream implements AsyncIterable<Pcm16Chunk>, AsyncIterator<
     this.pending.length = 0;
     if (this.cancelSent) return;
     this.cancelSent = true;
-    // Cancellation must be sent immediately; the read promise may be waiting
+    // Cancellation must return immediately; the read promise may be waiting
     // on a remote host and cannot be force-aborted through the current IPC
     // contract. `next()` rechecks the generation when that read resolves.
-    await this.transport.voiceTtsCancel(this.session, this.hostId).catch(() => {});
+    void this.transport.voiceTtsCancel(this.session, this.hostId).catch(() => {});
   }
 
   private assertCurrent(): void {
@@ -237,7 +252,12 @@ export class VoiceTtsAdapter {
       hostId ?? settings.speechHostID,
     );
     if (generation !== this.generation) {
-      await this.transport.voiceTtsCancel(start.session, hostId ?? settings.speechHostID).catch(() => {});
+      const session = start && typeof start === "object" && Number.isSafeInteger(start.session)
+        ? start.session
+        : null;
+      if (session !== null) {
+        void this.transport.voiceTtsCancel(session, hostId ?? settings.speechHostID).catch(() => {});
+      }
       throw new VoiceTtsStaleGenerationError("Discarded a late TTS session start.");
     }
     const stream = new VoiceTtsStream(
@@ -265,6 +285,7 @@ export class VoiceTtsPlayer {
   private readonly playback: PcmPlayback;
   private readonly onFirstChunk?: () => void;
   private runGeneration = 0;
+  private readonly cancellationResolvers = new Set<() => void>();
 
   constructor(
     transport: VoiceTtsTransport,
@@ -281,36 +302,74 @@ export class VoiceTtsPlayer {
     voiceId?: string | null,
     hostId?: string | null,
   ): Promise<void> {
-    await this.cancel();
+    // Reserve this generation before awaiting cancellation of the previous
+    // run. A concurrent cancel/play call must be able to invalidate this run
+    // even while the old remote start/read is still pending.
     const run = ++this.runGeneration;
+    await Promise.all([
+      this.adapter.cancel().catch(() => {}),
+      this.playback.cancel(),
+    ]);
+    if (run !== this.runGeneration) return;
+
+    let canceled = false;
+    let resolveCancellation!: () => void;
+    const cancellation = new Promise<void>((resolve) => {
+      resolveCancellation = () => {
+        canceled = true;
+        resolve();
+      };
+      this.cancellationResolvers.add(resolveCancellation);
+    });
     let session: PlaybackSession | null = null;
     let firstChunk = false;
     try {
-      const stream = await this.adapter.stream(settings, text, voiceId, hostId);
-      if (run !== this.runGeneration) return;
+      const stream = await Promise.race([
+        this.adapter.stream(settings, text, voiceId, hostId),
+        cancellation.then(() => null as VoiceTtsStream | null),
+      ]);
+      if (!stream || canceled || run !== this.runGeneration) return;
       session = this.playback.begin({ outputDeviceId: settings.outputDeviceID });
-      for await (const chunk of stream) {
-        if (run !== this.runGeneration) return;
-        const accepted = await session.enqueue(chunk);
+      while (true) {
+        const result = await Promise.race([
+          stream.next(),
+          cancellation.then(() => null as IteratorResult<Pcm16Chunk> | null),
+        ]);
+        if (!result || canceled || run !== this.runGeneration) return;
+        if (result.done) break;
+        const accepted = await Promise.race([
+          session.enqueue(result.value),
+          cancellation.then(() => false),
+        ]);
+        if (canceled || run !== this.runGeneration) return;
         if (!accepted) throw new VoiceTtsStaleGenerationError("Discarded stale playback audio.");
         if (!firstChunk) {
           firstChunk = true;
           this.onFirstChunk?.();
         }
       }
-      if (run === this.runGeneration) await session.finish();
+      if (run === this.runGeneration) {
+        await Promise.race([session.finish(), cancellation]);
+      }
     } catch (error) {
       if (session) await session.cancel();
-      if (run !== this.runGeneration || isCancellation(error)) return;
+      if (canceled || run !== this.runGeneration || isCancellation(error)) return;
       throw error;
+    } finally {
+      this.cancellationResolvers.delete(resolveCancellation);
     }
   }
 
   async cancel(): Promise<void> {
     this.runGeneration += 1;
+    for (const resolve of this.cancellationResolvers) resolve();
+    this.cancellationResolvers.clear();
     // Do not hold local source cancellation behind a potentially slow IPC
-    // cancellation of an in-flight TTS read.
-    await Promise.all([this.adapter.cancel(), this.playback.cancel()]);
+    // cancellation of an in-flight TTS read. The adapter sends the remote
+    // cancellation best-effort; the stream generation check discards the
+    // eventual read response.
+    void this.adapter.cancel().catch(() => {});
+    await this.playback.cancel();
   }
 
   async dispose(): Promise<void> {
@@ -322,6 +381,9 @@ export class VoiceTtsPlayer {
 function validateReadResponse(response: VoiceTtsReadResult): void {
   if (!response || !Array.isArray(response.chunks) || typeof response.done !== "boolean") {
     throw new VoiceTtsError("The speech host returned an invalid TTS read.");
+  }
+  if (response.error !== undefined && typeof response.error !== "string") {
+    throw new VoiceTtsError("The speech host returned an invalid TTS error.");
   }
   for (const item of response.chunks) {
     if (
@@ -340,7 +402,8 @@ function boundedPositiveInteger(value: number, label: string): number {
   return value;
 }
 
-function isPcmMimeType(value: string): boolean {
+function isPcmMimeType(value: unknown): value is string {
+  if (typeof value !== "string") return false;
   const mime = value.trim().toLowerCase();
   return mime.includes("pcm") || mime.includes("l16");
 }
@@ -349,21 +412,32 @@ function isCancellation(error: unknown): boolean {
   return error instanceof VoiceTtsCanceledError || error instanceof VoiceTtsStaleGenerationError;
 }
 
-function decodeBase64Pcm16(value: string): ArrayBuffer {
-  const bytes = decodeBase64(value);
+function decodeBase64Pcm16(value: string, maxBytes?: number): ArrayBuffer {
+  const bytes = decodeBase64(value, maxBytes);
   if (bytes.byteLength % 2 !== 0) throw new VoiceTtsError("The speech host returned an odd PCM16 byte count.");
   return bytes.slice().buffer;
 }
 
-function decodeBase64(value: string): Uint8Array {
+function decodeBase64(value: string, maxBytes?: number): Uint8Array {
   const normalized = value.replace(/\s+/g, "");
   if (!normalized || normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
     throw new VoiceTtsError("The speech host returned invalid base64 audio.");
   }
+  if (maxBytes !== undefined && normalized.length > 4 * Math.ceil(maxBytes / 3)) {
+    throw new VoiceTtsBoundsError("TTS audio exceeded the renderer read bound.");
+  }
   if (typeof atob === "function") {
-    const binary = atob(normalized);
+    let binary: string;
+    try {
+      binary = atob(normalized);
+    } catch {
+      throw new VoiceTtsError("The speech host returned invalid base64 audio.");
+    }
     const bytes = new Uint8Array(binary.length);
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+      throw new VoiceTtsBoundsError("TTS audio exceeded the renderer read bound.");
+    }
     return bytes;
   }
 
@@ -379,5 +453,9 @@ function decodeBase64(value: string): Uint8Array {
     if (normalized[index + 2] !== "=") output.push(((b & 15) << 4) | (c >> 2));
     if (normalized[index + 3] !== "=") output.push(((c & 3) << 6) | d);
   }
-  return Uint8Array.from(output);
+  const bytes = Uint8Array.from(output);
+  if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+    throw new VoiceTtsBoundsError("TTS audio exceeded the renderer read bound.");
+  }
+  return bytes;
 }

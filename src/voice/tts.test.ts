@@ -3,9 +3,11 @@ import { DEFAULT_VOICE_SETTINGS } from "./types";
 import {
   VoiceTtsAdapter,
   VoiceTtsBoundsError,
+  VoiceTtsError,
   VoiceTtsPlayer,
   VoiceTtsSequenceError,
   VoiceTtsStaleGenerationError,
+  VoiceTtsStream,
   type VoiceTtsTransport,
 } from "./tts";
 import type { VoiceTtsReadResult, VoiceTtsStartResult } from "./types";
@@ -135,6 +137,27 @@ describe("VoiceTtsAdapter", () => {
     await expect(stream.next()).rejects.toMatchObject({ code: "voice.tts" });
   });
 
+  it("rejects malformed provider error and session metadata explicitly", async () => {
+    const errorTransport = new FakeTransport();
+    errorTransport.reads.push({ chunks: [], done: true, error: { message: "bad" } as unknown as string });
+    const errorStream = await new VoiceTtsAdapter(errorTransport).stream(SETTINGS, "Hello");
+    await expect(errorStream.next()).rejects.toBeInstanceOf(VoiceTtsError);
+
+    expect(() => new VoiceTtsStream(
+      errorTransport,
+      { session: 1, mimeType: null as unknown as string, sampleRate: 16_000, channels: 1 },
+      "local",
+      () => true,
+    )).toThrow("Unsupported TTS audio format");
+  });
+
+  it("bounds encoded PCM before decoding an oversized read", async () => {
+    const transport = new FakeTransport();
+    transport.reads.push({ chunks: [{ sequence: 0, chunk: pcmBase64(8) }], done: true });
+    const stream = await new VoiceTtsAdapter(transport, { maxReadBytes: 4 }).stream(SETTINGS, "Hello");
+    await expect(stream.next()).rejects.toBeInstanceOf(VoiceTtsBoundsError);
+  });
+
   it("cancels the host session and rejects a late read from a superseded generation", async () => {
     const transport = new FakeTransport();
     let resolveRead: ((result: VoiceTtsReadResult) => void) | undefined;
@@ -184,5 +207,30 @@ describe("VoiceTtsPlayer", () => {
     resolveRead?.({ chunks: [], done: true });
     await expect(playing).resolves.toBeUndefined();
     expect(transport.canceled).toEqual([{ session: 1, hostId: "local" }]);
+  });
+
+  it("short-circuits playback cancellation while remote read and cancel are pending", async () => {
+    const transport = new FakeTransport();
+    let resolveRead: ((result: VoiceTtsReadResult) => void) | undefined;
+    let resolveCancel: (() => void) | undefined;
+    transport.voiceTtsRead = async () => new Promise<VoiceTtsReadResult>((resolve) => {
+      resolveRead = resolve;
+    });
+    transport.voiceTtsCancel = async () => new Promise<void>((resolve) => {
+      resolveCancel = resolve;
+    });
+    const player = new VoiceTtsPlayer(transport, { playback: new PcmPlayback({ contextFactory: () => new FakeContext() }) });
+    const playing = player.play(SETTINGS, "This is a test.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let playbackSettled = false;
+    void playing.then(() => { playbackSettled = true; });
+    await player.cancel();
+    await Promise.resolve();
+    expect(playbackSettled).toBe(true);
+
+    resolveRead?.({ chunks: [], done: true });
+    resolveCancel?.();
+    await playing;
   });
 });

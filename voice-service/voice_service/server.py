@@ -720,5 +720,7 @@ def serve(
     server = VoiceHTTPServer((host, port), service, allow_remote_without_auth=allow_remote_without_auth)
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
         server.server_close()

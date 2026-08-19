@@ -77,6 +77,10 @@ export interface VoiceProfile {
   language: string;
 }
 
+export interface VoiceModel {
+  id: string;
+}
+
 export interface VoiceTtsStartResult {
   session: number;
   mimeType: string;

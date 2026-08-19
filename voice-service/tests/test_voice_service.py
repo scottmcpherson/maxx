@@ -35,7 +35,7 @@ from voice_service.cli import register_voice
 from voice_service.mlx_adapter_template import build_backend
 from voice_service.multipart import MultipartError, parse_multipart
 from voice_service.registry import RegistryError, VoiceRegistry
-from voice_service.server import ServiceError, VoiceHTTPServer, VoiceService
+from voice_service.server import ServiceError, VoiceHTTPServer, VoiceService, serve
 from voice_service.websocket import WebSocketProtocolError, read_frame
 
 
@@ -216,6 +216,13 @@ class VoiceServiceTests(unittest.TestCase):
         self.http_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
         self.http_thread.start()
         return "http://127.0.0.1:%d" % self.http_server.server_address[1]
+
+    def test_serve_handles_keyboard_interrupt_and_closes_server(self) -> None:
+        fake_server = mock.Mock()
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        with mock.patch("voice_service.server.VoiceHTTPServer", return_value=fake_server):
+            serve(self._service())
+        fake_server.server_close.assert_called_once_with()
 
     def test_two_voices_are_discoverable_and_selected_independently(self) -> None:
         service = self._service()

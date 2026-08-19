@@ -75,7 +75,7 @@ const RUNTIME_METHODS = new Set([
   "terminal_support", "terminal_start", "terminal_status", "terminal_input", "terminal_resize",
   "terminal_read", "terminal_stop", "shell_terminal_start", "shell_terminal_status",
   "shell_terminal_input", "shell_terminal_resize", "shell_terminal_read", "shell_terminal_stop",
-  "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "voice_test_stt", "voice_list_voices", "update_voice_settings",
+  "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "voice_test_stt", "voice_list_models", "voice_list_voices", "update_voice_settings",
   "voice_start", "voice_send_audio", "voice_stop", "voice_interrupt_turn", "voice_tts_start", "voice_tts_read", "voice_tts_cancel", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
   "browser_ui_forward", "browser_ui_reload", "browser_ui_artifact",

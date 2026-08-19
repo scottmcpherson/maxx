@@ -92,13 +92,15 @@ describe("voice IPC", () => {
     });
   });
 
-  it("routes TTS catalog, start, bounded reads, and cancellation to the speech host", async () => {
+  it("routes speech catalogs, TTS start, bounded reads, and cancellation to the speech host", async () => {
+    await ipc.voiceListModels(DEFAULT_VOICE_SETTINGS, "paired-mac");
     await ipc.voiceListVoices(DEFAULT_VOICE_SETTINGS, "paired-mac");
     await ipc.voiceTtsStart(DEFAULT_VOICE_SETTINGS, "Hello", "voice-1", "paired-mac");
     await ipc.voiceTtsRead(4, -1, 4096, "paired-mac");
     await ipc.voiceTtsCancel(4, "paired-mac");
 
     expect(invoke.mock.calls).toEqual([
+      ["voice_list_models", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
       ["voice_list_voices", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
       ["voice_tts_start", { settings: DEFAULT_VOICE_SETTINGS, text: "Hello", voiceId: "voice-1", hostId: "paired-mac" }],
       ["voice_tts_read", { session: 4, afterSequence: -1, maxBytes: 4096, hostId: "paired-mac" }],

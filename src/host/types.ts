@@ -11,7 +11,7 @@ export type Capability =
   | "settings-manage"
   | "voice-control";
 
-export type AccessPreset = "standard" | "full";
+export type AccessPreset = "voice" | "standard" | "full";
 
 export interface PairingInvitation {
   code: string;

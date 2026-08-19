@@ -710,6 +710,10 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             crate::voice::voice_list_voices(state.app.clone(), optional(&params, "settings")?)
                 .await,
         ),
+        "voice_list_models" => value(
+            crate::voice::voice_list_models(state.app.clone(), optional(&params, "settings")?)
+                .await,
+        ),
         "update_voice_settings" => value(
             crate::voice::update_voice_settings(state.app.clone(), required(&params, "settings")?)
                 .await,
