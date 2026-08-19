@@ -25,6 +25,7 @@ import { useAppStore } from "../store/appStore";
 import type { AccessPreset, TailscaleDiscovery } from "../host/types";
 import { enumerateVoiceDevices } from "../voice/devices";
 import type { VoiceAudioDevices } from "../voice/devices";
+import { resolveVoiceSelection } from "../voice/catalog";
 import { DEFAULT_VOICE_SETTINGS, VOICE_LANGUAGES } from "../voice/types";
 import type {
   VoiceCredentialStatus,
@@ -889,6 +890,11 @@ function VoiceSettingsSection() {
   }, [settings.ttsApiBase, settings.ttsModel, settings.voiceID]);
 
   useEffect(() => {
+    const catalogVoice = voiceCatalog.find((voice) => voice.id === voiceDraft.trim());
+    if (catalogVoice) setTtsModelDraft(catalogVoice.model);
+  }, [voiceCatalog, voiceDraft]);
+
+  useEffect(() => {
     let current = true;
     const endpoint = settings.ttsApiBase.trim();
     if (!endpoint) {
@@ -949,18 +955,21 @@ function VoiceSettingsSection() {
 
   const commitTtsSettings = () => {
     const ttsApiBase = ttsEndpointDraft.trim();
-    const ttsModel = ttsModelDraft.trim();
-    const voiceID = voiceDraft.trim();
-    const catalogVoice = voiceCatalog.find((voice) => voice.id === voiceID);
-    const nextModel = catalogVoice?.model ?? ttsModel;
-    if (ttsApiBase === settings.ttsApiBase && nextModel === settings.ttsModel && voiceID === settings.voiceID) return;
-    update({ ttsApiBase, ttsModel: nextModel, voiceID });
+    const selection = resolveVoiceSelection(voiceCatalog, voiceDraft, ttsModelDraft);
+    if (
+      ttsApiBase === settings.ttsApiBase
+      && selection.model === settings.ttsModel
+      && selection.voiceID === settings.voiceID
+    ) return;
+    update({ ttsApiBase, ttsModel: selection.model, voiceID: selection.voiceID });
   };
 
-  const voiceIsSelected = Boolean(settings.voiceID.trim());
+  const draftVoiceSelection = resolveVoiceSelection(voiceCatalog, voiceDraft, ttsModelDraft);
+  const voiceIsSelected = Boolean(draftVoiceSelection.voiceID);
 
   const testVoice = () => {
-    if (!settings.ttsApiBase.trim() || !settings.ttsModel.trim()) {
+    const ttsApiBase = ttsEndpointDraft.trim();
+    if (!ttsApiBase || !draftVoiceSelection.model) {
       setTtsTestMessage("Configure a TTS endpoint and model before testing voice.");
       return;
     }
@@ -972,11 +981,22 @@ function VoiceSettingsSection() {
       setTtsTestMessage("Enter a short phrase to test voice playback.");
       return;
     }
+    const nextSettings = {
+      ...settings,
+      ttsApiBase,
+      ttsModel: draftVoiceSelection.model,
+      voiceID: draftVoiceSelection.voiceID,
+    };
+    if (
+      nextSettings.ttsApiBase !== settings.ttsApiBase
+      || nextSettings.ttsModel !== settings.ttsModel
+      || nextSettings.voiceID !== settings.voiceID
+    ) void saveVoiceSettings(nextSettings);
     const player = ttsPlayerRef.current ?? (ttsPlayerRef.current = new VoiceTtsPlayer(ipc));
     setTtsTesting(true);
     setTtsTestMessage(null);
     void player
-      .play(settings, ttsTestText.trim(), settings.voiceID || null, settings.speechHostID)
+      .play(nextSettings, ttsTestText.trim(), nextSettings.voiceID, nextSettings.speechHostID)
       .then(() => setTtsTestMessage("Voice test finished."))
       .catch((reason) => setTtsTestMessage(`Voice test failed: ${String(reason)}`))
       .finally(() => setTtsTesting(false));
@@ -1344,7 +1364,7 @@ function VoiceSettingsSection() {
               <button
                 className="secondary-button"
                 type="button"
-                disabled={!settings.ttsApiBase.trim() || !settings.ttsModel.trim() || !voiceIsSelected}
+                disabled={!ttsEndpointDraft.trim() || !draftVoiceSelection.model || !voiceIsSelected}
                 onClick={testVoice}
               >
                 Test voice
