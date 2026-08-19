@@ -19,6 +19,7 @@ import type {
   VoiceEvent,
   VoiceProviderTestResult,
   VoiceModel,
+  VoiceMicrophoneAccess,
   VoiceSettings,
   VoiceProfile,
   VoiceTtsReadResult,
@@ -482,6 +483,7 @@ export const ipc = {
   // settings remain client-owned and are sent as an explicit snapshot.
   voiceStatus: (settings?: VoiceSettings, hostId?: string | null) =>
     invokeOnHost<VoiceCredentialStatus>(hostId, "voice_status", settings ? { settings } : {}),
+  voiceMicrophoneAccess: () => invoke<VoiceMicrophoneAccess>("voice_microphone_access"),
   updateVoiceSettings: (settings: VoiceSettings) =>
     invoke<VoiceSettings>("update_voice_settings", { settings }),
   voiceTestStt: (settings?: VoiceSettings, hostId?: string | null) =>

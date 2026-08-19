@@ -39,19 +39,6 @@ pub enum SttProvider {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum VoiceMode {
-    Dictation,
-    Conversation,
-}
-
-impl Default for VoiceMode {
-    fn default() -> Self {
-        Self::Dictation
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum TtsProvider {
     OpenaiCompatible,
 }
@@ -89,7 +76,7 @@ impl Default for SttProvider {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceSettings {
-    /// Master switch. Off until the user turns dictation on in Settings.
+    /// Master switch for composer dictation and conversation controls.
     #[serde(rename = "isEnabled")]
     pub is_enabled: bool,
     /// Opt-in to reading the bearer the Grok CLI stores in `~/.grok/auth.json`.
@@ -110,7 +97,6 @@ pub struct VoiceSettings {
     /// Model identifier sent to an OpenAI-compatible STT service.
     #[serde(rename = "sttModel")]
     pub stt_model: String,
-    pub mode: VoiceMode,
     #[serde(rename = "ttsProvider")]
     pub tts_provider: TtsProvider,
     #[serde(rename = "ttsApiBase")]
@@ -142,7 +128,6 @@ impl Default for VoiceSettings {
             language: DEFAULT_LANGUAGE.to_string(),
             stt_api_base: DEFAULT_API_BASE.to_string(),
             stt_model: String::new(),
-            mode: VoiceMode::Dictation,
             tts_provider: TtsProvider::OpenaiCompatible,
             tts_api_base: String::new(),
             tts_model: String::new(),

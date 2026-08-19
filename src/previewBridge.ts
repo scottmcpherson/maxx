@@ -295,6 +295,9 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
         provider: (params.settings as { sttProvider?: string } | undefined)?.sttProvider ?? "xai",
       };
       break;
+    case "voice_microphone_access":
+      result = { granted: true, status: "granted" };
+      break;
     case "voice_test_stt":
       result = {
         provider: (params.settings as { sttProvider?: string } | undefined)?.sttProvider ?? "xai",

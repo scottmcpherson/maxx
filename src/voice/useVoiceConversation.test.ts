@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { EventKind, type ProviderRuntimeEvent } from "../contract/types";
 import { VoiceConversationController } from "./conversationController";
-import { isVoiceHostAvailable, processRuntimeEvent } from "./useVoiceConversation";
+import {
+  isPlaybackEchoGuardActive,
+  isVoiceHostAvailable,
+  PLAYBACK_ECHO_GUARD_MS,
+  processRuntimeEvent,
+} from "./useVoiceConversation";
 
 function runtimeEvent(
   overrides: Partial<ProviderRuntimeEvent> = {},
@@ -21,6 +26,18 @@ function runtimeEvent(
 }
 
 describe("voice conversation host lifecycle", () => {
+  it("suppresses only the initial playback echo window", () => {
+    const startedAt = 1_000;
+
+    expect(isPlaybackEchoGuardActive("waitingForModel", startedAt, startedAt + PLAYBACK_ECHO_GUARD_MS)).toBe(false);
+    expect(isPlaybackEchoGuardActive("speaking", startedAt + 1, startedAt + PLAYBACK_ECHO_GUARD_MS)).toBe(true);
+    expect(isPlaybackEchoGuardActive(
+      "speaking",
+      startedAt + PLAYBACK_ECHO_GUARD_MS,
+      startedAt + PLAYBACK_ECHO_GUARD_MS,
+    )).toBe(false);
+  });
+
   it("treats the client as available without a remote session", () => {
     expect(isVoiceHostAvailable("local", [], null)).toBe(true);
   });
@@ -104,5 +121,46 @@ describe("voice conversation host lifecycle", () => {
     processRuntimeEvent(event, controller, voiceTurnIDRef, pendingVoiceTurnRef, wait, 1, () => {}, () => {}, () => {});
     processRuntimeEvent(event, controller, voiceTurnIDRef, pendingVoiceTurnRef, wait, 1, () => {}, () => {}, () => {});
     expect(playbackWaits).toBe(1);
+  });
+
+  it("speaks a canonical complete-text event from a non-streaming provider", () => {
+    const effects: Array<{ type: string; text?: string; phrase?: string }> = [];
+    const controller = new VoiceConversationController("thread-a", [], (effect) => effects.push(effect));
+    controller.start();
+    controller.transcriptFinal("hello");
+    const voiceTurnIDRef = { current: "turn-a" as string | null };
+    const pendingVoiceTurnRef = { current: false };
+
+    processRuntimeEvent(
+      runtimeEvent({
+        id: "complete-text",
+        kind: EventKind.assistantText,
+        payload: { text: "Complete provider response." },
+      }),
+      controller,
+      voiceTurnIDRef,
+      pendingVoiceTurnRef,
+      async () => {},
+      1,
+      () => {},
+      () => {},
+      () => {},
+    );
+    processRuntimeEvent(
+      runtimeEvent({ id: "complete-terminal" }),
+      controller,
+      voiceTurnIDRef,
+      pendingVoiceTurnRef,
+      async () => {},
+      1,
+      () => {},
+      () => {},
+      () => {},
+    );
+
+    expect(effects).toEqual([
+      { type: "submitTranscript", text: "hello" },
+      { type: "speak", turnID: "turn-a", phrase: "Complete provider response." },
+    ]);
   });
 });

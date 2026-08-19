@@ -3,7 +3,7 @@ import { EventKind, type ChatThread, type ProviderRuntimeEvent } from "../contra
 import { isLocalHost } from "../host/session";
 import { ipc } from "../ipc";
 import { useAppStore } from "../store/appStore";
-import { startMicrophoneCapture, type MicrophoneCapture } from "./capture";
+import { microphoneErrorMessage, startMicrophoneCapture, type MicrophoneCapture } from "./capture";
 import {
   IDLE_CONVERSATION,
   type ConversationSnapshot,
@@ -54,6 +54,21 @@ const STATUS_LABELS: Record<ConversationSnapshot["state"], string> = {
   ended: "Ended",
 };
 
+// Chromium's acoustic echo canceller needs a brief sample of newly-started
+// speaker output before its microphone stream is clean. Without this guard,
+// the first TTS samples can trip the local energy VAD and cancel a response
+// before it becomes audible. Continuing user speech still interrupts once the
+// guard expires; the input stream itself remains live throughout.
+export const PLAYBACK_ECHO_GUARD_MS = 750;
+
+export function isPlaybackEchoGuardActive(
+  state: ConversationSnapshot["state"],
+  now: number,
+  guardUntil: number,
+): boolean {
+  return state === "speaking" && now < guardUntil;
+}
+
 export function isVoiceHostAvailable(
   hostID: string,
   remoteSessions: Array<{ host: { id: string } }>,
@@ -102,7 +117,6 @@ export function useVoiceConversation(options: {
   const mountedRef = useRef(true);
   const voiceConfigKey = [
     settings.isEnabled,
-    settings.mode,
     settings.sttProvider,
     settings.sttApiBase,
     settings.sttModel,
@@ -160,12 +174,16 @@ export function useVoiceConversation(options: {
   const startRef = useRef<() => void>(() => {});
   const generationRef = useRef(0);
   const playbackGenerationRef = useRef(0);
+  const playbackEchoGuardUntilRef = useRef(0);
   const telemetryRef = useRef<VoiceLatencyTelemetry | null>(null);
   const notifyRef = useRef<() => void>(() => {});
   const playerRef = useRef<VoiceTtsPlayer | null>(null);
   if (!playerRef.current) {
     playerRef.current = new VoiceTtsPlayer(ipc, {
       onFirstChunk: () => {
+        playbackEchoGuardUntilRef.current = performance.now() + PLAYBACK_ECHO_GUARD_MS;
+        vadRef.current.reset();
+        controllerRef.current?.playbackStarted();
         telemetryRef.current?.mark("firstAudioChunkAccepted");
         telemetryRef.current?.mark("firstPlaybackScheduled");
         notifyRef.current();
@@ -254,6 +272,7 @@ export function useVoiceConversation(options: {
       await pendingSttStart?.catch(() => {});
       await pendingSttStop?.catch(() => {});
       await queueRef.current?.cancel();
+      playbackEchoGuardUntilRef.current = 0;
       vadRef.current.reset();
       finalTextRef.current = null;
       voiceTurnIDRef.current = null;
@@ -373,9 +392,17 @@ export function useVoiceConversation(options: {
               || controllerRef.current?.snapshot.muted
             ) return;
             const event = vadRef.current.update(level);
+            const state = controllerRef.current?.snapshot.state;
+            if (isPlaybackEchoGuardActive(
+              state ?? "idle",
+              performance.now(),
+              playbackEchoGuardUntilRef.current,
+            )) {
+              vadRef.current.reset();
+              return;
+            }
             if (event === "speech.started") {
-              const wasSpeaking = controllerRef.current?.snapshot.state === "speaking"
-                || controllerRef.current?.snapshot.state === "waitingForModel";
+              const wasSpeaking = state === "speaking" || state === "waitingForModel";
               controllerRef.current?.speechStarted();
               notify();
               if (wasSpeaking && !settingsRef.current.allowInterruption) return;
@@ -607,6 +634,8 @@ export function useVoiceConversation(options: {
       if (!queueRef.current?.hasWork && spokenPlaybackRef.current.size === 0) break;
     }
     if (!activeRef.current || generation !== playbackGenerationRef.current) return;
+    playbackEchoGuardUntilRef.current = 0;
+    vadRef.current.reset();
     controllerRef.current?.playbackFinished();
     voiceTurnIDRef.current = null;
     pendingVoiceTurnRef.current = false;
@@ -680,8 +709,6 @@ export function useVoiceConversation(options: {
       case "speak": {
         if (!activeRef.current || activeBindingRef.current !== currentBinding) return;
         const generation = playbackGenerationRef.current;
-        controllerRef.current?.playbackStarted();
-        notify();
         if (!settingsRef.current.allowInterruption) void stopSttSession();
         const promise = queueRef.current!.enqueue(
           settingsRef.current,
@@ -748,7 +775,7 @@ export function useVoiceConversation(options: {
   runEffectRef.current = runEffect;
 
   const start = useCallback(() => {
-    if (!enabled || !binding || settings.mode !== "conversation") return;
+    if (!enabled || !binding) return;
     if (!settings.ttsApiBase.trim() || !settings.ttsModel.trim() || !settings.voiceID.trim()) {
       setSnapshot({ ...IDLE_CONVERSATION, state: "error", error: "Conversation requires a TTS endpoint, model, and named voice." });
       return;
@@ -804,10 +831,10 @@ export function useVoiceConversation(options: {
       })
       .catch((reason) => {
         if (controllerTokenRef.current === token) {
-          fail(`Could not open the microphone: ${String(reason)}`);
+          fail(microphoneErrorMessage(reason));
         }
       });
-  }, [binding, bindingKey, cleanupPromiseRef, ensureCapture, fail, notify, settings.allowInterruption, settings.mode, settings.ttsApiBase, settings.ttsModel, voiceConfigKey]);
+  }, [binding, bindingKey, cleanupPromiseRef, ensureCapture, fail, notify, settings.allowInterruption, settings.ttsApiBase, settings.ttsModel, voiceConfigKey]);
   startRef.current = start;
 
   const end = useCallback(() => {
@@ -851,7 +878,7 @@ export function useVoiceConversation(options: {
       })
       .catch((reason) => {
         if (controllerTokenRef.current === token) {
-          fail(`Could not reopen the microphone: ${String(reason)}`);
+          fail(microphoneErrorMessage(reason));
         }
       });
   }, [ensureCapture, fail, notify]);
@@ -966,13 +993,14 @@ export function useVoiceConversation(options: {
       activeRef.current = false;
       void scheduleTeardown(target, turn);
       telemetryRef.current = null;
-      void queueRef.current?.dispose();
+      // scheduleTeardown cancels outstanding speech. Do not permanently
+      // dispose this ref here: React Strict Mode replays effect cleanup while
+      // retaining hook refs, and the replayed conversation must reuse it.
     };
   }, [scheduleTeardown]);
 
   const isActive = snapshot.state !== "idle" && snapshot.state !== "ended";
   const canStart = enabled
-    && settings.mode === "conversation"
     && settings.ttsApiBase.trim().length > 0
     && settings.ttsModel.trim().length > 0
     && settings.voiceID.trim().length > 0;
@@ -1004,11 +1032,11 @@ export function processRuntimeEvent(
   markModelToken: () => void,
 ): void {
   if (event.threadID !== controller.boundThreadID) return;
-  if (event.kind === EventKind.assistantTextDelta || event.kind === "assistant.text.done") {
+  if (event.kind === EventKind.assistantTextDelta || event.kind === EventKind.assistantText) {
     if (voiceTurnIDRef.current && event.turnID !== voiceTurnIDRef.current) return;
     if (!voiceTurnIDRef.current && !pendingVoiceTurnRef.current) return;
     if (!voiceTurnIDRef.current) voiceTurnIDRef.current = event.turnID;
-    if (event.payload.text && event.kind === EventKind.assistantTextDelta) {
+    if (event.payload.text) {
       controller.assistantDelta({
         id: event.id,
         threadID: event.threadID,

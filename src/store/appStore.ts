@@ -139,6 +139,8 @@ interface AppStoreState {
   showProviderDiagnostics: boolean;
   /** Experimental access to native provider terminal surfaces. */
   terminalModeEnabled: boolean;
+  /** One-shot handoff from the new-chat composer to the newly mounted thread. */
+  pendingVoiceConversationThreadID: string | null;
   error: string | null;
   /** Identifies an offline error so only that host's reconnect clears it. */
   errorHostID: string | null;
@@ -198,6 +200,8 @@ interface AppStoreState {
     environment?: GitEnvironmentMode,
     hostID?: string,
   ) => Promise<boolean>;
+  requestVoiceConversation: (threadID: string) => void;
+  consumeVoiceConversationRequest: (threadID: string) => void;
   sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
   createSideChat: (projectID: string, parentThreadID: string) => Promise<ChatThread | null>;
   sendSideChatPrompt: (
@@ -438,6 +442,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   keyboardShortcuts: loadKeyboardShortcuts(),
   showProviderDiagnostics: loadShowProviderDiagnostics(),
   terminalModeEnabled: loadTerminalModeEnabled(),
+  pendingVoiceConversationThreadID: null,
   error: null,
   errorHostID: null,
 
@@ -975,6 +980,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
     return true;
   },
+
+  requestVoiceConversation: (threadID) => set({ pendingVoiceConversationThreadID: threadID }),
+  consumeVoiceConversationRequest: (threadID) => set((state) => ({
+    pendingVoiceConversationThreadID: state.pendingVoiceConversationThreadID === threadID
+      ? null
+      : state.pendingVoiceConversationThreadID,
+  })),
 
   sendPrompt: async (prompt, imagePaths, annotations = []) => {
     const { selectedProjectID, selectedThreadID, selectedHostID, remoteSessions, workspace } = get();

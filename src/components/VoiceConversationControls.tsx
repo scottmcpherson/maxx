@@ -1,6 +1,48 @@
 import type { VoiceConversation } from "../voice/useVoiceConversation";
 import { Icons } from "./Icons";
 
+export type ComposerPrimaryAction = "conversation" | "send" | "stop-conversation";
+
+export function composerPrimaryAction({
+  conversationActive,
+  hasContent,
+  voiceEnabled,
+}: {
+  conversationActive: boolean;
+  hasContent: boolean;
+  voiceEnabled: boolean;
+}): ComposerPrimaryAction {
+  if (conversationActive) return "stop-conversation";
+  if (voiceEnabled && !hasContent) return "conversation";
+  return "send";
+}
+
+export function VoiceConversationActionButton({
+  active = false,
+  onClick,
+  disabled = false,
+  title,
+}: {
+  active?: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const label = active ? "Stop conversation" : "Start conversation";
+  return (
+    <button
+      type="button"
+      className={`send-button voice-conversation-action${active ? " stop" : ""}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={title ?? label}
+      aria-label={label}
+    >
+      {active ? <Icons.stop size={14} /> : <Icons.waveform size={16} />}
+    </button>
+  );
+}
+
 export function VoiceConversationControls({
   conversation,
   visible,
@@ -12,6 +54,7 @@ export function VoiceConversationControls({
 }) {
   if (!visible) return null;
   const { snapshot } = conversation;
+  if (snapshot.state === "idle" || snapshot.state === "ended") return null;
   const canInterrupt = snapshot.state === "speaking" || snapshot.state === "waitingForModel";
   const canFinish = manual && snapshot.state === "transcribing";
   const canRetry = snapshot.state === "error" || snapshot.state === "reconnecting";
@@ -26,33 +69,14 @@ export function VoiceConversationControls({
         {conversation.status}
         {snapshot.muted && <span className="voice-conversation-muted">Muted</span>}
       </span>
-      {snapshot.state === "idle" || snapshot.state === "ended" ? (
-        <button
-          type="button"
-          className="voice-conversation-button primary"
-          onClick={conversation.start}
-          disabled={!conversation.canStart}
-          title={conversation.canStart ? undefined : "Configure a TTS endpoint, model, and named voice in Settings first."}
-        >
-          <Icons.microphone size={13} />
-          Start conversation
-        </button>
-      ) : (
-        <button type="button" className="voice-conversation-button" onClick={conversation.end}>
-          <Icons.stop size={13} />
-          End
-        </button>
-      )}
-      {snapshot.state !== "idle" && snapshot.state !== "ended" && (
-        <button
-          type="button"
-          className={`voice-conversation-button${snapshot.muted ? " is-active" : ""}`}
-          onClick={snapshot.muted ? conversation.unmute : conversation.mute}
-          aria-pressed={snapshot.muted}
-        >
-          {snapshot.muted ? "Unmute" : "Mute"}
-        </button>
-      )}
+      <button
+        type="button"
+        className={`voice-conversation-button${snapshot.muted ? " is-active" : ""}`}
+        onClick={snapshot.muted ? conversation.unmute : conversation.mute}
+        aria-pressed={snapshot.muted}
+      >
+        {snapshot.muted ? "Unmute" : "Mute"}
+      </button>
       {canFinish && (
         <button type="button" className="voice-conversation-button" onClick={conversation.finishUtterance}>
           Finish utterance

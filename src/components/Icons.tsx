@@ -228,6 +228,11 @@ export const Icons = {
       <path d="M12 18v3" />
     </IconBase>
   ),
+  waveform: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
+    </IconBase>
+  ),
   keyboard: (props: IconProps) => (
     <IconBase {...props}>
       <rect x="3" y="6" width="18" height="12" rx="2" />

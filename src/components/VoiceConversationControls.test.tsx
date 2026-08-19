@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { IDLE_CONVERSATION } from "../voice/conversationMachine";
 import type { VoiceConversation } from "../voice/useVoiceConversation";
-import { VoiceConversationControls } from "./VoiceConversationControls";
+import {
+  composerPrimaryAction,
+  VoiceConversationActionButton,
+  VoiceConversationControls,
+} from "./VoiceConversationControls";
 
 function hasChildText(element: ReturnType<typeof VoiceConversationControls>, text: string): boolean {
   const children = Array.isArray(element?.props.children) ? element.props.children : [element?.props.children];
@@ -30,11 +34,25 @@ function model(overrides: Partial<VoiceConversation> = {}): VoiceConversation {
 }
 
 describe("VoiceConversationControls", () => {
-  it("renders an accessible start control independently of dictation", () => {
-    const conversation = model();
-    const element = VoiceConversationControls({ conversation, visible: true, manual: false });
-    expect(element?.props["aria-label"]).toBe("Voice conversation controls");
-    expect(element?.props.children[1].props.children).toContain("Start conversation");
+  it("uses conversation when empty, send with content, and stop while active", () => {
+    expect(composerPrimaryAction({ conversationActive: false, hasContent: false, voiceEnabled: true }))
+      .toBe("conversation");
+    expect(composerPrimaryAction({ conversationActive: false, hasContent: true, voiceEnabled: true }))
+      .toBe("send");
+    expect(composerPrimaryAction({ conversationActive: true, hasContent: true, voiceEnabled: true }))
+      .toBe("stop-conversation");
+    expect(composerPrimaryAction({ conversationActive: false, hasContent: false, voiceEnabled: false }))
+      .toBe("send");
+  });
+
+  it("switches the composer action between conversation and stop", () => {
+    const start = VoiceConversationActionButton({ onClick: vi.fn() });
+    expect(start.props["aria-label"]).toBe("Start conversation");
+    expect(start.props.className).toContain("voice-conversation-action");
+
+    const stop = VoiceConversationActionButton({ active: true, onClick: vi.fn() });
+    expect(stop.props["aria-label"]).toBe("Stop conversation");
+    expect(stop.props.className).toContain("stop");
   });
 
   it("exposes manual finish and retry states", () => {
@@ -44,6 +62,7 @@ describe("VoiceConversationControls", () => {
       isActive: true,
     });
     const element = VoiceConversationControls({ conversation, visible: true, manual: true });
+    expect(element?.props["aria-label"]).toBe("Voice conversation controls");
     expect(hasChildText(element, "Finish utterance")).toBe(true);
 
     const retry = VoiceConversationControls({

@@ -10,14 +10,16 @@ import type { Dictation } from "../voice/useDictation";
  */
 export function DictationButton({
   dictation,
-  enabled,
+  visible,
+  disabled = false,
   shortcut,
 }: {
   dictation: Dictation;
-  enabled: boolean;
+  visible: boolean;
+  disabled?: boolean;
   shortcut: KeyboardShortcutBinding;
 }) {
-  if (!enabled) return null;
+  if (!visible) return null;
 
   const label =
     dictation.state === "listening"
@@ -33,6 +35,7 @@ export function DictationButton({
       title={`${label} (${formatKeyboardShortcut(shortcut)})`}
       aria-label={label}
       aria-pressed={dictation.isActive}
+      disabled={disabled}
       onClick={dictation.toggle}
     >
       <Icons.microphone size={15} />

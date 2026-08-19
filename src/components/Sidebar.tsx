@@ -133,6 +133,13 @@ export function Sidebar() {
   );
   const chatsProject = catalog.local.projects.find(isChatsProject);
   const combinedWorkspace = mergedWorkspace(catalog);
+  const attentionProjects = useMemo(
+    () => [
+      ...visibleProjects.map(({ project }) => project),
+      ...(chatsProject ? [chatsProject] : []),
+    ],
+    [chatsProject, visibleProjects],
+  );
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const threadMenuRef = useRef<HTMLDivElement>(null);
 
@@ -303,12 +310,12 @@ export function Sidebar() {
   };
 
   const attentionItems = useMemo(
-    () => attentionThreads(combinedWorkspace, activeTurns, unseenThreads, selectedThreadID),
-    [activeTurns, combinedWorkspace, selectedThreadID, unseenThreads],
+    () => attentionThreads(attentionProjects, activeTurns, unseenThreads, selectedThreadID),
+    [activeTurns, attentionProjects, selectedThreadID, unseenThreads],
   );
   const attentionDisplay = useMemo(
-    () => withStickyAttention(attentionItems, combinedWorkspace, stickyAttention, selectedThreadID),
-    [attentionItems, combinedWorkspace, selectedThreadID, stickyAttention],
+    () => withStickyAttention(attentionItems, attentionProjects, stickyAttention, selectedThreadID),
+    [attentionItems, attentionProjects, selectedThreadID, stickyAttention],
   );
   const { attentionThreadIDs, attentionProjectIDs, attentionReasons } = useMemo(
     () => ({

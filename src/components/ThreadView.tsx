@@ -32,7 +32,11 @@ import { useVoiceConversation } from "../voice/useVoiceConversation";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentHoverCard } from "./AgentHoverCard";
 import { DictationButton, DictationStatus } from "./DictationButton";
-import { VoiceConversationControls } from "./VoiceConversationControls";
+import {
+  composerPrimaryAction,
+  VoiceConversationActionButton,
+  VoiceConversationControls,
+} from "./VoiceConversationControls";
 import { ActivityCard, InteractionCard } from "./EventCards";
 import { ContextRail, SummaryToggle } from "./ThreadSummary";
 import { Icons } from "./Icons";
@@ -178,8 +182,10 @@ export function ThreadView({
   const requestSideChat = useAppStore((state) => state.requestSideChat);
   const toggleBrowserShortcut = useAppStore((state) => state.keyboardShortcuts.toggleBrowser);
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
+  const pendingVoiceConversationThreadID = useAppStore((state) => state.pendingVoiceConversationThreadID);
+  const consumeVoiceConversationRequest = useAppStore((state) => state.consumeVoiceConversationRequest);
   const voiceSettings = useAppStore((state) => state.workspace?.voice ?? DEFAULT_VOICE_SETTINGS);
-  const voiceEnabled = voiceSettings.isEnabled && voiceSettings.mode === "dictation";
+  const voiceEnabled = voiceSettings.isEnabled;
   const error = useAppStore((state) => state.error);
   const browserAnnotations = useAppStore((state) => selectedThreadID
     ? state.browserAnnotationsByThread[selectedThreadID] ?? EMPTY_BROWSER_ANNOTATIONS
@@ -250,15 +256,6 @@ export function ThreadView({
     [openSideThreadID, project, thread],
   );
 
-  // Dictation owns the draft: a transcript rewrites the region it owns, while
-  // typing takes that region back. Both go through one setter so neither can
-  // clobber the other.
-  const dictation = useDictation({
-    boundTo: selectedThreadID,
-    enabled: voiceEnabled && thread?.surface !== "terminal",
-    settings: voiceSettings,
-    shortcut: dictationShortcut,
-  });
   const voiceConversation = useVoiceConversation({
     binding: project && thread && thread.surface !== "terminal"
       ? {
@@ -268,9 +265,28 @@ export function ThreadView({
           thread,
         }
       : null,
-    enabled: voiceSettings.isEnabled && voiceSettings.mode === "conversation" && thread?.surface !== "terminal",
+    enabled: voiceEnabled && thread?.surface !== "terminal",
     settings: voiceSettings,
   });
+  // Dictation owns the draft: a transcript rewrites the region it owns, while
+  // typing takes that region back. Conversation owns the microphone while it
+  // is active, including the dictation keyboard shortcut.
+  const dictation = useDictation({
+    boundTo: selectedThreadID,
+    enabled: voiceEnabled && !voiceConversation.isActive && thread?.surface !== "terminal",
+    settings: voiceSettings,
+    shortcut: dictationShortcut,
+  });
+  useEffect(() => {
+    if (
+      !thread
+      || pendingVoiceConversationThreadID !== thread.id
+      || !voiceConversation.canStart
+      || voiceConversation.snapshot.state !== "idle"
+    ) return;
+    consumeVoiceConversationRequest(thread.id);
+    voiceConversation.start();
+  }, [consumeVoiceConversationRequest, pendingVoiceConversationThreadID, thread, voiceConversation]);
   const { draft, setDraft } = dictation;
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
@@ -353,6 +369,14 @@ export function ThreadView({
   }
 
   const isRunning = !!activeTurns[thread.id];
+  const hasComposerContent = draft.trim().length > 0
+    || images.paths.length > 0
+    || browserAnnotations.length > 0;
+  const primaryComposerAction = composerPrimaryAction({
+    conversationActive: voiceConversation.isActive,
+    hasContent: hasComposerContent,
+    voiceEnabled,
+  });
   const queuedMessages = queuedMessagesByThread[thread.id] ?? [];
   const queueActionPending = !!sendingMessageByThread[thread.id];
   const terminalSurface = thread.surface === "terminal";
@@ -554,13 +578,12 @@ export function ThreadView({
               <span><Icons.files size={13} />{changedFiles} {changedFiles === 1 ? "File Changed" : "Files Changed"}</span>
             </div>
           )}
-          {voiceSettings.mode === "conversation" ? (
-            <VoiceConversationControls
-              conversation={voiceConversation}
-              visible={voiceSettings.isEnabled && thread.surface !== "terminal"}
-              manual={voiceSettings.turnDetection === "manual"}
-            />
-          ) : <DictationStatus dictation={dictation} />}
+          <DictationStatus dictation={dictation} />
+          <VoiceConversationControls
+            conversation={voiceConversation}
+            visible={voiceEnabled && thread.surface !== "terminal"}
+            manual={voiceSettings.turnDetection === "manual"}
+          />
           <QueuedMessages
             messages={queuedMessages}
             isRunning={isRunning}
@@ -650,14 +673,18 @@ export function ThreadView({
               {/* Grouped so the toolbar keeps two flex children and the model
                   picker stays pinned to the leading edge. */}
               <div className="composer-actions">
-                {voiceSettings.mode === "dictation" && (
-                  <DictationButton
-                    dictation={dictation}
-                    enabled={voiceEnabled}
-                    shortcut={dictationShortcut}
+                <DictationButton
+                  dictation={dictation}
+                  visible={voiceEnabled}
+                  disabled={voiceConversation.isActive}
+                  shortcut={dictationShortcut}
+                />
+                {primaryComposerAction === "stop-conversation" ? (
+                  <VoiceConversationActionButton
+                    active
+                    onClick={voiceConversation.end}
                   />
-                )}
-                {isRunning ? (
+                ) : isRunning ? (
                   <>
                     <button className="send-button stop" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
                       <Icons.stop size={14} />
@@ -671,11 +698,21 @@ export function ThreadView({
                       <Icons.arrowUp size={16} />
                     </button>
                   </>
-                ) : (
+                ) : primaryComposerAction === "send" ? (
                   <button className="send-button" title={submitting ? "Sending message" : "Send message"}
-                    disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)} onClick={() => void submit()}>
+                    disabled={submitting || !hasComposerContent} onClick={() => void submit()}>
                     <Icons.arrowUp size={16} />
                   </button>
+                ) : (
+                  <VoiceConversationActionButton
+                    onClick={voiceConversation.start}
+                    disabled={!voiceConversation.canStart || dictation.isActive || submitting}
+                    title={!voiceConversation.canStart
+                      ? "Configure a TTS endpoint, model, and named voice in Settings first."
+                      : dictation.isActive
+                        ? "Stop dictation before starting a conversation."
+                        : undefined}
+                  />
                 )}
               </div>
             </div>
@@ -1115,6 +1152,8 @@ function NewAgentView({
 }) {
   const profiles = useAppStore((state) => state.workspace?.providerProfiles ?? []);
   const createThreadAndSend = useAppStore((state) => state.createThreadAndSend);
+  const addThread = useAppStore((state) => state.addThread);
+  const requestVoiceConversation = useAppStore((state) => state.requestVoiceConversation);
   const runtime = useAppStore((state) => state.newThreadRuntime);
   const setRuntime = useAppStore((state) => state.setNewThreadRuntime);
   const surface = useAppStore((state) => state.newThreadSurface);
@@ -1147,7 +1186,11 @@ function NewAgentView({
   const selectedContextHostID = selectedProject?.hostId ?? "local";
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
   const voiceSettings = useAppStore((state) => state.workspace?.voice ?? DEFAULT_VOICE_SETTINGS);
-  const voiceEnabled = voiceSettings.isEnabled && voiceSettings.mode === "dictation";
+  const voiceEnabled = voiceSettings.isEnabled;
+  const conversationReady = voiceEnabled
+    && voiceSettings.ttsApiBase.trim().length > 0
+    && voiceSettings.ttsModel.trim().length > 0
+    && voiceSettings.voiceID.trim().length > 0;
   const dictation = useDictation({
     boundTo: "new-agent",
     enabled: voiceEnabled && surface === "gui",
@@ -1155,6 +1198,11 @@ function NewAgentView({
     shortcut: dictationShortcut,
   });
   const { draft, setDraft } = dictation;
+  const primaryComposerAction = composerPrimaryAction({
+    conversationActive: false,
+    hasContent: draft.trim().length > 0,
+    voiceEnabled: voiceEnabled && surface === "gui",
+  });
   const [sending, setSending] = useState(false);
   const [addingOnHost, setAddingOnHost] = useState<{ id: string; name: string } | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -1188,6 +1236,27 @@ function NewAgentView({
     if (created) images.clear();
     else setDraft(prompt);
     requestAnimationFrame(() => textRef.current?.focus());
+  };
+
+  const startConversation = async () => {
+    if (!conversationReady || sending) return;
+    setSending(true);
+    const thread = await addThread(
+      projectID,
+      runtime.provider,
+      runtime.model,
+      "Voice conversation",
+      runtime.effort,
+      runtime.speed,
+      "gui",
+      environment,
+    );
+    if (thread) {
+      images.clear();
+      requestVoiceConversation(thread.id);
+    } else {
+      setSending(false);
+    }
   };
 
   return (
@@ -1287,13 +1356,26 @@ function NewAgentView({
                 {surface === "gui" && (
                   <DictationButton
                     dictation={dictation}
-                    enabled={voiceEnabled}
+                    visible={voiceEnabled}
+                    disabled={sending}
                     shortcut={dictationShortcut}
                   />
                 )}
-                <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
-                  {sending ? <span className="mini-spinner" /> : <Icons.arrowUp size={16} />}
-                </button>
+                {surface === "gui" && images.paths.length === 0 && primaryComposerAction === "conversation" ? (
+                  <VoiceConversationActionButton
+                    onClick={() => void startConversation()}
+                    disabled={!conversationReady || sending || dictation.isActive}
+                    title={!conversationReady
+                      ? "Configure a TTS endpoint, model, and named voice in Settings first."
+                      : dictation.isActive
+                        ? "Stop dictation before starting a conversation."
+                        : "Create a chat and start a voice conversation"}
+                  />
+                ) : (
+                  <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
+                    {sending ? <span className="mini-spinner" /> : <Icons.arrowUp size={16} />}
+                  </button>
+                )}
               </div>
             </div>
             </div>

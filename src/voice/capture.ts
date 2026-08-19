@@ -11,6 +11,27 @@
 
 import { VOICE_SAMPLE_RATE } from "./types";
 import { voiceInputConstraints } from "./devices";
+import { ipc } from "../ipc";
+
+const MICROPHONE_OPEN_TIMEOUT_MS = 10_000;
+
+export class MicrophoneAccessError extends Error {
+  readonly code = "voice.microphone-access" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MicrophoneAccessError";
+  }
+}
+
+export function microphoneErrorMessage(reason: unknown): string {
+  if (reason instanceof MicrophoneAccessError) return reason.message;
+  if (reason instanceof DOMException && reason.name === "NotAllowedError") {
+    return "Maxx needs microphone access. Allow it in System Settings → Privacy & Security → Microphone, then restart Maxx.";
+  }
+  const detail = reason instanceof Error ? reason.message : String(reason);
+  return `Could not open the microphone: ${detail}`;
+}
 
 export interface MicrophoneCapture {
   stop: () => Promise<void>;
@@ -44,9 +65,17 @@ export async function startMicrophoneCapture(
   onChunk: (base64: string) => void,
   options: MicrophoneCaptureOptions = {},
 ): Promise<MicrophoneCapture> {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: voiceInputConstraints(options.inputDeviceId),
-  });
+  const access = await ipc.voiceMicrophoneAccess();
+  if (!access.granted) {
+    const action = access.status === "restricted"
+      ? "Microphone access is restricted by macOS."
+      : "Maxx does not have microphone access.";
+    throw new MicrophoneAccessError(
+      `${action} Allow it in System Settings → Privacy & Security → Microphone, then restart Maxx.`,
+    );
+  }
+
+  const stream = await openMicrophone(options.inputDeviceId);
 
   // Asking for the target rate directly avoids resampling when the device can
   // oblige; the worklet still handles the case where it cannot.
@@ -97,6 +126,32 @@ export async function startMicrophoneCapture(
       await context.close().catch(() => {});
     },
   };
+}
+
+async function openMicrophone(inputDeviceId?: string | null): Promise<MediaStream> {
+  const request = navigator.mediaDevices.getUserMedia({
+    audio: voiceInputConstraints(inputDeviceId),
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new MicrophoneAccessError(
+          "The microphone did not open. Check the selected input device and restart Maxx.",
+        )), MICROPHONE_OPEN_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    // getUserMedia cannot be aborted. If Chromium resolves after our bounded
+    // wait, stop the late stream immediately so no hidden capture survives.
+    void request.then((lateStream) => {
+      lateStream.getTracks().forEach((track) => track.stop());
+    }).catch(() => {});
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function pcm16RootMeanSquare(buffer: ArrayBuffer): number {

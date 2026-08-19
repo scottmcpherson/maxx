@@ -74,7 +74,7 @@ describe("attentionThreads", () => {
     });
 
     const items = attentionThreads(
-      ws,
+      ws.projects,
       { waiting: "turn-a", running: "turn-b" },
       { unseen: true, side: true },
       null,
@@ -88,7 +88,7 @@ describe("attentionThreads", () => {
   it("excludes the selected thread because it is already being viewed", () => {
     const ws = workspace({ p1: [thread({ id: "selected" }), thread({ id: "other" })] });
     const items = attentionThreads(
-      ws,
+      ws.projects,
       {},
       { selected: true, other: true },
       "selected",
@@ -105,15 +105,31 @@ describe("attentionThreads", () => {
         }),
       ],
     });
-    const items = attentionThreads(ws, { both: "turn-a" }, { both: true }, null);
+    const items = attentionThreads(ws.projects, { both: "turn-a" }, { both: true }, null);
     expect(items).toHaveLength(1);
     expect(items[0].reason).toBe("waiting");
   });
 
   it("returns empty for missing workspaces and running chats without requests", () => {
-    expect(attentionThreads(null, {}, {}, null)).toEqual([]);
+    expect(attentionThreads([], {}, {}, null)).toEqual([]);
     const ws = workspace({ p1: [thread({ id: "running" })] });
-    expect(attentionThreads(ws, { running: "turn-a" }, {}, null)).toEqual([]);
+    expect(attentionThreads(ws.projects, { running: "turn-a" }, {}, null)).toEqual([]);
+  });
+
+  it("ignores unread threads from projects the sidebar does not display", () => {
+    const ws = workspace({
+      visible: [thread({ id: "visible-read" })],
+      "hidden-remote-chats": [thread({ id: "hidden-unread" })],
+    });
+
+    const items = attentionThreads(
+      [ws.projects[0]],
+      {},
+      { "hidden-unread": true },
+      null,
+    );
+
+    expect(items).toEqual([]);
   });
 });
 
@@ -122,10 +138,10 @@ describe("withStickyAttention", () => {
     const ws = workspace({
       p1: [thread({ id: "reading" }), thread({ id: "other" })],
     });
-    const items = attentionThreads(ws, {}, { other: true }, "reading");
+    const items = attentionThreads(ws.projects, {}, { other: true }, "reading");
     const display = withStickyAttention(
       items,
-      ws,
+      ws.projects,
       { threadID: "reading", reason: "unseen" },
       "reading",
     );
@@ -135,11 +151,11 @@ describe("withStickyAttention", () => {
 
   it("does not retain a sticky chat after selection moves", () => {
     const ws = workspace({ p1: [thread({ id: "reading" })] });
-    const items = attentionThreads(ws, {}, {}, "other");
+    const items = attentionThreads(ws.projects, {}, {}, "other");
     expect(
       withStickyAttention(
         items,
-        ws,
+        ws.projects,
         { threadID: "reading", reason: "unseen" },
         "other",
       ),

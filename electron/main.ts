@@ -16,6 +16,7 @@ import {
   protocol,
   session,
   shell,
+  systemPreferences,
   Tray,
 } from "electron";
 import { BrowserManager } from "./browser-manager.js";
@@ -341,15 +342,22 @@ async function runAppSmoke(): Promise<void> {
       .find((button) => button.textContent?.includes('Voice')));
     voiceButton?.click();
     const panel = await waitFor(() => document.querySelector('[aria-label="Voice settings"]'));
-    const result = Boolean(
+    const enableVoice = document.querySelector('[aria-label="Enable voice input"]');
+    const settingsRendered = Boolean(
       panel
-      && document.querySelector('[aria-label="Enable voice input"]')
-      && document.querySelector('[aria-label="Voice mode"]')
+      && enableVoice
+      && !document.querySelector('[aria-label="Voice mode"]')
       && document.querySelector('[aria-label="Text-to-speech voice"]')
       && document.querySelector('[aria-label="Voice turn detection"]')
     );
+    if (enableVoice instanceof HTMLInputElement && !enableVoice.checked) enableVoice.click();
     document.querySelector('.settings-back')?.click();
-    return result;
+    const composerActions = await waitFor(() => {
+      const dictation = document.querySelector('[aria-label="Dictate a message"]');
+      const conversation = document.querySelector('[aria-label="Start conversation"]');
+      return dictation && conversation ? { dictation: true, conversation: true } : null;
+    });
+    return settingsRendered && Boolean(composerActions?.dictation && composerActions?.conversation);
   })()`);
   if (voiceSettingsUI !== true) throw new Error("packaged Voice settings controls did not render");
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
@@ -947,6 +955,17 @@ function registerIPC(): void {
         if (typeof params.text !== "string") throw new Error("Clipboard text must be a string");
         clipboard.writeText(params.text);
         return null;
+      case "voice_microphone_access": {
+        if (process.platform !== "darwin") return { granted: true, status: "granted" };
+        let status = systemPreferences.getMediaAccessStatus("microphone");
+        if (status === "granted") return { granted: true, status };
+        if (status === "denied" || status === "restricted") {
+          return { granted: false, status };
+        }
+        const granted = await systemPreferences.askForMediaAccess("microphone");
+        status = systemPreferences.getMediaAccessStatus("microphone");
+        return { granted, status };
+      }
       case "window_toggle_maximize":
         if (mainWindow?.isMaximized()) mainWindow.unmaximize(); else mainWindow?.maximize();
         return null;
@@ -1039,8 +1058,19 @@ else {
     registerIPC();
     installMenu();
     installTray();
-    session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
-      callback(permission === "media" && contents === mainWindow?.webContents);
+    session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => {
+      return permission === "media"
+        && contents === mainWindow?.webContents
+        && details.mediaType === "audio";
+    });
+    session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      const mediaTypes = "mediaTypes" in details ? details.mediaTypes : undefined;
+      callback(
+        permission === "media"
+          && contents === mainWindow?.webContents
+          && mediaTypes?.length === 1
+          && mediaTypes[0] === "audio",
+      );
     });
     if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(path.join(projectDirectory, "src-tauri", "icons", "128x128.png")));
     await createWindow();

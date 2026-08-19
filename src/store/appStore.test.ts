@@ -52,6 +52,7 @@ afterEach(() => {
     newThreadSurface: "gui",
     newThreadEnvironment: "current",
     terminalModeEnabled: false,
+    pendingVoiceConversationThreadID: null,
   });
   vi.restoreAllMocks();
 });
@@ -68,6 +69,17 @@ describe("automation surface", () => {
 
     useAppStore.getState().setAutomationsOpen(false);
     expect(useAppStore.getState().automationsOpen).toBe(false);
+  });
+});
+
+describe("voice conversation handoff", () => {
+  it("consumes only the matching new-chat request", () => {
+    useAppStore.getState().requestVoiceConversation("voice-thread");
+    useAppStore.getState().consumeVoiceConversationRequest("another-thread");
+    expect(useAppStore.getState().pendingVoiceConversationThreadID).toBe("voice-thread");
+
+    useAppStore.getState().consumeVoiceConversationRequest("voice-thread");
+    expect(useAppStore.getState().pendingVoiceConversationThreadID).toBeNull();
   });
 });
 

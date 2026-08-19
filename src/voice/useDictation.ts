@@ -19,6 +19,7 @@ import {
 import type { DictationDraft } from "./dictation";
 import { DEFAULT_VOICE_SETTINGS } from "./types";
 import type { VoiceSettings } from "./types";
+import { microphoneErrorMessage, startMicrophoneCapture } from "./capture";
 
 /**
  * `starting` covers both opening the microphone and connecting the socket —
@@ -26,6 +27,8 @@ import type { VoiceSettings } from "./types";
  * when the backend reports `listening`.
  */
 export type DictationState = "idle" | "starting" | "listening" | "stopping";
+
+const STOP_DRAIN_TIMEOUT_MS = 15_000;
 
 export interface Dictation {
   draft: string;
@@ -64,6 +67,10 @@ export function useDictation(options: {
   const captureRef = useRef<{ stop: () => Promise<void> } | null>(null);
   const sessionHostRef = useRef<string>(settings.speechHostID);
   const sessionSequenceRef = useRef(0);
+  const startEpochRef = useRef(0);
+  const audioSendsRef = useRef<Set<Promise<void>>>(new Set());
+  const discardedSessionRef = useRef<number | null>(null);
+  const stopDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Read inside the event listener, which is registered once.
   const stateRef = useRef<DictationState>("idle");
   stateRef.current = state;
@@ -74,25 +81,66 @@ export function useDictation(options: {
     if (capture) await capture.stop();
   }, []);
 
+  const clearStopDrainTimer = useCallback(() => {
+    if (stopDrainTimerRef.current === null) return;
+    clearTimeout(stopDrainTimerRef.current);
+    stopDrainTimerRef.current = null;
+  }, []);
+
+  const finishSession = useCallback((session: number) => {
+    if (sessionRef.current !== session) return;
+    clearStopDrainTimer();
+    sessionRef.current = null;
+    sessionSequenceRef.current = 0;
+    audioSendsRef.current.clear();
+    const discarded = discardedSessionRef.current === session;
+    discardedSessionRef.current = null;
+    setDraftState((current) => discarded ? discardSpan(current) : releaseSpan(current));
+    setState("idle");
+  }, [clearStopDrainTimer]);
+
   const endSession = useCallback(
     async (mode: "keep" | "discard") => {
+      startEpochRef.current += 1;
       const session = sessionRef.current;
-      // The microphone is released immediately; the socket drains afterwards
-      // so the sentence just spoken still arrives.
-      await releaseCapture();
+      if (mode === "discard" && session !== null) discardedSessionRef.current = session;
       if (mode === "discard") setDraftState((current) => discardSpan(current));
-      else setDraftState((current) => releaseSpan(current));
-      if (session !== null) {
-        sessionRef.current = null;
-        try {
-          await ipc.voiceStop(session, sessionHostRef.current);
-        } catch {
-          /* Session already gone; nothing to stop. */
-        }
+
+      // The microphone is released immediately. Flush renderer-to-runtime IPC
+      // before asking the speech session to drain so its final chunk cannot be
+      // reordered behind voice_stop.
+      await releaseCapture();
+      await Promise.allSettled([...audioSendsRef.current]);
+
+      if (session === null) {
+        if (mode === "keep") setDraftState((current) => releaseSpan(current));
+        setState("idle");
+        return;
       }
-      setState("idle");
+
+      try {
+        await ipc.voiceStop(session, sessionHostRef.current);
+      } catch (reason) {
+        if (sessionRef.current !== session) return;
+        finishSession(session);
+        setError(`Could not finish dictation: ${String(reason)}`);
+        return;
+      }
+
+      // Batch transcription returns its final text after voice_stop. Keep the
+      // session owned until the matching stopped event so that final is not
+      // mistaken for a stale event. Recover if a remote host disappears while
+      // draining and never delivers that terminal event.
+      if (sessionRef.current === session) {
+        clearStopDrainTimer();
+        stopDrainTimerRef.current = setTimeout(() => {
+          if (sessionRef.current !== session) return;
+          finishSession(session);
+          setError("Dictation did not finish. Check the speech host connection and try again.");
+        }, STOP_DRAIN_TIMEOUT_MS);
+      }
     },
-    [releaseCapture],
+    [clearStopDrainTimer, finishSession, releaseCapture],
   );
 
   useEffect(() => {
@@ -109,17 +157,16 @@ export function useDictation(options: {
               // The backend can end a session on its own — a watchdog, or a
               // connection it could not recover. Tear the microphone down to
               // match rather than leaving it open against a dead socket.
-              sessionRef.current = null;
-              sessionSequenceRef.current = 0;
               void releaseCapture();
-              setDraftState((current) => releaseSpan(current));
-              setState("idle");
+              finishSession(event.session);
             }
             break;
           case "interim":
+            if (discardedSessionRef.current === event.session) break;
             setDraftState((current) => applyInterim(current, event.text));
             break;
           case "final":
+            if (discardedSessionRef.current === event.session) break;
             setDraftState((current) => commitFinal(current, event.text));
             break;
           case "error":
@@ -136,17 +183,22 @@ export function useDictation(options: {
       cancelled = true;
       unlisten?.();
     };
-  }, [releaseCapture, settings.speechHostID]);
+  }, [finishSession, releaseCapture, settings.speechHostID]);
 
   // Switching composers stops dictation rather than letting audio feed a
   // draft the user can no longer see.
   useEffect(() => {
     return () => {
-      if (sessionRef.current !== null) void endSession("keep");
+      if (stateRef.current !== "idle") void endSession("keep");
     };
   }, [boundTo, endSession, settings.speechHostID]);
 
+  useEffect(() => {
+    if (!enabled && stateRef.current !== "idle") void endSession("keep");
+  }, [enabled, endSession]);
+
   const start = useCallback(async () => {
+    const epoch = ++startEpochRef.current;
     setError(null);
     setState("starting");
     let session: number;
@@ -155,53 +207,65 @@ export function useDictation(options: {
       // setup never opens the microphone at all.
       session = await ipc.voiceStart(settings, settings.speechHostID);
     } catch (reason) {
+      if (epoch !== startEpochRef.current) return;
       setState("idle");
       setError(String(reason));
+      return;
+    }
+    if (epoch !== startEpochRef.current) {
+      void ipc.voiceStop(session, settings.speechHostID).catch(() => {});
       return;
     }
     sessionRef.current = session;
     sessionHostRef.current = settings.speechHostID;
     sessionSequenceRef.current = 0;
+    audioSendsRef.current.clear();
+    discardedSessionRef.current = null;
 
     try {
       // Capture starts while the socket is still connecting; chunks buffer on
       // the Rust side so the first word of an utterance is not clipped.
-      const { startMicrophoneCapture } = await import("./capture");
-      captureRef.current = await startMicrophoneCapture((chunk) => {
+      const capture = await startMicrophoneCapture((chunk) => {
         if (sessionRef.current !== session) return;
         const sequence = sessionSequenceRef.current;
         sessionSequenceRef.current += 1;
-        void ipc.voiceSendAudio(session, chunk, sequence, sessionHostRef.current).catch((reason) => {
-          if (sessionRef.current === session) setError(`Voice audio error: ${String(reason)}`);
-        });
+        const send = ipc.voiceSendAudio(session, chunk, sequence, sessionHostRef.current);
+        audioSendsRef.current.add(send);
+        void send
+          .catch((reason) => {
+            if (sessionRef.current === session) setError(`Voice audio error: ${String(reason)}`);
+          })
+          .finally(() => audioSendsRef.current.delete(send));
       }, { inputDeviceId: settings.inputDeviceID });
+      if (epoch !== startEpochRef.current || sessionRef.current !== session) {
+        await capture.stop().catch(() => {});
+        return;
+      }
+      captureRef.current = capture;
     } catch (reason) {
+      if (epoch !== startEpochRef.current) return;
       sessionRef.current = null;
       void ipc.voiceStop(session, sessionHostRef.current).catch(() => {});
       setState("idle");
-      setError(
-        reason instanceof DOMException && reason.name === "NotAllowedError"
-          ? "Maxx needs microphone access. Allow it in System Settings → Privacy & Security → Microphone."
-          : `Could not open the microphone: ${String(reason)}`,
-      );
+      setError(microphoneErrorMessage(reason));
     }
-  }, [releaseCapture, settings]);
+  }, [settings]);
 
   const stop = useCallback(() => {
-    if (sessionRef.current === null) return;
+    if (stateRef.current === "idle") return;
     setState("stopping");
     void endSession("keep");
   }, [endSession]);
 
   const cancel = useCallback(() => {
-    if (sessionRef.current === null) return;
+    if (stateRef.current === "idle") return;
     setState("stopping");
     void endSession("discard");
   }, [endSession]);
 
   const toggle = useCallback(() => {
     if (!enabled) return;
-    if (sessionRef.current === null) void start();
+    if (stateRef.current === "idle") void start();
     else stop();
   }, [enabled, start, stop]);
 

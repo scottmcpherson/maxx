@@ -2,10 +2,11 @@
 //
 // A thread needs attention when it is waiting for input (pending approval /
 // user-input request) or finished while the user was away (unseen dot). The
-// selector carries the owning project while preserving workspace order so the
-// sidebar can keep its normal hierarchy.
+// selector carries the owning project while preserving sidebar order so the
+// sidebar can keep its normal hierarchy. Callers pass the projects the sidebar
+// can actually render; hidden remote projectless chats must not light the bell.
 
-import { ChatProject, ChatThread, WorkspaceDocument } from "../contract/types";
+import { ChatProject, ChatThread } from "../contract/types";
 import { threadActivity } from "./threadActivity";
 import { UnseenThreadMap } from "./unseenThreads";
 
@@ -58,14 +59,13 @@ export interface StickyAttentionRef {
 }
 
 export function attentionThreads(
-  workspace: WorkspaceDocument | null,
+  projects: ChatProject[],
   activeTurnByThread: Record<string, string>,
   unseenThreadIDs: UnseenThreadMap,
   selectedThreadID: string | null,
 ): AttentionItem[] {
-  if (!workspace) return [];
   const items: AttentionItem[] = [];
-  for (const project of workspace.projects) {
+  for (const project of projects) {
     for (const thread of project.threads) {
       if (thread.parentThreadID || thread.id === selectedThreadID) continue;
       if (threadActivity(thread, activeTurnByThread).status === "waiting") {
@@ -84,13 +84,13 @@ export function attentionThreads(
  */
 export function withStickyAttention(
   items: AttentionItem[],
-  workspace: WorkspaceDocument | null,
+  projects: ChatProject[],
   sticky: StickyAttentionRef | null,
   selectedThreadID: string | null,
 ): AttentionItem[] {
   if (!sticky || sticky.threadID !== selectedThreadID) return items;
   if (items.some((item) => item.thread.id === sticky.threadID)) return items;
-  for (const project of workspace?.projects ?? []) {
+  for (const project of projects) {
     const thread = project.threads.find((candidate) => candidate.id === sticky.threadID);
     if (thread) return [...items, { project, thread, reason: sticky.reason }];
   }

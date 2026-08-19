@@ -1023,8 +1023,8 @@ function VoiceSettingsSection() {
           <h1>Voice</h1>
           <p>
             Keep capture and playback on this computer while speech processing runs on the selected
-            provider and host. Dictation is reviewed in the composer; Conversation sends turns
-            to the currently selected GUI thread.
+            provider and host. Dictation and hands-free Conversation are both available from every
+            GUI composer when their services are configured.
           </p>
         </div>
 
@@ -1034,13 +1034,13 @@ function VoiceSettingsSection() {
         <div className="voice-settings-group">
           <header className="voice-settings-group-header">
             <h2>Basics</h2>
-            <p>Choose where voice begins and whether speech is reviewed before sending.</p>
+            <p>Make dictation and hands-free conversation available in the composer.</p>
           </header>
           <section className="settings-card voice-settings" aria-label="Voice basics">
             <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Voice input</strong>
-            <small>Show a microphone button in the composer.</small>
+            <small>Show dictation and conversation controls in GUI composers.</small>
           </span>
           <label className="switch">
             <input
@@ -1053,20 +1053,6 @@ function VoiceSettingsSection() {
           </label>
             </div>
 
-            <div className="settings-row">
-          <span className="settings-row-copy">
-            <strong>Voice mode</strong>
-            <small>Dictation stays in the composer for review. Conversation uses this selected GUI thread and streams replies to local playback.</small>
-          </span>
-          <select
-            aria-label="Voice mode"
-            value={settings.mode}
-            onChange={(event) => update({ mode: event.target.value as VoiceSettings["mode"] })}
-          >
-            <option value="dictation">Dictation</option>
-            <option value="conversation">Conversation</option>
-          </select>
-            </div>
           </section>
         </div>
 

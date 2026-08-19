@@ -3,7 +3,6 @@
 /** Capture rate the STT socket is opened with; the worklet resamples to it. */
 export const VOICE_SAMPLE_RATE = 16_000;
 
-export type VoiceMode = "dictation" | "conversation";
 export type SttProvider = "xai" | "openai-compatible";
 export type TtsProvider = "openai-compatible";
 export type TurnDetection = "manual" | "automatic";
@@ -11,7 +10,6 @@ export type TurnDetection = "manual" | "automatic";
 /** Persisted in workspace.json. Deliberately carries no credential. */
 export interface VoiceSettings {
   isEnabled: boolean;
-  mode: VoiceMode;
   /** Opt-in to reusing the bearer the Grok CLI stores in ~/.grok/auth.json. */
   useGrokSignIn: boolean;
   sttProvider: SttProvider;
@@ -32,7 +30,6 @@ export interface VoiceSettings {
 
 export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   isEnabled: false,
-  mode: "dictation",
   useGrokSignIn: false,
   sttProvider: "xai",
   sttApiBase: "https://api.x.ai",
@@ -67,6 +64,11 @@ export interface VoiceProviderTestResult {
   ok: boolean;
   code: string;
   message: string;
+}
+
+export interface VoiceMicrophoneAccess {
+  granted: boolean;
+  status: "not-determined" | "granted" | "denied" | "restricted" | "unknown";
 }
 
 /** A voice exposed by the selected provider's synthesis catalog. */

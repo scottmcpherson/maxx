@@ -52,6 +52,19 @@ describe("SpeechSynthesisQueue", () => {
     expect(runner.calls).toEqual(["active"]);
   });
 
+  it("remains reusable after lifecycle cancellation", async () => {
+    const runner = new FakeRunner();
+    const queue = new SpeechSynthesisQueue(runner);
+    await queue.cancel();
+
+    const replayed = queue.enqueue(DEFAULT_VOICE_SETTINGS, "after cleanup replay");
+    await Promise.resolve();
+    expect(runner.calls).toEqual(["after cleanup replay"]);
+    runner.pending.shift()?.();
+
+    await expect(replayed).resolves.toBe(true);
+  });
+
   it("drains active and queued phrases before resolving", async () => {
     const runner = new FakeRunner();
     const queue = new SpeechSynthesisQueue(runner);

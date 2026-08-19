@@ -68,12 +68,14 @@ describe("voice IPC", () => {
   });
 
   it("routes speech execution and preserves an explicit settings snapshot", async () => {
+    await ipc.voiceMicrophoneAccess();
     await ipc.voiceStatus(DEFAULT_VOICE_SETTINGS, "paired-mac");
     await ipc.voiceStart(DEFAULT_VOICE_SETTINGS, "paired-mac");
     await ipc.voiceSendAudio(7, "AQI=", 12, "paired-mac");
     await ipc.voiceStop(7, "paired-mac");
 
     expect(invoke.mock.calls).toEqual([
+      ["voice_microphone_access", {}],
       ["voice_status", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
       ["voice_start", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
       ["voice_send_audio", { session: 7, chunk: "AQI=", sequence: 12, hostId: "paired-mac" }],

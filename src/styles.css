@@ -2941,6 +2941,8 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   color: var(--text-dim);
 }
 .dictation-button:hover { background: var(--bg-hover); color: var(--text); }
+.dictation-button:disabled { color: var(--text-faint); cursor: default; opacity: .45; }
+.dictation-button:disabled:hover { background: transparent; color: var(--text-faint); }
 /* Recording reads from the icon colour and the ring below, so no fill is
    needed to make the state obvious. */
 .dictation-button.state-listening { color: var(--red, #e5484d); }
@@ -3043,10 +3045,12 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
 }
 .voice-conversation-button:hover,
 .voice-conversation-button.is-active { background: var(--bg-hover); color: var(--text); }
+.voice-conversation-button:disabled { opacity: .45; cursor: default; }
 .voice-conversation-button.primary { background: var(--text); border-color: var(--text); color: #191919; }
-.voice-conversation-button.primary:hover { background: #fff; color: #111; }
+.voice-conversation-button.primary:not(:disabled):hover { background: #fff; color: #111; }
 .voice-conversation-button.interrupt { color: #ffb1b3; }
 .voice-conversation-error { flex: 1 1 100%; color: #ff9ea1; line-height: 1.35; }
+.voice-conversation-action { flex: 0 0 auto; }
 
 /* Same card as `.provider-settings-list` / `.keyboard-shortcut-list` so every
    settings section lines up on one column. */
