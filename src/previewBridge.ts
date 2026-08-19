@@ -7,6 +7,7 @@ import type {
   WorkspaceDocument,
 } from "./contract/types";
 import type { HostStatus, RemoteHostStatus, TailscaleDiscovery } from "./host/types";
+import { DEFAULT_VOICE_SETTINGS } from "./voice/types";
 
 const APPLE_EPOCH_OFFSET = 978_307_200;
 const now = () => Date.now() / 1_000 - APPLE_EPOCH_OFFSET;
@@ -113,12 +114,7 @@ let localWorkspace: WorkspaceDocument = {
   ],
   providerProfiles: profiles,
   agents,
-  voice: {
-    isEnabled: false,
-    useGrokSignIn: false,
-    language: "en",
-    apiBase: "https://api.x.ai",
-  },
+  voice: DEFAULT_VOICE_SETTINGS,
 };
 
 const remoteWorkspace: WorkspaceDocument = {
@@ -144,8 +140,8 @@ const remoteHost: RemoteHostStatus = {
 
 let hostStatus: HostStatus = {
   id: "browser-preview",
-  name: "This Mac",
-  protocolVersion: 4,
+  name: "This computer",
+  protocolVersion: 6,
   listening: true,
   bindAddress: "127.0.0.1:7422",
   shareAddress: "this-mac.tailnet.ts.net:7422",
@@ -161,12 +157,21 @@ let hostStatus: HostStatus = {
     },
   ],
 };
+let previewTtsSession = 0;
+const previewTtsSessions = new Set<number>();
+
+function previewPcmChunk(): string {
+  const bytes = new Uint8Array(320);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 const discovery: TailscaleDiscovery = {
   installed: true,
   running: true,
   selfNode: {
-    name: "This Mac",
+    name: "This computer",
     dnsName: "this-mac.tailnet.ts.net",
     addresses: ["100.64.0.10"],
     online: true,
@@ -283,7 +288,47 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
       result = { profileID: params.profileId, state: "ready", message: "Ready in browser preview" };
       break;
     case "voice_status":
-      result = { source: "none", detail: "Unavailable in browser preview", available: false };
+      result = {
+        source: "none",
+        detail: "Unavailable in browser preview",
+        available: false,
+        provider: (params.settings as { sttProvider?: string } | undefined)?.sttProvider ?? "xai",
+      };
+      break;
+    case "voice_test_stt":
+      result = {
+        provider: (params.settings as { sttProvider?: string } | undefined)?.sttProvider ?? "xai",
+        endpoint: (params.settings as { sttApiBase?: string } | undefined)?.sttApiBase ?? "https://api.x.ai",
+        model: (params.settings as { sttModel?: string } | undefined)?.sttModel ?? "",
+        ok: false,
+        code: "preview-unavailable",
+        message: "Voice provider checks require the desktop app.",
+      };
+      break;
+    case "voice_list_voices":
+      result = [{ id: "preview-voice", name: "Preview Voice", model: "preview-tts", language: "en" }];
+      break;
+    case "voice_tts_start": {
+      const session = ++previewTtsSession;
+      previewTtsSessions.add(session);
+      result = { session, mimeType: "audio/pcm", sampleRate: 16_000, channels: 1 };
+      break;
+    }
+    case "voice_tts_read": {
+      const session = Number(params.session);
+      if (!previewTtsSessions.has(session)) {
+        result = { chunks: [], done: true, error: "Preview TTS session is no longer active." };
+        break;
+      }
+      const afterSequence = Number(params.afterSequence);
+      result = afterSequence < 0
+        ? { chunks: [{ sequence: 0, chunk: previewPcmChunk() }], done: true }
+        : { chunks: [], done: true };
+      break;
+    }
+    case "voice_tts_cancel":
+      previewTtsSessions.delete(Number(params.session));
+      result = undefined;
       break;
     case "check_for_updates":
       result = { state: "upToDate", version: "0.1.0" };
@@ -415,6 +460,7 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
     case "browser_view_bounds":
     case "browser_view_visible":
     case "cancel_turn":
+    case "voice_interrupt_turn":
     case "host_revoke_peer":
     case "resolve_request":
     case "set_shortcut_accelerators":

@@ -13,7 +13,7 @@ export function ProjectFolderIcon({
 }) {
   const locationTitle = remote
     ? `Remote project${hostName ? ` on ${hostName}` : ""}`
-    : "Local project on this Mac";
+    : "Local project on this computer";
 
   return (
     <span

@@ -81,7 +81,7 @@ fn default_host_name() -> String {
             return name;
         }
     }
-    "This Mac".into()
+    "This computer".into()
 }
 
 #[cfg(test)]

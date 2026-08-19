@@ -28,11 +28,11 @@ export interface HostedProject {
   project: ChatProject;
 }
 
-export function localHostInfo(name = "This Mac"): HostInfo {
+export function localHostInfo(name = "This computer"): HostInfo {
   return { id: LOCAL_HOST_ID, name, kind: "local" };
 }
 
-export function emptyCatalog(local: WorkspaceDocument, name = "This Mac"): HostCatalog {
+export function emptyCatalog(local: WorkspaceDocument, name = "This computer"): HostCatalog {
   return { localHost: localHostInfo(name), local, remotes: [] };
 }
 

@@ -10,6 +10,7 @@ import {
   replaceWorkspace,
   serializeLocalWorkspace,
 } from "./session";
+import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 
 function workspace(folderPath: string): WorkspaceDocument {
   return {
@@ -17,19 +18,14 @@ function workspace(folderPath: string): WorkspaceDocument {
     projects: [{ id: `project-${folderPath}`, folderPath, threads: [] }],
     providerProfiles: [],
     agents: [],
-    voice: {
-      isEnabled: false,
-      useGrokSignIn: false,
-      language: "en",
-      apiBase: "https://api.x.ai",
-    },
+    voice: DEFAULT_VOICE_SETTINGS,
   };
 }
 
 describe("host session catalog", () => {
   it("shows local and remote snapshots together and detach leaves local bytes unchanged", () => {
     const local = workspace("/Users/scott/macbook");
-    let catalog = emptyCatalog(local, "This Mac");
+    let catalog = emptyCatalog(local, "This computer");
     const before = serializeLocalWorkspace(catalog);
     catalog = attachRemote(
       catalog,
@@ -48,7 +44,7 @@ describe("host session catalog", () => {
   });
 
   it("applies a mutation only to the addressed host", () => {
-    let catalog = emptyCatalog(workspace("/tmp/local"), "This Mac");
+    let catalog = emptyCatalog(workspace("/tmp/local"), "This computer");
     catalog = attachRemote(
       catalog,
       { id: "mini", name: "Mini", kind: "remote", address: "127.0.0.1:7422" },
@@ -64,7 +60,7 @@ describe("host session catalog", () => {
   });
 
   it("shows one project row per folder on a host while cleanup is pending", () => {
-    let catalog = emptyCatalog(workspace("/tmp/local"), "This Mac");
+    let catalog = emptyCatalog(workspace("/tmp/local"), "This computer");
     const remote = workspace("/tmp/browser-annotations");
     remote.projects.push({
       id: "duplicate-empty-project",

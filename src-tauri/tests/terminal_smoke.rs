@@ -9,13 +9,11 @@ use maxx_core::persist::{
     ChatProject, ChatSurface, ChatThread, ProviderProfile, WorkspaceDocument, WorkspacePersistence,
 };
 use maxx_lib::browser_runtime::{BrowserRuntime, FakeBrowserEngine};
-use maxx_lib::engine::runtime::Runtime;
 use maxx_lib::events::EventSink;
 use maxx_lib::state::AppState;
 use maxx_lib::terminal::TerminalBroker;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 struct NoEvents;
@@ -82,14 +80,12 @@ async fn terminal_broker_round_trips_a_real_pty_and_archives_on_gui_handoff() {
         provider_profiles: vec![profile],
         ..Default::default()
     };
-    let app = Arc::new(AppState {
-        workspace: Mutex::new(document),
-        persistence: WorkspacePersistence::new(root.join("workspace.json")),
-        runtime: Runtime::new(browser.clone()),
-        browser: browser.clone(),
-        terminals: TerminalBroker::new(browser.clone()),
-        events: Arc::new(NoEvents),
-    });
+    let app = Arc::new(AppState::from_document(
+        document,
+        WorkspacePersistence::new(root.join("workspace.json")),
+        browser.clone(),
+        Arc::new(NoEvents),
+    ));
 
     let status = app
         .terminals
@@ -363,14 +359,12 @@ async fn reconciles_native_terminal_turn(provider: ChatProvider) {
         provider_profiles: vec![profile],
         ..Default::default()
     };
-    let app = Arc::new(AppState {
-        workspace: Mutex::new(document),
-        persistence: WorkspacePersistence::new(root.join("workspace.json")),
-        runtime: Runtime::new(browser.clone()),
-        browser: browser.clone(),
-        terminals: TerminalBroker::new(browser.clone()),
-        events: Arc::new(NoEvents),
-    });
+    let app = Arc::new(AppState::from_document(
+        document,
+        WorkspacePersistence::new(root.join("workspace.json")),
+        browser.clone(),
+        Arc::new(NoEvents),
+    ));
 
     let status = app
         .terminals

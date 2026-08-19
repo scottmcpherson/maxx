@@ -17,6 +17,8 @@ import {
   setDraftText,
 } from "./dictation";
 import type { DictationDraft } from "./dictation";
+import { DEFAULT_VOICE_SETTINGS } from "./types";
+import type { VoiceSettings } from "./types";
 
 /**
  * `starting` covers both opening the microphone and connecting the socket —
@@ -46,10 +48,12 @@ export function useDictation(options: {
   /** Dictation is per-composer; changing this ends any running session. */
   boundTo: string | null;
   enabled: boolean;
+  /** Client-owned snapshot passed to the selected speech execution host. */
+  settings?: VoiceSettings;
   /** Bound here rather than in `App`: only the mounted composer can act on it. */
   shortcut?: KeyboardShortcutBinding;
 }): Dictation {
-  const { boundTo, enabled, shortcut } = options;
+  const { boundTo, enabled, shortcut, settings = DEFAULT_VOICE_SETTINGS } = options;
   const [draft, setDraftState] = useState<DictationDraft>(EMPTY_DRAFT);
   const [state, setState] = useState<DictationState>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +62,8 @@ export function useDictation(options: {
   // stale run and are ignored.
   const sessionRef = useRef<number | null>(null);
   const captureRef = useRef<{ stop: () => Promise<void> } | null>(null);
+  const sessionHostRef = useRef<string>(settings.speechHostID);
+  const sessionSequenceRef = useRef(0);
   // Read inside the event listener, which is registered once.
   const stateRef = useRef<DictationState>("idle");
   stateRef.current = state;
@@ -79,7 +85,7 @@ export function useDictation(options: {
       if (session !== null) {
         sessionRef.current = null;
         try {
-          await ipc.voiceStop(session);
+          await ipc.voiceStop(session, sessionHostRef.current);
         } catch {
           /* Session already gone; nothing to stop. */
         }
@@ -104,6 +110,7 @@ export function useDictation(options: {
               // connection it could not recover. Tear the microphone down to
               // match rather than leaving it open against a dead socket.
               sessionRef.current = null;
+              sessionSequenceRef.current = 0;
               void releaseCapture();
               setDraftState((current) => releaseSpan(current));
               setState("idle");
@@ -119,7 +126,7 @@ export function useDictation(options: {
             setError(event.hint ? `${event.message} ${event.hint}` : event.message);
             break;
         }
-      })
+      }, settings.speechHostID)
       .then((dispose) => {
         if (cancelled) dispose();
         else unlisten = dispose;
@@ -129,7 +136,7 @@ export function useDictation(options: {
       cancelled = true;
       unlisten?.();
     };
-  }, [releaseCapture]);
+  }, [releaseCapture, settings.speechHostID]);
 
   // Switching composers stops dictation rather than letting audio feed a
   // draft the user can no longer see.
@@ -137,7 +144,7 @@ export function useDictation(options: {
     return () => {
       if (sessionRef.current !== null) void endSession("keep");
     };
-  }, [boundTo, endSession]);
+  }, [boundTo, endSession, settings.speechHostID]);
 
   const start = useCallback(async () => {
     setError(null);
@@ -146,24 +153,31 @@ export function useDictation(options: {
     try {
       // First: it validates settings and the credential, so a misconfigured
       // setup never opens the microphone at all.
-      session = await ipc.voiceStart();
+      session = await ipc.voiceStart(settings, settings.speechHostID);
     } catch (reason) {
       setState("idle");
       setError(String(reason));
       return;
     }
     sessionRef.current = session;
+    sessionHostRef.current = settings.speechHostID;
+    sessionSequenceRef.current = 0;
 
     try {
       // Capture starts while the socket is still connecting; chunks buffer on
       // the Rust side so the first word of an utterance is not clipped.
       const { startMicrophoneCapture } = await import("./capture");
       captureRef.current = await startMicrophoneCapture((chunk) => {
-        if (sessionRef.current === session) void ipc.voiceSendAudio(session, chunk);
-      });
+        if (sessionRef.current !== session) return;
+        const sequence = sessionSequenceRef.current;
+        sessionSequenceRef.current += 1;
+        void ipc.voiceSendAudio(session, chunk, sequence, sessionHostRef.current).catch((reason) => {
+          if (sessionRef.current === session) setError(`Voice audio error: ${String(reason)}`);
+        });
+      }, { inputDeviceId: settings.inputDeviceID });
     } catch (reason) {
       sessionRef.current = null;
-      void ipc.voiceStop(session).catch(() => {});
+      void ipc.voiceStop(session, sessionHostRef.current).catch(() => {});
       setState("idle");
       setError(
         reason instanceof DOMException && reason.name === "NotAllowedError"
@@ -171,7 +185,7 @@ export function useDictation(options: {
           : `Could not open the microphone: ${String(reason)}`,
       );
     }
-  }, []);
+  }, [releaseCapture, settings]);
 
   const stop = useCallback(() => {
     if (sessionRef.current === null) return;

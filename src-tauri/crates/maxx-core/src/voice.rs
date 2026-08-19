@@ -29,6 +29,58 @@ pub const IDLE_TIMEOUT_SECS: u64 = 120;
 // Persisted settings
 // ---------------------------------------------------------------------------
 
+/// Speech-to-text provider used by a voice session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SttProvider {
+    Xai,
+    OpenaiCompatible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VoiceMode {
+    Dictation,
+    Conversation,
+}
+
+impl Default for VoiceMode {
+    fn default() -> Self {
+        Self::Dictation
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TtsProvider {
+    OpenaiCompatible,
+}
+
+impl Default for TtsProvider {
+    fn default() -> Self {
+        Self::OpenaiCompatible
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TurnDetection {
+    Manual,
+    Automatic,
+}
+
+impl Default for TurnDetection {
+    fn default() -> Self {
+        Self::Automatic
+    }
+}
+
+impl Default for SttProvider {
+    fn default() -> Self {
+        Self::Xai
+    }
+}
+
 /// Voice settings as stored in `workspace.json`.
 ///
 /// No credential is ever stored here. The bearer is resolved at each connect
@@ -45,12 +97,40 @@ pub struct VoiceSettings {
     /// the user's call to make explicitly.
     #[serde(rename = "useGrokSignIn")]
     pub use_grok_sign_in: bool,
+    /// STT provider selected for reviewed dictation.
+    #[serde(rename = "sttProvider")]
+    pub stt_provider: SttProvider,
     /// STT language code, or `auto`. Resolved to a concrete code at connect —
     /// the endpoint rejects `auto`.
     pub language: String,
-    /// HTTPS API root. Overridable for an enterprise proxy.
-    #[serde(rename = "apiBase")]
-    pub api_base: String,
+    /// Provider API root. xAI requires HTTPS/WSS; the local OpenAI-compatible
+    /// service may use HTTP/WS when it is intentionally configured that way.
+    #[serde(rename = "sttApiBase")]
+    pub stt_api_base: String,
+    /// Model identifier sent to an OpenAI-compatible STT service.
+    #[serde(rename = "sttModel")]
+    pub stt_model: String,
+    pub mode: VoiceMode,
+    #[serde(rename = "ttsProvider")]
+    pub tts_provider: TtsProvider,
+    #[serde(rename = "ttsApiBase")]
+    pub tts_api_base: String,
+    #[serde(rename = "ttsModel")]
+    pub tts_model: String,
+    #[serde(rename = "voiceID")]
+    pub voice_id: String,
+    #[serde(rename = "inputDeviceID")]
+    pub input_device_id: Option<String>,
+    #[serde(rename = "outputDeviceID")]
+    pub output_device_id: Option<String>,
+    #[serde(rename = "speechHostID")]
+    #[serde(default = "default_speech_host_id")]
+    pub speech_host_id: String,
+    #[serde(rename = "turnDetection")]
+    pub turn_detection: TurnDetection,
+    #[serde(rename = "allowInterruption")]
+    #[serde(default = "default_allow_interruption")]
+    pub allow_interruption: bool,
 }
 
 impl Default for VoiceSettings {
@@ -58,15 +138,36 @@ impl Default for VoiceSettings {
         Self {
             is_enabled: false,
             use_grok_sign_in: false,
+            stt_provider: SttProvider::Xai,
             language: DEFAULT_LANGUAGE.to_string(),
-            api_base: DEFAULT_API_BASE.to_string(),
+            stt_api_base: DEFAULT_API_BASE.to_string(),
+            stt_model: String::new(),
+            mode: VoiceMode::Dictation,
+            tts_provider: TtsProvider::OpenaiCompatible,
+            tts_api_base: String::new(),
+            tts_model: String::new(),
+            voice_id: String::new(),
+            input_device_id: None,
+            output_device_id: None,
+            speech_host_id: "local".to_string(),
+            turn_detection: TurnDetection::Automatic,
+            allow_interruption: true,
         }
     }
 }
 
 pub const DEFAULT_API_BASE: &str = "https://api.x.ai";
 pub const DEFAULT_LANGUAGE: &str = "en";
-const STT_PATH: &str = "v1/stt";
+const XAI_STT_PATH: &str = "v1/stt";
+const OPENAI_STT_STREAM_PATH: &str = "v1/audio/transcriptions/stream";
+
+fn default_speech_host_id() -> String {
+    "local".into()
+}
+
+fn default_allow_interruption() -> bool {
+    true
+}
 
 /// Languages offered in Settings. `auto` resolves to [`DEFAULT_LANGUAGE`]
 /// because the STT endpoint has no auto-detect mode.
@@ -104,23 +205,35 @@ impl VoiceSettings {
     /// Refuses a plaintext base: the bearer travels in a request header, and
     /// no configuration mistake should be able to put it on the wire in clear.
     pub fn stt_ws_url(&self) -> Result<String, String> {
-        let base = self.api_base.trim().trim_end_matches('/');
-        let base = if base.is_empty() { DEFAULT_API_BASE } else { base };
+        match self.stt_provider {
+            SttProvider::Xai => self.xai_stt_ws_url(),
+            SttProvider::OpenaiCompatible => self.openai_stt_ws_url(),
+        }
+    }
+
+    fn xai_stt_ws_url(&self) -> Result<String, String> {
+        let base = self.stt_api_base.trim().trim_end_matches('/');
+        let base = if base.is_empty() {
+            DEFAULT_API_BASE
+        } else {
+            base
+        };
 
         if starts_with_scheme(base, "http://") || starts_with_scheme(base, "ws://") {
             return Err(format!(
-                "insecure voice endpoint {base:?}: refusing to send a bearer token over \
+                "insecure xAI voice endpoint {base:?}: refusing to send a bearer token over \
                  a plaintext connection. Use https:// or wss://."
             ));
         }
         let host = strip_scheme(base, "https://")
             .or_else(|| strip_scheme(base, "wss://"))
             .unwrap_or(base);
+        validate_endpoint_host(host, "xAI")?;
 
         // Proxy bases commonly already end in `/v1`; don't produce `/v1/v1/stt`.
-        let path = match (host.ends_with("/v1"), STT_PATH.strip_prefix("v1/")) {
+        let path = match (host.ends_with("/v1"), XAI_STT_PATH.strip_prefix("v1/")) {
             (true, Some(tail)) => tail,
-            _ => STT_PATH,
+            _ => XAI_STT_PATH,
         };
 
         Ok(format!(
@@ -129,6 +242,79 @@ impl VoiceSettings {
             rate = VOICE_SAMPLE_RATE,
             language = language_for_api(&self.language),
         ))
+    }
+
+    /// The local service exposes streaming STT as a documented extension to
+    /// OpenAI's batch `/v1/audio/transcriptions` route. Standard OpenAI
+    /// transcription is request/response and cannot provide interim results.
+    fn openai_stt_ws_url(&self) -> Result<String, String> {
+        let base = self.stt_api_base.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return Err(
+                "Configure an OpenAI-compatible STT endpoint before starting dictation.".into(),
+            );
+        }
+        let (scheme, host) = if let Some(host) = strip_scheme(base, "https://") {
+            ("wss", host)
+        } else if let Some(host) = strip_scheme(base, "http://") {
+            ("ws", host)
+        } else if let Some(host) = strip_scheme(base, "wss://") {
+            ("wss", host)
+        } else if let Some(host) = strip_scheme(base, "ws://") {
+            ("ws", host)
+        } else {
+            ("ws", base)
+        };
+        validate_endpoint_host(host, "OpenAI-compatible STT")?;
+        let path = if host.ends_with("/v1") {
+            OPENAI_STT_STREAM_PATH
+                .strip_prefix("v1/")
+                .expect("stream path has a v1 prefix")
+        } else {
+            OPENAI_STT_STREAM_PATH
+        };
+        let model = percent_encode_query_component(self.stt_model.trim());
+        Ok(format!(
+            "{scheme}://{host}/{path}?sample_rate={rate}&encoding=pcm&interim_results=true&language={language}&model={model}",
+            rate = VOICE_SAMPLE_RATE,
+            language = language_for_api(&self.language),
+            model = model,
+        ))
+    }
+
+    /// HTTP endpoint for the OpenAI-compatible streaming TTS contract.
+    /// `response_format=pcm` is selected by the Rust adapter so the renderer
+    /// never has to guess how to decode provider output.
+    pub fn tts_speech_url(&self) -> Result<String, String> {
+        self.openai_tts_http_url("audio/speech")
+    }
+
+    /// HTTP endpoint for the Maxx voice-catalog extension.
+    pub fn tts_voices_url(&self) -> Result<String, String> {
+        self.openai_tts_http_url("audio/voices")
+    }
+
+    fn openai_tts_http_url(&self, suffix: &str) -> Result<String, String> {
+        let base = self.tts_api_base.trim().trim_end_matches('/');
+        if base.is_empty() {
+            return Err(
+                "Configure an OpenAI-compatible TTS endpoint before using speech output.".into(),
+            );
+        }
+        let (scheme, host) = if let Some(host) = strip_scheme(base, "https://") {
+            ("https", host)
+        } else if let Some(host) = strip_scheme(base, "http://") {
+            ("http", host)
+        } else {
+            return Err("The OpenAI-compatible TTS endpoint must use http:// or https://.".into());
+        };
+        validate_endpoint_host(host, "OpenAI-compatible TTS")?;
+        let path = if host.ends_with("/v1") {
+            suffix.to_string()
+        } else {
+            format!("v1/{suffix}")
+        };
+        Ok(format!("{scheme}://{host}/{path}"))
     }
 }
 
@@ -140,6 +326,33 @@ fn starts_with_scheme(value: &str, scheme: &str) -> bool {
 
 fn strip_scheme<'a>(value: &'a str, scheme: &str) -> Option<&'a str> {
     starts_with_scheme(value, scheme).then(|| &value[scheme.len()..])
+}
+
+fn validate_endpoint_host(host: &str, provider: &str) -> Result<(), String> {
+    let authority = host.split('/').next().unwrap_or_default();
+    if authority.trim().is_empty()
+        || authority.contains('@')
+        || host.contains('?')
+        || host.contains('#')
+        || host.chars().any(char::is_whitespace)
+    {
+        return Err(format!(
+            "The {provider} STT endpoint is invalid; use a host URL without credentials, query parameters, or fragments."
+        ));
+    }
+    Ok(())
+}
+
+fn percent_encode_query_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +418,13 @@ pub enum SttServerEvent {
         is_final: bool,
         #[serde(default)]
         speech_final: bool,
+    },
+    /// Local OpenAI-compatible services may use a distinct final event rather
+    /// than xAI's `speech_final` flag.
+    #[serde(rename = "transcript.final")]
+    Final {
+        #[serde(default)]
+        text: String,
     },
     #[serde(rename = "transcript.done")]
     Done {
@@ -320,7 +540,7 @@ mod tests {
     fn ws_url_rejects_plaintext_bases() {
         for base in ["http://localhost:8080", "ws://localhost:8080", "HTTP://x"] {
             let settings = VoiceSettings {
-                api_base: base.into(),
+                stt_api_base: base.into(),
                 ..VoiceSettings::default()
             };
             assert!(
@@ -332,19 +552,27 @@ mod tests {
 
     #[test]
     fn ws_url_accepts_scheme_variants_and_dedupes_v1() {
-        for base in ["api.x.ai", "wss://api.x.ai", "HTTPS://api.x.ai", "https://api.x.ai/"] {
+        for base in [
+            "api.x.ai",
+            "wss://api.x.ai",
+            "HTTPS://api.x.ai",
+            "https://api.x.ai/",
+        ] {
             let settings = VoiceSettings {
-                api_base: base.into(),
+                stt_api_base: base.into(),
                 ..VoiceSettings::default()
             };
             assert!(
-                settings.stt_ws_url().unwrap().starts_with("wss://api.x.ai/v1/stt?"),
+                settings
+                    .stt_ws_url()
+                    .unwrap()
+                    .starts_with("wss://api.x.ai/v1/stt?"),
                 "{base}"
             );
         }
 
         let proxied = VoiceSettings {
-            api_base: "https://proxy.example.com/v1".into(),
+            stt_api_base: "https://proxy.example.com/v1".into(),
             ..VoiceSettings::default()
         };
         assert!(proxied
@@ -354,12 +582,82 @@ mod tests {
     }
 
     #[test]
-    fn empty_api_base_falls_back_to_the_default() {
+    fn openai_compatible_url_uses_the_streaming_extension() {
         let settings = VoiceSettings {
-            api_base: "   ".into(),
+            stt_provider: SttProvider::OpenaiCompatible,
+            stt_api_base: "http://127.0.0.1:8001/v1".into(),
+            stt_model: "whisper large/v3".into(),
             ..VoiceSettings::default()
         };
-        assert!(settings.stt_ws_url().unwrap().starts_with("wss://api.x.ai/"));
+        assert_eq!(
+            settings.stt_ws_url().unwrap(),
+            "ws://127.0.0.1:8001/v1/audio/transcriptions/stream?sample_rate=16000&encoding=pcm&interim_results=true&language=en&model=whisper%20large%2Fv3"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_endpoint_requires_a_base() {
+        let settings = VoiceSettings {
+            stt_provider: SttProvider::OpenaiCompatible,
+            stt_api_base: "   ".into(),
+            ..VoiceSettings::default()
+        };
+        let error = settings.stt_ws_url().unwrap_err();
+        assert!(error.contains("Configure an OpenAI-compatible STT endpoint"));
+    }
+
+    #[test]
+    fn endpoint_rejects_embedded_credentials_and_query_secrets() {
+        for base in [
+            "https://token@example.com",
+            "https://example.com?api_key=secret",
+            "https://example.com/#token",
+        ] {
+            let settings = VoiceSettings {
+                stt_api_base: base.into(),
+                ..VoiceSettings::default()
+            };
+            assert!(settings.stt_ws_url().is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn tts_urls_use_http_and_dedupe_v1() {
+        let settings = VoiceSettings {
+            tts_api_base: "http://127.0.0.1:8765/v1/".into(),
+            ..VoiceSettings::default()
+        };
+        assert_eq!(
+            settings.tts_speech_url().unwrap(),
+            "http://127.0.0.1:8765/v1/audio/speech"
+        );
+        assert_eq!(
+            settings.tts_voices_url().unwrap(),
+            "http://127.0.0.1:8765/v1/audio/voices"
+        );
+    }
+
+    #[test]
+    fn tts_urls_reject_ws_and_missing_bases() {
+        for base in ["", "ws://127.0.0.1:8765", "https://user@example.com"] {
+            let settings = VoiceSettings {
+                tts_api_base: base.into(),
+                ..VoiceSettings::default()
+            };
+            assert!(settings.tts_speech_url().is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn empty_api_base_falls_back_to_the_default() {
+        let settings = VoiceSettings {
+            stt_api_base: "   ".into(),
+            ..VoiceSettings::default()
+        };
+        assert!(settings
+            .stt_ws_url()
+            .unwrap()
+            .starts_with("wss://api.x.ai/"));
     }
 
     #[test]
@@ -417,6 +715,26 @@ mod tests {
                 text: "hello".into(),
                 is_final: true,
                 speech_final: false,
+            }
+        );
+
+        let final_event: SttServerEvent =
+            serde_json::from_str(r#"{"type":"transcript.final","text":"done"}"#).unwrap();
+        assert_eq!(
+            final_event,
+            SttServerEvent::Final {
+                text: "done".into()
+            }
+        );
+
+        let provider_error: SttServerEvent = serde_json::from_str(
+            r#"{"type":"error","event":"transcript.error","code":"stream_timeout","message":"timed out"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            provider_error,
+            SttServerEvent::Error {
+                message: "timed out".into()
             }
         );
 

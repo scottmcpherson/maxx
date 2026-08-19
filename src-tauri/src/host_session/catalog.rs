@@ -264,7 +264,7 @@ mod tests {
     fn attach_shows_both_workspaces_and_detach_leaves_local_bytes_unchanged() {
         let local = sample_workspace("/Users/scott/local-project");
         let local_bytes = serde_json::to_vec(&local).unwrap();
-        let mut catalog = HostCatalog::new(HostInfo::local("This Mac"), local.clone());
+        let mut catalog = HostCatalog::new(HostInfo::local("This computer"), local.clone());
         let remote = sample_workspace("/Users/scott/mini-project");
         catalog
             .attach_remote(
@@ -293,8 +293,10 @@ mod tests {
 
     #[test]
     fn mutation_on_host_a_is_not_applied_on_host_b() {
-        let mut catalog =
-            HostCatalog::new(HostInfo::local("This Mac"), sample_workspace("/tmp/local"));
+        let mut catalog = HostCatalog::new(
+            HostInfo::local("This computer"),
+            sample_workspace("/tmp/local"),
+        );
         catalog
             .attach_remote(
                 HostInfo::remote("mini", "Mini", "100.64.0.2:7422"),
@@ -379,8 +381,10 @@ mod tests {
 
     #[test]
     fn same_folder_name_on_different_hosts_remains_distinct() {
-        let mut catalog =
-            HostCatalog::new(HostInfo::local("This Mac"), WorkspaceDocument::default());
+        let mut catalog = HostCatalog::new(
+            HostInfo::local("This computer"),
+            WorkspaceDocument::default(),
+        );
         apply_add_project(
             catalog.local_workspace_mut(),
             "/Users/scott/local/browser-annotations".into(),

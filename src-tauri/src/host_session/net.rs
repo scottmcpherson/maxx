@@ -23,9 +23,62 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HANDSHAKE_BYTES: usize = 8 * 1024;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const OUTBOUND_CAPACITY: usize = 256;
+// Keep a reserved lane for ordinary control responses. Bulk voice/media
+// frames remain bounded, but cannot occupy every outbound slot and make a
+// small control response wait behind megabytes of PCM or TTS data.
+const OUTBOUND_CONTROL_CAPACITY: usize = 64;
+const OUTBOUND_BULK_CAPACITY: usize = OUTBOUND_CAPACITY - OUTBOUND_CONTROL_CAPACITY;
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 
 type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+#[derive(Clone)]
+struct Outbound {
+    control: mpsc::Sender<Value>,
+    bulk: mpsc::Sender<Value>,
+}
+
+impl Outbound {
+    fn new() -> (Self, mpsc::Receiver<Value>, mpsc::Receiver<Value>) {
+        let (control, control_receiver) = mpsc::channel(OUTBOUND_CONTROL_CAPACITY);
+        let (bulk, bulk_receiver) = mpsc::channel(OUTBOUND_BULK_CAPACITY);
+        (Self { control, bulk }, control_receiver, bulk_receiver)
+    }
+
+    async fn send(&self, value: Value, bulk: bool) -> Result<(), ()> {
+        if bulk {
+            self.bulk.send(value).await.map_err(|_| ())
+        } else {
+            self.control.send(value).await.map_err(|_| ())
+        }
+    }
+
+    fn try_send(&self, value: Value, bulk: bool) -> Result<(), mpsc::error::TrySendError<Value>> {
+        if bulk {
+            self.bulk.try_send(value)
+        } else {
+            self.control.try_send(value)
+        }
+    }
+}
+
+fn is_bulk_method(method: &str) -> bool {
+    matches!(
+        method,
+        "voice_send_audio" | "voice_tts_read" | "upload_media" | "read_media"
+    )
+}
+
+fn is_bulk_event(event: &str) -> bool {
+    // Voice transcript/telemetry frames are ephemeral and can be frequent.
+    // Runtime, notification, browser, and host lifecycle events stay on the
+    // reserved control lane so voice traffic cannot delay them.
+    event == "voice://event"
+}
+
+fn voice_event_session(payload: &Value) -> u64 {
+    payload.get("session").and_then(Value::as_u64).unwrap_or(0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPeer {
@@ -246,7 +299,7 @@ pub struct HostClient {
     pub new_credential: Option<String>,
     pub resync_required: bool,
     pub server_cursor: u64,
-    outbound: mpsc::Sender<Value>,
+    outbound: Outbound,
     pending: PendingRequests,
     next_id: AtomicU64,
     events: Mutex<mpsc::Receiver<RemoteEvent>>,
@@ -263,7 +316,10 @@ impl HostClient {
         self.pending.lock().await.insert(id, sender);
         if self
             .outbound
-            .send(json!({"type":"request","id":id,"method":method,"params":params}))
+            .send(
+                json!({"type":"request","id":id,"method":method,"params":params}),
+                is_bulk_method(method),
+            )
             .await
             .is_err()
         {
@@ -396,7 +452,7 @@ async fn handshake_and_client(
     let host_name = host
         .get("name")
         .and_then(Value::as_str)
-        .unwrap_or("Remote Mac")
+        .unwrap_or("Remote computer")
         .to_string();
     let capabilities: Vec<Capability> = serde_json::from_value(
         welcome
@@ -414,18 +470,39 @@ async fn handshake_and_client(
         .and_then(Value::as_u64)
         .unwrap_or(0);
 
-    let (outbound, mut output) = mpsc::channel::<Value>(OUTBOUND_CAPACITY);
+    let (outbound, mut control_output, mut bulk_output) = Outbound::new();
     let (event_tx, event_rx) = mpsc::channel(OUTBOUND_CAPACITY);
     let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
     let shutdown = CancellationToken::new();
     let writer_shutdown = shutdown.clone();
     tokio::spawn(async move {
+        let mut control_open = true;
+        let mut bulk_open = true;
         loop {
-            tokio::select! {
+            if !control_open && !bulk_open {
+                break;
+            }
+            let message = tokio::select! {
+                biased;
                 _ = writer_shutdown.cancelled() => break,
-                message = output.recv() => {
-                    let Some(message) = message else { break };
-                    if write_json(&mut writer, &message).await.is_err() { break; }
+                message = control_output.recv(), if control_open => match message {
+                    Some(message) => Some(message),
+                    None => {
+                        control_open = false;
+                        None
+                    }
+                },
+                message = bulk_output.recv(), if bulk_open => match message {
+                    Some(message) => Some(message),
+                    None => {
+                        bulk_open = false;
+                        None
+                    }
+                },
+            };
+            if let Some(message) = message {
+                if write_json(&mut writer, &message).await.is_err() {
+                    break;
                 }
             }
         }
@@ -567,7 +644,7 @@ async fn serve_connection(
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= 256)
-        .unwrap_or("Remote Mac");
+        .unwrap_or("Remote computer");
     let Some(auth) = hello.get("auth").and_then(Value::as_object) else {
         let _ = write_protocol_error(
             &mut writer,
@@ -647,15 +724,36 @@ async fn serve_connection(
     }
 
     let session_id = sessions.register(&authenticated.id, shutdown.clone());
-    let (outbound, mut output) = mpsc::channel::<Value>(OUTBOUND_CAPACITY);
+    let (outbound, mut control_output, mut bulk_output) = Outbound::new();
     let writer_shutdown = shutdown.clone();
     let writer_task = tokio::spawn(async move {
+        let mut control_open = true;
+        let mut bulk_open = true;
         loop {
-            tokio::select! {
+            if !control_open && !bulk_open {
+                break;
+            }
+            let message = tokio::select! {
+                biased;
                 _ = writer_shutdown.cancelled() => break,
-                message = output.recv() => {
-                    let Some(message) = message else { break };
-                    if write_json(&mut writer, &message).await.is_err() { break; }
+                message = control_output.recv(), if control_open => match message {
+                    Some(message) => Some(message),
+                    None => {
+                        control_open = false;
+                        None
+                    }
+                },
+                message = bulk_output.recv(), if bulk_open => match message {
+                    Some(message) => Some(message),
+                    None => {
+                        bulk_open = false;
+                        None
+                    }
+                },
+            };
+            if let Some(message) = message {
+                if write_json(&mut writer, &message).await.is_err() {
+                    break;
                 }
             }
         }
@@ -664,6 +762,7 @@ async fn serve_connection(
     let event_out = outbound.clone();
     let event_shutdown = shutdown.clone();
     let event_task = tokio::spawn(async move {
+        let mut bulk_overflow_reported = false;
         loop {
             let record = tokio::select! {
                 _ = event_shutdown.cancelled() => break,
@@ -678,11 +777,38 @@ async fn serve_connection(
                 event_shutdown.cancel();
                 break;
             };
-            if event_out
-                .send(json!({"type":"event","cursor":cursor,"event":event,"payload":payload}))
-                .await
-                .is_err()
-            {
+            let bulk_event = is_bulk_event(&event);
+            let voice_session = bulk_event.then(|| voice_event_session(&payload));
+            let frame = json!({"type":"event","cursor":cursor,"event":event,"payload":payload});
+            if bulk_event {
+                match event_out.try_send(frame, true) {
+                    Ok(()) => bulk_overflow_reported = false,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Voice events are ephemeral, so dropping an interim
+                        // frame is preferable to blocking runtime/control
+                        // events behind PCM. Make the loss visible once on
+                        // the reserved lane.
+                        if !bulk_overflow_reported {
+                            let notice = json!({
+                                "type":"event",
+                                "cursor":0,
+                                "event":"voice://event",
+                                "payload":{
+                                    "kind":"error",
+                                    "session":voice_session.unwrap_or(0),
+                                    "code":"remote_event_overflow",
+                                    "message":"Remote voice events exceeded transport capacity.",
+                                    "hint":"Voice playback may be incomplete; retry the phrase."
+                                }
+                            });
+                            if event_out.try_send(notice, false).is_ok() {
+                                bulk_overflow_reported = true;
+                            }
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            } else if event_out.send(frame, false).await.is_err() {
                 break;
             }
         }
@@ -714,6 +840,7 @@ async fn serve_connection(
         let peer = authenticated.clone();
         let request_limit = request_limit.clone();
         let request_shutdown = shutdown.clone();
+        let bulk_response = is_bulk_method(&method);
         tokio::spawn(async move {
             let Ok(permit) = request_limit.acquire_owned().await else {
                 return;
@@ -729,7 +856,7 @@ async fn serve_connection(
                     json!({"type":"response","id":id,"error":{"code":"runtime.command","message":message}})
                 }
             };
-            let _ = outbound.send(frame).await;
+            let _ = outbound.send(frame, bulk_response).await;
         });
     }
     shutdown.cancel();
@@ -839,6 +966,135 @@ mod tests {
         );
     }
 
+    struct SaturationAuthenticator;
+
+    impl HostAuthenticator for SaturationAuthenticator {
+        fn authenticate(
+            &self,
+            _source: SocketAddr,
+            peer_id: &str,
+            peer_name: &str,
+            _request: AuthRequest,
+        ) -> Result<AuthenticatedPeer, String> {
+            Ok(AuthenticatedPeer {
+                id: peer_id.to_string(),
+                name: peer_name.to_string(),
+                capabilities: Capability::full(),
+            })
+        }
+    }
+
+    struct SaturationHandler {
+        tts_payload: String,
+    }
+
+    #[async_trait]
+    impl HostHandler for SaturationHandler {
+        async fn handle(
+            &self,
+            _peer: &AuthenticatedPeer,
+            method: &str,
+            _params: Value,
+        ) -> Result<Value, String> {
+            match method {
+                "voice_send_audio" => Ok(Value::Null),
+                "voice_tts_read" => Ok(json!({"audio": self.tts_payload})),
+                "control_ping" => Ok(json!({"ok": true})),
+                _ => Err(format!("unexpected test method {method}")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_control_latency_stays_bounded_during_voice_tts_saturation() {
+        use base64::Engine as _;
+
+        // 16 KiB is the app's maximum PCM request chunk; 256 KiB is the
+        // app's maximum TTS read. The two reserved outbound lanes are bounded
+        // to 64 control + 192 bulk frames, so this fills the bulk lane without
+        // permitting an unbounded response backlog.
+        let pcm = base64::engine::general_purpose::STANDARD.encode(vec![0_u8; 16 * 1024]);
+        let tts_payload = base64::engine::general_purpose::STANDARD.encode(vec![1_u8; 256 * 1024]);
+        let handler = Arc::new(SaturationHandler { tts_payload });
+        let root = std::env::temp_dir().join(format!("maxx-net-saturation-{}", std::process::id()));
+        let journal = Arc::new(EventJournal::load(root.join("host-events.jsonl")));
+        let listener = listen_host(
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".into(),
+            Arc::new(SaturationAuthenticator),
+            "host-saturation".into(),
+            "Loopback fixture".into(),
+            handler,
+            journal,
+        )
+        .await
+        .expect("loopback listener should start");
+        let client = connect_host(
+            &listener.bind_address(),
+            ClientAuth::PairingCode("fixture".into()),
+            "client-saturation",
+            "Client fixture",
+            0,
+        )
+        .await
+        .expect("loopback client should connect");
+
+        let mut bulk_tasks = Vec::with_capacity(OUTBOUND_BULK_CAPACITY);
+        for index in 0..OUTBOUND_BULK_CAPACITY {
+            let client = client.clone();
+            let pcm = pcm.clone();
+            let method = if index % 2 == 0 {
+                "voice_send_audio"
+            } else {
+                "voice_tts_read"
+            };
+            bulk_tasks.push(tokio::spawn(async move {
+                client
+                    .request(
+                        method,
+                        if method == "voice_send_audio" {
+                            json!({"session": 1, "sequence": index, "chunk": pcm})
+                        } else {
+                            json!({"session": 1, "cursor": index, "maxBytes": 256 * 1024})
+                        },
+                    )
+                    .await
+            }));
+        }
+        // Let the writer and server enter the saturated state before measuring
+        // a small, ordinary control request.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let started = std::time::Instant::now();
+        let control = tokio::time::timeout(
+            Duration::from_millis(250),
+            client.request("control_ping", json!({})),
+        )
+        .await
+        .expect("control request exceeded the 250 ms loopback budget")
+        .expect("control response should remain available");
+        let elapsed = started.elapsed();
+        assert_eq!(control, json!({"ok": true}));
+        println!(
+            "loopback transport saturation: control_latency_us={} control_capacity={} bulk_capacity={} pcm_bytes={} tts_bytes={}",
+            elapsed.as_micros(),
+            OUTBOUND_CONTROL_CAPACITY,
+            OUTBOUND_BULK_CAPACITY,
+            16 * 1024,
+            256 * 1024
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "control response took {elapsed:?} under bounded voice/TTS load"
+        );
+
+        for task in bulk_tasks {
+            let _ = task.await;
+        }
+        client.close().await;
+        listener.stop().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn protocol_negotiation_rejects_missing_and_future_versions() {
         assert!(protocol_is_supported(&json!({
@@ -850,5 +1106,41 @@ mod tests {
         assert!(!protocol_is_supported(
             &json!({"protocol":{"version":PROTOCOL_VERSION}})
         ));
+    }
+
+    #[test]
+    fn only_voice_event_frames_use_the_bulk_lane() {
+        assert!(is_bulk_event("voice://event"));
+        assert!(!is_bulk_event("runtime://event"));
+        assert!(!is_bulk_event("turn://finished"));
+        assert!(!is_bulk_event("host://disconnected"));
+    }
+
+    #[test]
+    fn voice_overflow_notice_preserves_the_active_session() {
+        assert_eq!(voice_event_session(&json!({"session": 17})), 17);
+        assert_eq!(voice_event_session(&json!({"session": "17"})), 0);
+        assert_eq!(voice_event_session(&json!({"kind": "interim"})), 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_voice_lane_does_not_block_control_sends() {
+        let (outbound, mut control, mut bulk) = Outbound::new();
+        for _ in 0..OUTBOUND_BULK_CAPACITY {
+            outbound.try_send(Value::Null, true).unwrap();
+        }
+        assert!(matches!(
+            outbound.try_send(Value::Null, true),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            outbound.send(json!({"control":true}), false),
+        )
+        .await
+        .expect("control lane should not wait for voice bulk capacity")
+        .unwrap();
+        assert_eq!(control.recv().await, Some(json!({"control":true})));
+        assert!(bulk.try_recv().is_ok());
     }
 }

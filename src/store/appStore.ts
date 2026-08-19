@@ -12,6 +12,7 @@ import { ipc } from "../ipc";
 import { loadAttentionFilterOpen, persistAttentionFilterOpen } from "./attentionFilter";
 import { loadSummaryPinned, persistSummaryPinned } from "../summary";
 import type { UpdateStatus } from "../updates";
+import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 import type { VoiceSettings } from "../voice/types";
 import {
   loadShowProviderDiagnostics,
@@ -317,14 +318,9 @@ function catalogFromState(state: {
     projects: [],
     providerProfiles: [],
     agents: [],
-    voice: {
-      isEnabled: false,
-      useGrokSignIn: false,
-      language: "en",
-      apiBase: "https://api.x.ai",
-    },
+    voice: DEFAULT_VOICE_SETTINGS,
   };
-  let catalog = emptyCatalog(local, state.hostStatus?.name ?? "This Mac");
+  let catalog = emptyCatalog(local, state.hostStatus?.name ?? "This computer");
   for (const session of state.remoteSessions) {
     catalog = attachRemote(catalog, session.host, session.workspace);
   }

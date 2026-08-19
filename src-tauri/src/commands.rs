@@ -3,7 +3,9 @@
 
 use crate::engine::runtime::ActiveTurnInfo;
 use crate::engine::{SteerRequest, TurnRequest};
-use crate::state::{find_thread, AppState};
+use crate::state::{
+    apply_spoken_prefix_to_thread, find_thread, sanitize_voice_spoken_text, AppState,
+};
 use maxx_core::contract::*;
 use maxx_core::handoff::ContextHandoff;
 use maxx_core::persist::*;
@@ -1423,6 +1425,95 @@ pub async fn send_agent_prompt(
 
 pub async fn cancel_turn(state: Arc<AppState>, turn_id: Uuid) -> Result<(), String> {
     state.runtime.cancel(turn_id).await;
+    Ok(())
+}
+
+/// Stop a provider turn at the voice playback boundary.  `heard_text` is the
+/// exact assistant prefix confirmed by the renderer as audible; all later
+/// assistant deltas are removed from the canonical transcript.  This is a
+/// separate command from ordinary cancellation so a normal user cancel keeps
+/// its existing persistence semantics.
+pub async fn voice_barge_in(
+    state: Arc<AppState>,
+    project_id: Uuid,
+    thread_id: Uuid,
+    turn_id: Uuid,
+    heard_text: String,
+) -> Result<(), String> {
+    let heard_text = sanitize_voice_spoken_text(&heard_text);
+    if state
+        .begin_voice_interruption(project_id, thread_id, turn_id, heard_text.clone())
+        .await?
+    {
+        state.runtime.cancel(turn_id).await;
+        // Provider adapters generally stop quickly, but a stuck child must
+        // not hold the voice command indefinitely.  The finalizer owns the
+        // registry cleanup; after this bound the frontend can refresh and the
+        // same command remains idempotent.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut finished = false;
+        loop {
+            let active = state
+                .runtime
+                .active_turns()
+                .await
+                .iter()
+                .any(|turn| turn.turn_id == turn_id);
+            let finalizing = state.voice_interruption(turn_id).await.is_some();
+            if !active && !finalizing {
+                finished = true;
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::cmp::min(
+                std::time::Duration::from_millis(25),
+                deadline - now,
+            ))
+            .await;
+        }
+        if !finished {
+            return Err(
+                "Voice interruption timed out while waiting for the provider to stop; retry after refreshing the thread."
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+
+    // TTS can still be speaking after the provider has finished and the live
+    // turn has been removed.  Trim that completed turn under the registry
+    // lock, which also serializes with the active-turn finalizer.  Repeating
+    // the command is safe: applying the same prefix to an already-trimmed
+    // event/message set is idempotent.
+    let (changed, provider, provider_instance_id) = {
+        let _interruption_guard = state.voice_interruptions.lock().await;
+        let mut workspace = state.workspace.lock().await;
+        let thread = find_thread(&mut workspace, project_id, thread_id)
+            .ok_or_else(|| "Unknown project or thread.".to_string())?;
+        if thread.last_turn_id != Some(turn_id) {
+            return Err("The turn is no longer active on this thread.".into());
+        }
+        let provider = thread.provider;
+        let provider_instance_id = thread
+            .provider_instance_id
+            .unwrap_or_else(|| provider.default_instance_id());
+        (
+            apply_spoken_prefix_to_thread(thread, turn_id, &heard_text),
+            provider,
+            provider_instance_id,
+        )
+    };
+    if !changed {
+        return Err("The turn is no longer active on this thread.".into());
+    }
+    state.save().await;
+    let _ = state
+        .runtime
+        .release_thread(provider, provider_instance_id, thread_id)
+        .await;
     Ok(())
 }
 

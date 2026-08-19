@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_NAME: &str = "maxx-environment";
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,8 +77,14 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "update_thread"
         | "upload_media"
         | "authorize_image_previews" => Some(Capability::WorkspaceWrite),
-        "send_prompt" | "steer_prompt" | "create_side_chat" | "start_side_thread"
-        | "send_agent_prompt" | "cancel_turn" | "resolve_request" => Some(Capability::AgentRun),
+        "send_prompt"
+        | "steer_prompt"
+        | "create_side_chat"
+        | "start_side_thread"
+        | "send_agent_prompt"
+        | "cancel_turn"
+        | "voice_interrupt_turn"
+        | "resolve_request" => Some(Capability::AgentRun),
         "terminal_support"
         | "terminal_start"
         | "terminal_status"
@@ -107,10 +113,15 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "update_agents"
         | "import_agent_image" => Some(Capability::SettingsManage),
         "voice_status"
+        | "voice_test_stt"
+        | "voice_list_voices"
         | "update_voice_settings"
         | "voice_start"
         | "voice_send_audio"
-        | "voice_stop" => Some(Capability::VoiceControl),
+        | "voice_stop"
+        | "voice_tts_start"
+        | "voice_tts_read"
+        | "voice_tts_cancel" => Some(Capability::VoiceControl),
         _ => None,
     }
 }
@@ -141,6 +152,18 @@ mod tests {
         assert_eq!(
             required_capability("terminal_input"),
             Some(Capability::TerminalControl)
+        );
+        assert_eq!(
+            required_capability("voice_test_stt"),
+            Some(Capability::VoiceControl)
+        );
+        assert_eq!(
+            required_capability("voice_tts_read"),
+            Some(Capability::VoiceControl)
+        );
+        assert_eq!(
+            required_capability("voice_interrupt_turn"),
+            Some(Capability::AgentRun)
         );
         assert_eq!(
             required_capability("git_status"),

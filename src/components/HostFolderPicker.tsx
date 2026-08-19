@@ -210,7 +210,7 @@ export function HostFolderPicker({
           <h2 id="host-folder-picker-title">Choose a project folder</h2>
           <div className="host-folder-host">
             <Icons.computer size={13} />
-            <span>{local ? "This Mac" : hostName}</span>
+            <span>{local ? "This computer" : hostName}</span>
             {!local && <>
               <i className={disconnected ? "is-disconnected" : undefined} aria-hidden="true" />
               <span>{disconnected ? "Disconnected" : "Connected"}</span>

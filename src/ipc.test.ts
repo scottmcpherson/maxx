@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ipc } from "./ipc";
+import { ipc, normalizeVoiceEvent } from "./ipc";
+import { DEFAULT_VOICE_SETTINGS } from "./voice/types";
 
 const invoke = vi.fn();
 
@@ -52,5 +53,82 @@ describe("automation IPC", () => {
       ["run_automation", { id: "automation-1" }],
       ["delete_automation", { id: "automation-1" }],
     ]);
+  });
+});
+
+describe("voice IPC", () => {
+  const listen = vi.fn();
+
+  beforeEach(() => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(undefined);
+    listen.mockReset();
+    listen.mockReturnValue(() => {});
+    vi.stubGlobal("window", { maxx: { invoke, listen } });
+  });
+
+  it("routes speech execution and preserves an explicit settings snapshot", async () => {
+    await ipc.voiceStatus(DEFAULT_VOICE_SETTINGS, "paired-mac");
+    await ipc.voiceStart(DEFAULT_VOICE_SETTINGS, "paired-mac");
+    await ipc.voiceSendAudio(7, "AQI=", 12, "paired-mac");
+    await ipc.voiceStop(7, "paired-mac");
+
+    expect(invoke.mock.calls).toEqual([
+      ["voice_status", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
+      ["voice_start", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
+      ["voice_send_audio", { session: 7, chunk: "AQI=", sequence: 12, hostId: "paired-mac" }],
+      ["voice_stop", { session: 7, hostId: "paired-mac" }],
+    ]);
+  });
+
+  it("routes interruption mutations to the selected thread host, not speech host", async () => {
+    await ipc.voiceInterruptTurn("project-1", "thread-1", "turn-1", "Already heard.", "thread-host");
+    expect(invoke).toHaveBeenCalledWith("voice_interrupt_turn", {
+      projectId: "project-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      spokenText: "Already heard.",
+      hostId: "thread-host",
+    });
+  });
+
+  it("routes TTS catalog, start, bounded reads, and cancellation to the speech host", async () => {
+    await ipc.voiceListVoices(DEFAULT_VOICE_SETTINGS, "paired-mac");
+    await ipc.voiceTtsStart(DEFAULT_VOICE_SETTINGS, "Hello", "voice-1", "paired-mac");
+    await ipc.voiceTtsRead(4, -1, 4096, "paired-mac");
+    await ipc.voiceTtsCancel(4, "paired-mac");
+
+    expect(invoke.mock.calls).toEqual([
+      ["voice_list_voices", { settings: DEFAULT_VOICE_SETTINGS, hostId: "paired-mac" }],
+      ["voice_tts_start", { settings: DEFAULT_VOICE_SETTINGS, text: "Hello", voiceId: "voice-1", hostId: "paired-mac" }],
+      ["voice_tts_read", { session: 4, afterSequence: -1, maxBytes: 4096, hostId: "paired-mac" }],
+      ["voice_tts_cancel", { session: 4, hostId: "paired-mac" }],
+    ]);
+  });
+
+  it("normalizes and filters remote voice events by the selected speech host", async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    listen.mockImplementation((event: string, handler: (payload: unknown) => void) => {
+      handlers.set(event, handler);
+      return () => {};
+    });
+    const received: unknown[] = [];
+    await ipc.onVoiceEvent((event) => received.push(event), "paired-mac");
+
+    handlers.get("host://event")?.({
+      hostId: "other-mac",
+      event: "voice://event",
+      payload: { kind: "final", session: 9, text: "ignored" },
+    });
+    handlers.get("host://event")?.({
+      hostId: "paired-mac",
+      event: "voice://event",
+      payload: { kind: "final", session: 9, text: "accepted" },
+    });
+
+    expect(received).toEqual([{ kind: "final", session: 9, text: "accepted" }]);
+    expect(normalizeVoiceEvent({ payload: { kind: "state", session: 9, state: "listening" } }))
+      .toEqual({ kind: "state", session: 9, state: "listening" });
+    expect(normalizeVoiceEvent({ kind: "state", session: 9, state: "unknown" })).toBeNull();
   });
 });

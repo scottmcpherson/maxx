@@ -75,8 +75,8 @@ const RUNTIME_METHODS = new Set([
   "terminal_support", "terminal_start", "terminal_status", "terminal_input", "terminal_resize",
   "terminal_read", "terminal_stop", "shell_terminal_start", "shell_terminal_status",
   "shell_terminal_input", "shell_terminal_resize", "shell_terminal_read", "shell_terminal_stop",
-  "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "update_voice_settings",
-  "voice_start", "voice_send_audio", "voice_stop", "browser_ui_tabs", "browser_ui_open_tab",
+  "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "voice_test_stt", "voice_list_voices", "update_voice_settings",
+  "voice_start", "voice_send_audio", "voice_stop", "voice_interrupt_turn", "voice_tts_start", "voice_tts_read", "voice_tts_cancel", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
   "browser_ui_forward", "browser_ui_reload", "browser_ui_artifact",
   "host_status", "host_discovery", "host_listen", "host_unlisten", "host_create_pairing",
@@ -309,16 +309,49 @@ async function runAppSmoke(): Promise<void> {
     || emptyChatUI.environment || emptyChatUI.branch) {
     throw new Error(`empty projectless composer did not render correctly: ${JSON.stringify(emptyChatUI)}`);
   }
-  const voiceWorklet = await mainWindow!.webContents.executeJavaScript(`(async () => {
+  const voicePlayback = await mainWindow!.webContents.executeJavaScript(`(async () => {
     const context = new AudioContext();
     try {
-      await context.audioWorklet.addModule(new URL("maxx-pcm-worklet.js", document.baseURI).href);
-      return true;
+      const buffer = context.createBuffer(1, 160, 16000);
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      source.start();
+      source.stop();
+      return Boolean(buffer && source);
     } finally {
       await context.close();
     }
   })()`);
-  if (voiceWorklet !== true) throw new Error("packaged voice worklet did not load");
+  if (voicePlayback !== true) throw new Error("packaged voice playback primitives were unavailable");
+  const voiceSettingsUI = await mainWindow!.webContents.executeJavaScript(`(async () => {
+    const waitFor = async (probe, timeout = 5000) => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const value = probe();
+        if (value) return value;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return null;
+    };
+    const settingsButton = [...document.querySelectorAll('.sidebar-footer button')]
+      .find((button) => button.textContent?.includes('Settings'));
+    settingsButton?.click();
+    const voiceButton = await waitFor(() => [...document.querySelectorAll('[aria-label="Settings sections"] button')]
+      .find((button) => button.textContent?.includes('Voice')));
+    voiceButton?.click();
+    const panel = await waitFor(() => document.querySelector('[aria-label="Voice settings"]'));
+    const result = Boolean(
+      panel
+      && document.querySelector('[aria-label="Enable voice input"]')
+      && document.querySelector('[aria-label="Voice mode"]')
+      && document.querySelector('[aria-label="Text-to-speech voice"]')
+      && document.querySelector('[aria-label="Voice turn detection"]')
+    );
+    document.querySelector('.settings-back')?.click();
+    return result;
+  })()`);
+  if (voiceSettingsUI !== true) throw new Error("packaged Voice settings controls did not render");
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
   const automation = await runtime!.request("create_automation", {
@@ -574,7 +607,7 @@ async function runAppSmoke(): Promise<void> {
   if (!projectlessUI.collapsed || !projectlessUI.pinned || !projectlessUI.renamed || !projectlessUI.deleted) {
     throw new Error(`projectless chat behaviors failed: ${JSON.stringify(projectlessUI)}`);
   }
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voiceWorklet, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, automation: true, emptyChatUI, gitUI, projectlessUI })}\n`);
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voicePlayback, voiceSettingsUI, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, automation: true, emptyChatUI, gitUI, projectlessUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {

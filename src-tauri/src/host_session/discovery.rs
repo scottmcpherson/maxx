@@ -81,13 +81,15 @@ pub fn self_endpoint(port: u16) -> Result<SelfEndpoint, String> {
     }
     let node = status
         .self_node
-        .ok_or_else(|| "Tailscale did not report this Mac's address".to_string())?;
+        .ok_or_else(|| "Tailscale did not report this computer's address".to_string())?;
     let ip = node
         .addresses
         .iter()
         .filter_map(|address| address.parse::<IpAddr>().ok())
         .find(|ip| is_tailscale_ip(*ip))
-        .ok_or_else(|| "Tailscale did not report a protected address for this Mac".to_string())?;
+        .ok_or_else(|| {
+            "Tailscale did not report a protected address for this computer".to_string()
+        })?;
     let share_host = if node.dns_name.is_empty() {
         ip.to_string()
     } else {

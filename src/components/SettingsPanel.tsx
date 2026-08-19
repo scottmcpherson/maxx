@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../ipc";
 import { providerDisplayName } from "../contract/types";
 import type { ProviderHealth, ProviderProfile } from "../contract/types";
@@ -23,8 +23,16 @@ import type {
 } from "../keyboardShortcuts";
 import { useAppStore } from "../store/appStore";
 import type { AccessPreset, TailscaleDiscovery } from "../host/types";
+import { enumerateVoiceDevices } from "../voice/devices";
+import type { VoiceAudioDevices } from "../voice/devices";
 import { DEFAULT_VOICE_SETTINGS, VOICE_LANGUAGES } from "../voice/types";
-import type { VoiceCredentialStatus, VoiceSettings } from "../voice/types";
+import type {
+  VoiceCredentialStatus,
+  VoiceProfile,
+  VoiceProviderTestResult,
+  VoiceSettings,
+} from "../voice/types";
+import { VoiceTtsPlayer } from "../voice/tts";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
 import { ProviderSettingsRow } from "./ProviderSettingsRow";
@@ -525,7 +533,7 @@ function ConnectionsSettingsSection() {
         <div>
           <h1>Connections</h1>
           <p>
-            This Mac keeps its own projects and chats. Another Maxx can connect over Tailscale
+            This computer keeps its own projects and chats. Another Maxx can connect over Tailscale
             and work in this workspace without merging the two.
           </p>
         </div>
@@ -536,7 +544,7 @@ function ConnectionsSettingsSection() {
           <span className="settings-row-copy">
             <strong>Allow connections</strong>
             <small>
-              Other Maxx apps can pair with {hostStatus?.name ?? "this Mac"}. Leave this on
+              Other Maxx apps can pair with {hostStatus?.name ?? "this computer"}. Leave this on
               while you want to be reachable.
             </small>
           </span>
@@ -562,12 +570,12 @@ function ConnectionsSettingsSection() {
                 <strong>Address</strong>
                 <small>
                   {shareAddress
-                    ? "Give this to the other Mac."
-                    : "Give the other Mac this computer’s Tailscale address and port 7422."}
+                    ? "Give this to the other computer."
+                    : "Give the other computer this computer’s Tailscale address and port 7422."}
                 </small>
               </span>
               {shareAddress ? (
-                <CopyableValue value={shareAddress} label="This Mac’s address" />
+                <CopyableValue value={shareAddress} label="This computer’s address" />
               ) : (
                 <span className="host-muted-value">port 7422</span>
               )}
@@ -576,7 +584,7 @@ function ConnectionsSettingsSection() {
               <span className="settings-row-copy">
                 <strong>Pairing code</strong>
                 <small>
-                  Generate a one-time code when the other Mac is ready. It expires after five minutes.
+                  Generate a one-time code when the other computer is ready. It expires after five minutes.
                 </small>
               </span>
               {hostStatus?.pairing ? (
@@ -624,7 +632,7 @@ function ConnectionsSettingsSection() {
         <div className={`settings-row host-connect-intro-row${discovery?.peers.length ? " has-discovery" : ""}`}>
           <span className="settings-row-copy">
             <strong>Connect to another Maxx</strong>
-            <small>Use the address and one-time pairing code shown on that Mac.</small>
+            <small>Use the address and one-time pairing code shown on that computer.</small>
           </span>
         </div>
         {discovery?.peers.length ? (
@@ -657,7 +665,7 @@ function ConnectionsSettingsSection() {
             className="host-text-input"
             value={address}
             aria-label="Remote host address"
-            placeholder="mac-mini.tailnet.ts.net"
+            placeholder="other-computer.tailnet.ts.net"
             autoComplete="off"
             spellCheck={false}
             onChange={(event) => setAddress(event.target.value)}
@@ -679,7 +687,7 @@ function ConnectionsSettingsSection() {
         </div>
         <div className="settings-row host-connect-row">
           <span className="settings-row-copy">
-            <small>Your local projects stay on this Mac after you connect.</small>
+            <small>Your local projects stay on this computer after you connect.</small>
           </span>
           <button
             type="button"
@@ -719,7 +727,7 @@ function ConnectionsSettingsSection() {
         <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Paired devices</strong>
-            <small>Devices allowed to reconnect to this Mac. Revoking takes effect immediately.</small>
+            <small>Devices allowed to reconnect to this computer. Revoking takes effect immediately.</small>
           </span>
         </div>
         {hostStatus?.pairedDevices.length ? hostStatus.pairedDevices.map((device) => (
@@ -739,7 +747,7 @@ function ConnectionsSettingsSection() {
           </div>
         )) : (
           <div className="host-access-summary host-empty-state">
-            No devices are paired with this Mac.
+            No devices are paired with this computer.
           </div>
         )}
       </section>
@@ -788,16 +796,30 @@ function CopyableValue({ value, label }: { value: string; label: string }) {
  */
 function VoiceSettingsSection() {
   const stored = useAppStore((state) => state.workspace?.voice);
+  const hostStatus = useAppStore((state) => state.hostStatus);
   const saveVoiceSettings = useAppStore((state) => state.saveVoiceSettings);
-  const [status, setStatus] = useState<VoiceCredentialStatus | null>(null);
   const settings: VoiceSettings = stored ?? DEFAULT_VOICE_SETTINGS;
+  const [status, setStatus] = useState<VoiceCredentialStatus | null>(null);
+  const [testResult, setTestResult] = useState<VoiceProviderTestResult | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [devices, setDevices] = useState<VoiceAudioDevices>({ inputs: [], outputs: [] });
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [voiceCatalog, setVoiceCatalog] = useState<VoiceProfile[]>([]);
+  const [voiceCatalogLoading, setVoiceCatalogLoading] = useState(false);
+  const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
+  const [ttsEndpointDraft, setTtsEndpointDraft] = useState(settings.ttsApiBase);
+  const [ttsModelDraft, setTtsModelDraft] = useState(settings.ttsModel);
+  const [ttsTestText, setTtsTestText] = useState("This is a Maxx voice test.");
+  const [ttsTesting, setTtsTesting] = useState(false);
+  const [ttsTestMessage, setTtsTestMessage] = useState<string | null>(null);
+  const ttsPlayerRef = useRef<VoiceTtsPlayer | null>(null);
 
   // Re-probed after every change: turning the opt-in on should immediately
   // show whose sign-in was found, not wait for the next dictation attempt.
   useEffect(() => {
     let current = true;
     void ipc
-      .voiceStatus()
+      .voiceStatus(settings, settings.speechHostID)
       .then((result) => {
         if (current) setStatus(result);
       })
@@ -807,11 +829,143 @@ function VoiceSettingsSection() {
     return () => {
       current = false;
     };
-  }, [stored]);
+  }, [settings, settings.speechHostID]);
+
+  useEffect(() => {
+    let current = true;
+    const refreshDevices = () => {
+      void enumerateVoiceDevices()
+        .then((result) => {
+          if (!current) return;
+          setDevices(result);
+          setDeviceError(null);
+        })
+        .catch((reason) => {
+          if (current) setDeviceError(String(reason));
+        });
+    };
+    refreshDevices();
+    if (typeof navigator !== "undefined") {
+      navigator.mediaDevices?.addEventListener("devicechange", refreshDevices);
+    }
+    return () => {
+      current = false;
+      if (typeof navigator !== "undefined") {
+        navigator.mediaDevices?.removeEventListener("devicechange", refreshDevices);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setTtsEndpointDraft(settings.ttsApiBase);
+    setTtsModelDraft(settings.ttsModel);
+  }, [settings.ttsApiBase, settings.ttsModel]);
+
+  useEffect(() => {
+    let current = true;
+    const endpoint = settings.ttsApiBase.trim();
+    if (!endpoint) {
+      setVoiceCatalog([]);
+      setVoiceCatalogLoading(false);
+      setVoiceCatalogError("Configure a TTS endpoint to load named voices.");
+      return () => { current = false; };
+    }
+
+    setVoiceCatalogLoading(true);
+    setVoiceCatalogError(null);
+    void ipc.voiceListVoices(settings, settings.speechHostID)
+      .then((voices) => {
+        if (!current) return;
+        setVoiceCatalog(voices);
+        if (voices.length === 0) setVoiceCatalogError("The selected speech host returned no voices.");
+      })
+      .catch((reason) => {
+        if (!current) return;
+        setVoiceCatalog([]);
+        setVoiceCatalogError(`Could not load voices from ${settings.speechHostID === "local" ? "this computer" : "the remote speech host"}: ${String(reason)}`);
+      })
+      .finally(() => {
+        if (current) setVoiceCatalogLoading(false);
+      });
+    return () => { current = false; };
+  }, [settings, settings.speechHostID, settings.ttsApiBase, settings.ttsProvider]);
+
+  useEffect(() => () => {
+    void ttsPlayerRef.current?.dispose();
+  }, []);
 
   const update = (patch: Partial<VoiceSettings>) => {
     void saveVoiceSettings({ ...settings, ...patch });
   };
+
+  const testConnection = () => {
+    setTesting(true);
+    setTestResult(null);
+    void ipc.voiceTestStt(settings, settings.speechHostID)
+      .then((result) => {
+        setTestResult(result);
+        setStatus({
+          source: result.ok ? "none" : "none",
+          detail: result.message,
+          available: result.ok,
+          provider: result.provider,
+          endpoint: result.endpoint,
+          model: result.model,
+        });
+      })
+      .catch((reason) => {
+        setTestResult(null);
+        setStatus({ source: "none", detail: String(reason), available: false });
+      })
+      .finally(() => setTesting(false));
+  };
+
+  const commitTtsSettings = () => {
+    const ttsApiBase = ttsEndpointDraft.trim();
+    const ttsModel = ttsModelDraft.trim();
+    if (ttsApiBase === settings.ttsApiBase && ttsModel === settings.ttsModel) return;
+    update({ ttsApiBase, ttsModel });
+  };
+
+  const selectedVoice = voiceCatalog.find((voice) => voice.id === settings.voiceID);
+  const voiceIsSelected = Boolean(selectedVoice);
+
+  const testVoice = () => {
+    if (!settings.ttsApiBase.trim() || !settings.ttsModel.trim()) {
+      setTtsTestMessage("Configure a TTS endpoint and model before testing voice.");
+      return;
+    }
+    if (!voiceIsSelected) {
+      setTtsTestMessage("Select a named catalog voice before testing voice.");
+      return;
+    }
+    if (!ttsTestText.trim()) {
+      setTtsTestMessage("Enter a short phrase to test voice playback.");
+      return;
+    }
+    const player = ttsPlayerRef.current ?? (ttsPlayerRef.current = new VoiceTtsPlayer(ipc));
+    setTtsTesting(true);
+    setTtsTestMessage(null);
+    void player
+      .play(settings, ttsTestText.trim(), settings.voiceID || null, settings.speechHostID)
+      .then(() => setTtsTestMessage("Voice test finished."))
+      .catch((reason) => setTtsTestMessage(`Voice test failed: ${String(reason)}`))
+      .finally(() => setTtsTesting(false));
+  };
+
+  const stopVoiceTest = () => {
+    const player = ttsPlayerRef.current;
+    if (!player) return;
+    void player.cancel().finally(() => {
+      setTtsTesting(false);
+      setTtsTestMessage("Voice test canceled.");
+    });
+  };
+
+  const remoteHosts = hostStatus?.remotes ?? [];
+  const speechHostLabel = settings.speechHostID === "local"
+    ? `${hostStatus?.name ?? "This computer"} (local)`
+    : `${remoteHosts.find((remote) => remote.id === settings.speechHostID)?.name ?? settings.speechHostID} (remote)`;
 
   return (
     <>
@@ -819,15 +973,22 @@ function VoiceSettingsSection() {
         <div>
           <h1>Voice</h1>
           <p>
-            Dictate into the message box. Audio streams to xAI’s transcription service while
-            you have the microphone on, and the text always lands in the composer for you to
-            review — nothing is sent on your behalf.
+            Keep capture and playback on this computer while speech processing runs on the selected
+            provider and host. Dictation is reviewed in the composer; Conversation sends turns
+            to the currently selected GUI thread.
           </p>
         </div>
+
       </header>
 
-      <section className="settings-card voice-settings" aria-label="Voice settings">
-        <div className="settings-row">
+      <div className="voice-settings-stack" aria-label="Voice settings">
+        <div className="voice-settings-group">
+          <header className="voice-settings-group-header">
+            <h2>Basics</h2>
+            <p>Choose where voice begins and whether speech is reviewed before sending.</p>
+          </header>
+          <section className="settings-card voice-settings" aria-label="Voice basics">
+            <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Voice input</strong>
             <small>Show a microphone button in the composer.</small>
@@ -841,9 +1002,75 @@ function VoiceSettingsSection() {
             />
             <span />
           </label>
+            </div>
+
+            <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Voice mode</strong>
+            <small>Dictation stays in the composer for review. Conversation uses this selected GUI thread and streams replies to local playback.</small>
+          </span>
+          <select
+            aria-label="Voice mode"
+            value={settings.mode}
+            onChange={(event) => update({ mode: event.target.value as VoiceSettings["mode"] })}
+          >
+            <option value="dictation">Dictation</option>
+            <option value="conversation">Conversation</option>
+          </select>
+            </div>
+          </section>
+        </div>
+
+        <div className="voice-settings-group">
+          <header className="voice-settings-group-header">
+            <h2>Transcription</h2>
+            <p>Configure the service that turns speech into text.</p>
+          </header>
+          <section className="settings-card voice-settings" aria-label="Transcription settings">
+            <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Speech-to-text provider</strong>
+            <small>Choose xAI streaming STT or an OpenAI-compatible streaming endpoint.</small>
+          </span>
+          <select
+            aria-label="Speech-to-text provider"
+            value={settings.sttProvider}
+            onChange={(event) => update({ sttProvider: event.target.value as VoiceSettings["sttProvider"] })}
+          >
+            <option value="xai">xAI</option>
+            <option value="openai-compatible">OpenAI-compatible</option>
+          </select>
         </div>
 
         <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>STT endpoint</strong>
+            <small>API root used by the selected speech host.</small>
+          </span>
+          <input
+            aria-label="Speech-to-text endpoint"
+            type="url"
+            defaultValue={settings.sttApiBase}
+            placeholder="https://api.x.ai"
+            onBlur={(event) => update({ sttApiBase: event.target.value.trim() })}
+          />
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>STT model</strong>
+            <small>Optional for xAI; required for OpenAI-compatible services.</small>
+          </span>
+          <input
+            aria-label="Speech-to-text model"
+            type="text"
+            defaultValue={settings.sttModel}
+            placeholder={settings.sttProvider === "xai" ? "Provider default" : "whisper-1"}
+            onBlur={(event) => update({ sttModel: event.target.value.trim() })}
+          />
+        </div>
+
+        {settings.sttProvider === "xai" && <div className="settings-row">
           <span className="settings-row-copy">
             <strong>Use my Grok sign-in</strong>
             <small>
@@ -862,7 +1089,7 @@ function VoiceSettingsSection() {
             />
             <span />
           </label>
-        </div>
+        </div>}
 
         <div className="settings-row">
           <span className="settings-row-copy">
@@ -880,13 +1107,220 @@ function VoiceSettingsSection() {
           </select>
         </div>
 
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Test transcription</strong>
+            <small>{testResult?.message ?? "Open and close the selected provider's streaming connection."}</small>
+          </span>
+          <button className="secondary-button" type="button" disabled={testing} onClick={testConnection}>
+            {testing ? "Testing…" : "Test connection"}
+          </button>
+        </div>
+
         {status && (
           <div className={`voice-credential-status ${status.available ? "is-ready" : "is-missing"}`}>
             {status.available ? <Icons.check size={13} /> : <Icons.close size={13} />}
             <span>{status.detail}</span>
           </div>
         )}
-      </section>
+          </section>
+        </div>
+
+        <div className="voice-settings-group">
+          <header className="voice-settings-group-header">
+            <h2>Audio &amp; routing</h2>
+            <p>Choose where speech is processed while capture and playback remain on this computer.</p>
+          </header>
+          <section className="settings-card voice-settings" aria-label="Audio and routing settings">
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Processing host</strong>
+            <small>Only speech processing is routed. Microphone capture stays on this computer.</small>
+          </span>
+          <select
+            aria-label="Speech processing host"
+            value={settings.speechHostID}
+            onChange={(event) => update({ speechHostID: event.target.value })}
+          >
+            <option value="local">{hostStatus?.name ?? "This computer"} (local)</option>
+            {remoteHosts.map((remote) => (
+              <option key={remote.id} value={remote.id} disabled={!remote.connected}>
+                {remote.name}{remote.connected ? "" : " (offline)"}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Microphone</strong>
+            <small>Capture is always performed locally in the renderer.</small>
+          </span>
+          <select
+            aria-label="Voice input device"
+            value={settings.inputDeviceID ?? "default"}
+            onChange={(event) => update({ inputDeviceID: event.target.value === "default" ? null : event.target.value })}
+          >
+            <option value="default">Default microphone</option>
+            {devices.inputs.filter((device) => device.id !== "default").map((device) => (
+              <option key={device.id} value={device.id}>{device.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Output device</strong>
+            <small>Playback stays local; device routing is applied when conversation audio is enabled.</small>
+          </span>
+          <select
+            aria-label="Voice output device"
+            value={settings.outputDeviceID ?? "default"}
+            onChange={(event) => update({ outputDeviceID: event.target.value === "default" ? null : event.target.value })}
+          >
+            <option value="default">System Default</option>
+            {devices.outputs.filter((device) => device.id !== "default").map((device) => (
+              <option key={device.id} value={device.id}>{device.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {deviceError && <div className="voice-credential-status is-missing" role="status">{deviceError}</div>}
+          </section>
+        </div>
+
+        <div className="voice-settings-group">
+          <header className="voice-settings-group-header">
+            <h2>Conversation behavior</h2>
+            <p>Control how Conversation mode ends turns and handles speech over a reply.</p>
+          </header>
+          <section className="settings-card voice-settings" aria-label="Conversation behavior settings">
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Turn detection</strong>
+            <small>Automatic ends an utterance after a quiet period. Manual mode waits for Finish utterance.</small>
+          </span>
+          <select
+            aria-label="Voice turn detection"
+            value={settings.turnDetection}
+            onChange={(event) => update({ turnDetection: event.target.value as VoiceSettings["turnDetection"] })}
+          >
+            <option value="automatic">Automatic</option>
+            <option value="manual">Manual</option>
+          </select>
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Allow interruption</strong>
+            <small>When enabled, speech starts a new turn while the assistant is speaking and cancels unplayed audio.</small>
+          </span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={settings.allowInterruption}
+              aria-label="Allow voice interruption"
+              onChange={(event) => update({ allowInterruption: event.target.checked })}
+            />
+            <span />
+          </label>
+        </div>
+          </section>
+        </div>
+
+        <div className="voice-settings-group">
+          <header className="voice-settings-group-header">
+            <h2>Speech output</h2>
+            <p>Stream synthesized replies from {speechHostLabel} to local playback.</p>
+          </header>
+          <section className="settings-card voice-settings" aria-label="Speech output settings">
+        <div className="settings-row">
+          <span className="settings-row-copy"><strong>TTS provider</strong><small>The current synthesis adapter uses the OpenAI-compatible streaming contract.</small></span>
+          <select aria-label="Text-to-speech provider" value={settings.ttsProvider} disabled>
+            <option value="openai-compatible">OpenAI-compatible</option>
+          </select>
+        </div>
+        <div className="settings-row">
+          <span className="settings-row-copy"><strong>TTS endpoint</strong><small>API root used by the selected speech host.</small></span>
+          <input
+            aria-label="Text-to-speech endpoint"
+            type="url"
+            value={ttsEndpointDraft}
+            placeholder="http://localhost:8000/v1"
+            onChange={(event) => setTtsEndpointDraft(event.target.value)}
+            onBlur={commitTtsSettings}
+          />
+        </div>
+        <div className="settings-row">
+          <span className="settings-row-copy"><strong>TTS model</strong><small>Selected automatically from the named voice catalog; edit only when your provider requires it.</small></span>
+          <input
+            aria-label="Text-to-speech model"
+            type="text"
+            value={ttsModelDraft}
+            placeholder="tts-1"
+            onChange={(event) => setTtsModelDraft(event.target.value)}
+            onBlur={commitTtsSettings}
+          />
+        </div>
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Voice</strong>
+            <small>Catalog from {speechHostLabel}. {voiceCatalogLoading ? "Loading voices…" : voiceCatalogError ?? "Choose a named provider voice."}</small>
+          </span>
+          <select
+            aria-label="Text-to-speech voice"
+            value={settings.voiceID}
+            disabled={voiceCatalogLoading || voiceCatalog.length === 0}
+            onChange={(event) => {
+              const voice = voiceCatalog.find((candidate) => candidate.id === event.target.value);
+              if (voice) update({ voiceID: voice.id, ttsModel: voice.model });
+            }}
+          >
+            <option value="">Select a named voice</option>
+            {settings.voiceID && !voiceCatalog.some((voice) => voice.id === settings.voiceID) && (
+              <option value={settings.voiceID} disabled>Unavailable selection ({settings.voiceID})</option>
+            )}
+            {voiceCatalog.map((voice) => (
+              <option key={voice.id} value={voice.id}>
+                {voice.name} · {voice.model} · {voice.language}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-row">
+          <span className="settings-row-copy">
+            <strong>Test voice</strong>
+            <small>Streams a short phrase, starts playback on its first PCM chunk, and can be canceled at any time.</small>
+          </span>
+          <div className="settings-voice-test-actions">
+            <input
+              aria-label="Voice test text"
+              type="text"
+              value={ttsTestText}
+              onChange={(event) => setTtsTestText(event.target.value)}
+              disabled={ttsTesting}
+            />
+            {ttsTesting ? (
+              <button className="secondary-button" type="button" onClick={stopVoiceTest}>Stop</button>
+            ) : (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={!settings.ttsApiBase.trim() || !settings.ttsModel.trim() || !voiceIsSelected}
+                onClick={testVoice}
+              >
+                Test voice
+              </button>
+            )}
+          </div>
+        </div>
+
+        {ttsTestMessage && <div className={`voice-credential-status ${ttsTestMessage === "Voice test finished." ? "is-ready" : "is-missing"}`} role="status">{ttsTestMessage}</div>}
+          </section>
+        </div>
+      </div>
     </>
   );
 }

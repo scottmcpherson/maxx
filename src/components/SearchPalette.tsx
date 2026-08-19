@@ -27,7 +27,7 @@ export function SearchPalette() {
 
   const entries = useMemo<PaletteEntry[]>(() => {
     const hosts = [
-      { id: "local", name: "This Mac", projects: workspace?.projects ?? [] },
+      { id: "local", name: "This computer", projects: workspace?.projects ?? [] },
       ...remoteSessions.map((session) => ({
         id: session.host.id,
         name: session.host.name,

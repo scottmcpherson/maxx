@@ -374,7 +374,7 @@ impl HostHub {
         if client.host_id == self.identity.id {
             revoke_remote_pairing(client).await;
             client.close().await;
-            Err("That environment is this Mac".into())
+            Err("That environment is this computer".into())
         } else {
             Ok(())
         }

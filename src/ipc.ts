@@ -14,7 +14,15 @@ import type {
 } from "./browser";
 import { isMenuActionID, type MenuActionID, type MenuActionPayload } from "./menu";
 import type { UpdateStatus } from "./updates";
-import type { VoiceCredentialStatus, VoiceEvent, VoiceSettings } from "./voice/types";
+import type {
+  VoiceCredentialStatus,
+  VoiceEvent,
+  VoiceProviderTestResult,
+  VoiceSettings,
+  VoiceProfile,
+  VoiceTtsReadResult,
+  VoiceTtsStartResult,
+} from "./voice/types";
 import type { GitBranchList, GitCommitResult, GitRepositoryStatus } from "./git";
 import {
   ActiveTurnRecord,
@@ -70,6 +78,44 @@ function invokeOnHost<T>(
 
 function listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
   return Promise.resolve(window.maxx.listen<T>(event, handler));
+}
+
+/** Validate the untrusted event payload before it reaches a composer. */
+export function normalizeVoiceEvent(value: unknown): VoiceEvent | null {
+  let candidate = value;
+  if (candidate && typeof candidate === "object" && "payload" in candidate) {
+    candidate = (candidate as { payload?: unknown }).payload;
+  }
+  if (!candidate || typeof candidate !== "object") return null;
+  const event = candidate as Record<string, unknown>;
+  if (typeof event.kind !== "string" || typeof event.session !== "number") return null;
+  switch (event.kind) {
+    case "state":
+      return event.state === "connecting" || event.state === "listening" || event.state === "stopped"
+        ? { kind: "state", session: event.session, state: event.state }
+        : null;
+    case "interim":
+    case "final":
+      return typeof event.text === "string"
+        ? { kind: event.kind, session: event.session, text: event.text }
+        : null;
+    case "error":
+      return typeof event.message === "string"
+        ? {
+            kind: "error",
+            session: event.session,
+            message: event.message,
+            hint: typeof event.hint === "string" ? event.hint : null,
+            ...(typeof event.code === "string" ? { code: event.code } : {}),
+          }
+        : null;
+    case "telemetry":
+      return typeof event.metric === "string" && typeof event.value === "number"
+        ? { kind: "telemetry", session: event.session, metric: event.metric, value: event.value }
+        : null;
+    default:
+      return null;
+  }
 }
 
 export interface ResolvedMediaSource {
@@ -315,6 +361,18 @@ export const ipc = {
     }),
   cancelTurn: (turnId: string, hostId?: string | null) =>
     invokeOnHost<void>(hostId, "cancel_turn", { turnId }),
+  voiceInterruptTurn: (
+    projectId: string,
+    threadId: string,
+    turnId: string,
+    spokenText: string,
+    hostId?: string | null,
+  ) => invokeOnHost<void>(hostId, "voice_interrupt_turn", {
+    projectId,
+    threadId,
+    turnId,
+    spokenText,
+  }),
   resolveRequest: (
     projectId: string,
     threadId: string,
@@ -419,16 +477,46 @@ export const ipc = {
   openImagesDialog: () => invoke<string[]>("dialog_open_images"),
   openAgentImageDialog: () => invoke<string | null>("dialog_open_agent_image"),
   // Voice dictation. Rust owns the credential and the socket; the webview only
-  // captures audio and renders what comes back.
-  voiceStatus: () => invoke<VoiceCredentialStatus>("voice_status"),
+  // captures audio and renders what comes back. `hostId` routes execution;
+  // settings remain client-owned and are sent as an explicit snapshot.
+  voiceStatus: (settings?: VoiceSettings, hostId?: string | null) =>
+    invokeOnHost<VoiceCredentialStatus>(hostId, "voice_status", settings ? { settings } : {}),
   updateVoiceSettings: (settings: VoiceSettings) =>
     invoke<VoiceSettings>("update_voice_settings", { settings }),
+  voiceTestStt: (settings?: VoiceSettings, hostId?: string | null) =>
+    invokeOnHost<VoiceProviderTestResult>(hostId, "voice_test_stt", settings ? { settings } : {}),
+  voiceListVoices: (settings: VoiceSettings, hostId?: string | null) =>
+    invokeOnHost<VoiceProfile[]>(hostId, "voice_list_voices", { settings }),
+  voiceTtsStart: (
+    settings: VoiceSettings,
+    text: string,
+    voiceId?: string | null,
+    hostId?: string | null,
+  ) => invokeOnHost<VoiceTtsStartResult>(hostId, "voice_tts_start", {
+    settings,
+    text,
+    voiceId: voiceId ?? null,
+  }),
+  voiceTtsRead: (
+    session: number,
+    afterSequence: number,
+    maxBytes: number,
+    hostId?: string | null,
+  ) => invokeOnHost<VoiceTtsReadResult>(hostId, "voice_tts_read", {
+    session,
+    afterSequence,
+    maxBytes,
+  }),
+  voiceTtsCancel: (session: number, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "voice_tts_cancel", { session }),
   /** Resolves as soon as the session exists — the socket is still connecting. */
-  voiceStart: () => invoke<number>("voice_start"),
-  voiceSendAudio: (session: number, chunk: string) =>
-    invoke<void>("voice_send_audio", { session, chunk }),
+  voiceStart: (settings?: VoiceSettings, hostId?: string | null) =>
+    invokeOnHost<number>(hostId, "voice_start", settings ? { settings } : {}),
+  voiceSendAudio: (session: number, chunk: string, sequence: number, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "voice_send_audio", { session, chunk, sequence }),
   /** Drains: the last utterance still lands before the session ends. */
-  voiceStop: (session: number) => invoke<void>("voice_stop", { session }),
+  voiceStop: (session: number, hostId?: string | null) =>
+    invokeOnHost<void>(hostId, "voice_stop", { session }),
 
   /** Same check the "Check for Updates…" menu item runs. */
   checkForUpdates: () => invoke<UpdateStatus>("check_for_updates"),
@@ -451,8 +539,25 @@ export const ipc = {
   onUpdateStatus: (handler: (status: UpdateStatus) => void): Promise<UnlistenFn> =>
     listen<UpdateStatus>("updater://status", handler),
 
-  onVoiceEvent: (handler: (event: VoiceEvent) => void): Promise<UnlistenFn> =>
-    listen<VoiceEvent>("voice://event", handler),
+  onVoiceEvent: (handler: (event: VoiceEvent) => void, hostId?: string | null): Promise<UnlistenFn> => {
+    const remote = !isLocalHost(hostId);
+    const localListener = remote
+      ? Promise.resolve<UnlistenFn>(() => {})
+      : listen<unknown>("voice://event", (payload) => {
+          const event = normalizeVoiceEvent(payload);
+          if (event) handler(event);
+        });
+    const remoteListener = remote
+      ? listen<{ hostId: string; event: string; payload: unknown }>("host://event", (payload) => {
+          if (payload.hostId !== hostId || payload.event !== "voice://event") return;
+          const event = normalizeVoiceEvent(payload.payload);
+          if (event) handler(event);
+        })
+      : Promise.resolve<UnlistenFn>(() => {});
+    return Promise.all([localListener, remoteListener]).then((unlisteners) => () => {
+      for (const unlisten of unlisteners) unlisten();
+    });
+  },
 
   onBrowserReveal: (handler: (event: BrowserUiReveal) => void): Promise<UnlistenFn> =>
     listen<BrowserUiReveal>("browser://reveal", handler),

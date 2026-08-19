@@ -568,7 +568,10 @@ async fn loopback_two_sessions_keep_workspaces_distinct() {
 
 #[test]
 fn hosted_project_paths_stay_on_their_own_host() {
-    let mut catalog = HostCatalog::new(HostInfo::local("This Mac"), WorkspaceDocument::default());
+    let mut catalog = HostCatalog::new(
+        HostInfo::local("This computer"),
+        WorkspaceDocument::default(),
+    );
     apply_add_project(catalog.local_workspace_mut(), "/Users/scott/macbook".into());
     let mut remote = WorkspaceDocument::default();
     remote.projects.push(ChatProject {

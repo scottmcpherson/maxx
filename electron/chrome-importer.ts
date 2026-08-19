@@ -88,7 +88,9 @@ export class ChromeImporter {
   async import(profileId: string): Promise<ImportStatus> {
     const profiles = await this.#profiles();
     if (!profiles.some((profile) => profile.id === profileId)) throw new Error("Chrome profile does not exist");
-    if (!safeStorage.isEncryptionAvailable()) throw new Error("macOS secure storage is unavailable");
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error("Secure browser credential storage is unavailable on this platform");
+    }
     const secret = await this.#chromeSecret();
     const profileRoot = path.join(this.#chromeRoot, profileId);
     const cookies = await this.#readDatabase<ChromeCookieRow>(

@@ -58,15 +58,15 @@ impl CredentialStore for KeychainCredentialStore {
 #[cfg(not(target_os = "macos"))]
 impl CredentialStore for KeychainCredentialStore {
     fn load(&self, _host_id: &str) -> Result<Option<String>, String> {
-        Err("Maxx host credentials require macOS Keychain".into())
+        Err("Secure host credential storage is unavailable on this platform".into())
     }
 
     fn save(&self, _host_id: &str, _credential: &str) -> Result<(), String> {
-        Err("Maxx host credentials require macOS Keychain".into())
+        Err("Secure host credential storage is unavailable on this platform".into())
     }
 
     fn remove(&self, _host_id: &str) -> Result<(), String> {
-        Err("Maxx host credentials require macOS Keychain".into())
+        Err("Secure host credential storage is unavailable on this platform".into())
     }
 }
 

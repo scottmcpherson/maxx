@@ -32,6 +32,7 @@ import { relativeTime } from "../relativeTime";
 import { Icons } from "./Icons";
 import { SidebarUpdateButton } from "./SidebarUpdateButton";
 import { ProjectFolderIcon } from "./ProjectFolderIcon";
+import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = "maxx.sidebar.collapsed-projects";
 const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-collapsed";
@@ -117,9 +118,9 @@ export function Sidebar() {
         projects: [],
         providerProfiles: [],
         agents: [],
-        voice: { isEnabled: false, useGrokSignIn: false, language: "en", apiBase: "https://api.x.ai" },
+        voice: DEFAULT_VOICE_SETTINGS,
       },
-      hostStatus?.name ?? "This Mac",
+      hostStatus?.name ?? "This computer",
     );
     for (const session of remoteSessions) {
       next = attachRemote(next, session.host, session.workspace);
@@ -223,7 +224,7 @@ export function Sidebar() {
   }, [threadMenu]);
 
   const hosts = [
-    { id: LOCAL_HOST_ID, name: hostStatus?.name ?? "This Mac" },
+    { id: LOCAL_HOST_ID, name: hostStatus?.name ?? "This computer" },
     ...remoteSessions.map((session) => ({ id: session.host.id, name: session.host.name })),
   ];
 
@@ -239,7 +240,7 @@ export function Sidebar() {
 
   const pickFolder = async () => {
     if (remoteSessions.length === 0) {
-      await pickFolderOnHost(LOCAL_HOST_ID, hostStatus?.name ?? "This Mac");
+      await pickFolderOnHost(LOCAL_HOST_ID, hostStatus?.name ?? "This computer");
       return;
     }
     setHostPickerOpen((open) => !open);
@@ -468,7 +469,7 @@ export function Sidebar() {
                     onClick={() => void pickFolderOnHost(host.id, host.name)}
                   >
                     <Icons.computer size={15} />
-                    <span>{isLocalHost(host.id) ? `${host.name} (this Mac)` : host.name}</span>
+                    <span>{isLocalHost(host.id) ? `${host.name} (this computer)` : host.name}</span>
                   </button>
                 ))}
               </div>

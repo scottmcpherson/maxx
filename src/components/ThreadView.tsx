@@ -27,9 +27,12 @@ import {
   threadWorkingDirectory,
 } from "../git";
 import { useDictation } from "../voice/useDictation";
+import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
+import { useVoiceConversation } from "../voice/useVoiceConversation";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentHoverCard } from "./AgentHoverCard";
 import { DictationButton, DictationStatus } from "./DictationButton";
+import { VoiceConversationControls } from "./VoiceConversationControls";
 import { ActivityCard, InteractionCard } from "./EventCards";
 import { ContextRail, SummaryToggle } from "./ThreadSummary";
 import { Icons } from "./Icons";
@@ -175,7 +178,8 @@ export function ThreadView({
   const requestSideChat = useAppStore((state) => state.requestSideChat);
   const toggleBrowserShortcut = useAppStore((state) => state.keyboardShortcuts.toggleBrowser);
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
-  const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
+  const voiceSettings = useAppStore((state) => state.workspace?.voice ?? DEFAULT_VOICE_SETTINGS);
+  const voiceEnabled = voiceSettings.isEnabled && voiceSettings.mode === "dictation";
   const error = useAppStore((state) => state.error);
   const browserAnnotations = useAppStore((state) => selectedThreadID
     ? state.browserAnnotationsByThread[selectedThreadID] ?? EMPTY_BROWSER_ANNOTATIONS
@@ -252,7 +256,20 @@ export function ThreadView({
   const dictation = useDictation({
     boundTo: selectedThreadID,
     enabled: voiceEnabled && thread?.surface !== "terminal",
+    settings: voiceSettings,
     shortcut: dictationShortcut,
+  });
+  const voiceConversation = useVoiceConversation({
+    binding: project && thread && thread.surface !== "terminal"
+      ? {
+          projectID: project.id,
+          threadID: thread.id,
+          executionHostID: selectedHostID,
+          thread,
+        }
+      : null,
+    enabled: voiceSettings.isEnabled && voiceSettings.mode === "conversation" && thread?.surface !== "terminal",
+    settings: voiceSettings,
   });
   const { draft, setDraft } = dictation;
   const draftRef = useRef<HTMLTextAreaElement>(null);
@@ -537,7 +554,13 @@ export function ThreadView({
               <span><Icons.files size={13} />{changedFiles} {changedFiles === 1 ? "File Changed" : "Files Changed"}</span>
             </div>
           )}
-          <DictationStatus dictation={dictation} />
+          {voiceSettings.mode === "conversation" ? (
+            <VoiceConversationControls
+              conversation={voiceConversation}
+              visible={voiceSettings.isEnabled && thread.surface !== "terminal"}
+              manual={voiceSettings.turnDetection === "manual"}
+            />
+          ) : <DictationStatus dictation={dictation} />}
           <QueuedMessages
             messages={queuedMessages}
             isRunning={isRunning}
@@ -627,11 +650,13 @@ export function ThreadView({
               {/* Grouped so the toolbar keeps two flex children and the model
                   picker stays pinned to the leading edge. */}
               <div className="composer-actions">
-                <DictationButton
-                  dictation={dictation}
-                  enabled={voiceEnabled}
-                  shortcut={dictationShortcut}
-                />
+                {voiceSettings.mode === "dictation" && (
+                  <DictationButton
+                    dictation={dictation}
+                    enabled={voiceEnabled}
+                    shortcut={dictationShortcut}
+                  />
+                )}
                 {isRunning ? (
                   <>
                     <button className="send-button stop" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
@@ -657,7 +682,7 @@ export function ThreadView({
           </div>
           <div className="composer-meta">
             <span>{isChatsProject(project) ? <Icons.compose size={12} /> : <Icons.branch size={12} />}{projectName(project)}</span>
-            <span>{thread.providerSessionID ? `Session ${thread.providerSessionID.slice(0, 12)}` : "This Mac"}</span>
+            <span>{thread.providerSessionID ? `Session ${thread.providerSessionID.slice(0, 12)}` : "This computer"}</span>
             {contextUsed ? (
               <span
                 className="composer-context"
@@ -1105,7 +1130,7 @@ function NewAgentView({
     ...projects.filter((project) => !isChatsProject(project)).map((project) => ({
       project,
       hostId: "local",
-      hostName: hostStatus?.name ?? "This Mac",
+      hostName: hostStatus?.name ?? "This computer",
     })),
     ...remotes.flatMap((session) =>
       session.workspace.projects.filter((project) => !isChatsProject(project)).map((project) => ({
@@ -1121,10 +1146,12 @@ function NewAgentView({
   const projectID = selectedProject?.project.id ?? null;
   const selectedContextHostID = selectedProject?.hostId ?? "local";
   const dictationShortcut = useAppStore((state) => state.keyboardShortcuts.toggleDictation);
-  const voiceEnabled = useAppStore((state) => state.workspace?.voice.isEnabled ?? false);
+  const voiceSettings = useAppStore((state) => state.workspace?.voice ?? DEFAULT_VOICE_SETTINGS);
+  const voiceEnabled = voiceSettings.isEnabled && voiceSettings.mode === "dictation";
   const dictation = useDictation({
     boundTo: "new-agent",
     enabled: voiceEnabled && surface === "gui",
+    settings: voiceSettings,
     shortcut: dictationShortcut,
   });
   const { draft, setDraft } = dictation;

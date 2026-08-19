@@ -3,6 +3,7 @@ import { CHATS_PROJECT_ID, type WorkspaceDocument } from "../contract/types";
 import type { BrowserAnnotation } from "../browser";
 import { LOCAL_HOST_ID } from "../host/session";
 import { ipc } from "../ipc";
+import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 import { useAppStore } from "./appStore";
 
 const originalRefresh = useAppStore.getState().refresh;
@@ -258,12 +259,7 @@ function sampleWorkspace(folderPath: string, projectID = "project"): WorkspaceDo
     }],
     providerProfiles: [],
     agents: [],
-    voice: {
-      isEnabled: false,
-      useGrokSignIn: false,
-      language: "en",
-      apiBase: "https://api.x.ai",
-    },
+    voice: DEFAULT_VOICE_SETTINGS,
   };
 }
 
@@ -296,7 +292,7 @@ describe("additive remote hosts", () => {
     vi.spyOn(ipc, "hostDisconnect").mockResolvedValue(undefined);
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: false,
       bindAddress: null,
@@ -383,7 +379,7 @@ describe("additive remote hosts", () => {
     });
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: true,
       bindAddress: "100.64.0.2:7422",
@@ -416,7 +412,7 @@ describe("additive remote hosts", () => {
     useAppStore.setState({ workspace: local, remoteSessions: [], hostStatus: null });
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: true,
       bindAddress: "100.64.0.1:7422",
@@ -451,7 +447,7 @@ describe("additive remote hosts", () => {
     useAppStore.setState({ workspace: local, remoteSessions: [], hostStatus: null });
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: false,
       bindAddress: null,
@@ -490,7 +486,7 @@ describe("additive remote hosts", () => {
     });
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: false,
       bindAddress: null,
@@ -525,7 +521,7 @@ describe("additive remote hosts", () => {
     });
     vi.spyOn(ipc, "hostStatus").mockResolvedValue({
       id: "local-id",
-      name: "This Mac",
+      name: "This computer",
       protocolVersion: 2,
       listening: false,
       bindAddress: null,
@@ -594,7 +590,7 @@ describe("additive remote hosts", () => {
       }],
       hostStatus: {
         id: "local-id",
-        name: "This Mac",
+        name: "This computer",
         protocolVersion: 2,
         listening: false,
         bindAddress: null,
@@ -700,12 +696,7 @@ describe("generated thread titles", () => {
       }],
       providerProfiles: [],
       agents: [],
-      voice: {
-        isEnabled: false,
-        useGrokSignIn: false,
-        language: "en",
-        apiBase: "https://api.x.ai",
-      },
+      voice: DEFAULT_VOICE_SETTINGS,
     };
     useAppStore.setState({ workspace });
 

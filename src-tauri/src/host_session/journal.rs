@@ -78,6 +78,18 @@ impl EventJournal {
         Ok(state.cursor)
     }
 
+    /// Broadcast a runtime-only event to connected peers without assigning a
+    /// durable cursor or writing it to disk. This is intentionally separate
+    /// from `emit`: voice transcripts and audio are not host state and must
+    /// never be replayed from `host-events.jsonl`.
+    pub fn emit_ephemeral(&self, event: &str, payload: Value) {
+        let _ = self.live.send(JournalEvent {
+            cursor: 0,
+            event: event.to_string(),
+            payload,
+        });
+    }
+
     pub fn subscribe(&self, after_cursor: u64) -> Result<JournalSubscription, String> {
         let state = self
             .state
@@ -204,6 +216,26 @@ mod tests {
         assert_eq!(event.cursor, 2);
         assert_eq!(event.event, "two");
         assert!(!subscription.resync_required);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ephemeral_events_broadcast_without_replay_or_cursor() {
+        let root = std::env::temp_dir().join(format!("maxx-journal-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("events.jsonl");
+        let journal = EventJournal::load(path.clone());
+        let mut subscription = journal.subscribe(0).unwrap();
+        journal.emit_ephemeral("voice://event", serde_json::json!({"text":"hello"}));
+        let event = subscription.recv().await.unwrap();
+        assert_eq!(event.cursor, 0);
+        assert_eq!(event.event, "voice://event");
+        assert_eq!(journal.current_cursor(), 0);
+        drop(subscription);
+        drop(journal);
+
+        let loaded = EventJournal::load(path);
+        assert!(loaded.subscribe(0).unwrap().replay.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 }

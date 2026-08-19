@@ -40,6 +40,15 @@ impl EventSink for SidecarEvents {
             .outbound
             .send(json!({"type":"event","event":event,"payload":payload}));
     }
+
+    fn emit_ephemeral(&self, event: &str, payload: Value) {
+        // Keep local renderer delivery and remote host forwarding, but do not
+        // persist runtime-only voice data in host-events.jsonl.
+        self.journal.emit_ephemeral(event, payload.clone());
+        let _ = self
+            .outbound
+            .send(json!({"type":"event","event":event,"payload":payload}));
+    }
 }
 
 struct SidecarState {
@@ -79,7 +88,7 @@ impl HostHandler for DispatchHandler {
             return Ok(Value::Null);
         }
         if method.starts_with("host_") {
-            return Err("A connected peer cannot manage this Mac's host connections".into());
+            return Err("A connected peer cannot manage this computer's host connections".into());
         }
         let required_access = required_capability(method)
             .ok_or_else(|| format!("{method} is not available to connected environments"))?;
@@ -640,6 +649,16 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
         "cancel_turn" => value(
             crate::commands::cancel_turn(state.app.clone(), required(&params, "turnId")?).await,
         ),
+        "voice_interrupt_turn" => value(
+            crate::commands::voice_barge_in(
+                state.app.clone(),
+                required(&params, "projectId")?,
+                required(&params, "threadId")?,
+                required(&params, "turnId")?,
+                required(&params, "spokenText")?,
+            )
+            .await,
+        ),
         "resolve_request" => value(
             crate::commands::resolve_request(
                 state.app.clone(),
@@ -681,24 +700,62 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             )
             .await,
         ),
-        "voice_status" => value(crate::voice::voice_status(state.app.clone()).await),
+        "voice_status" => value(
+            crate::voice::voice_status(state.app.clone(), optional(&params, "settings")?).await,
+        ),
+        "voice_test_stt" => value(
+            crate::voice::voice_test_stt(state.app.clone(), optional(&params, "settings")?).await,
+        ),
+        "voice_list_voices" => value(
+            crate::voice::voice_list_voices(state.app.clone(), optional(&params, "settings")?)
+                .await,
+        ),
         "update_voice_settings" => value(
             crate::voice::update_voice_settings(state.app.clone(), required(&params, "settings")?)
                 .await,
         ),
-        "voice_start" => {
-            value(crate::voice::voice_start(state.app.clone(), state.voice.clone()).await)
-        }
+        "voice_start" => value(
+            crate::voice::voice_start(
+                state.app.clone(),
+                state.voice.clone(),
+                optional(&params, "settings")?,
+            )
+            .await,
+        ),
         "voice_send_audio" => value(
             crate::voice::voice_send_audio(
                 state.voice.clone(),
                 required(&params, "session")?,
+                required(&params, "sequence")?,
                 required(&params, "chunk")?,
             )
             .await,
         ),
         "voice_stop" => value(
             crate::voice::voice_stop(state.voice.clone(), required(&params, "session")?).await,
+        ),
+        "voice_tts_start" => value(
+            crate::voice::voice_tts_start(
+                state.app.clone(),
+                state.voice.clone(),
+                optional(&params, "settings")?,
+                required(&params, "text")?,
+                optional(&params, "voiceId")?,
+            )
+            .await,
+        ),
+        "voice_tts_read" => value(
+            crate::voice::voice_tts_read(
+                state.voice.clone(),
+                required(&params, "session")?,
+                required(&params, "afterSequence")?,
+                required(&params, "maxBytes")?,
+            )
+            .await,
+        ),
+        "voice_tts_cancel" => value(
+            crate::voice::voice_tts_cancel(state.voice.clone(), required(&params, "session")?)
+                .await,
         ),
         "authorize_image_previews" => Ok(Value::Null),
         "browser_ui_tabs" => {

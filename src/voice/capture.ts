@@ -10,9 +10,16 @@
 // browser codec support can vary across platforms.
 
 import { VOICE_SAMPLE_RATE } from "./types";
+import { voiceInputConstraints } from "./devices";
 
 export interface MicrophoneCapture {
   stop: () => Promise<void>;
+}
+
+export interface MicrophoneCaptureOptions {
+  inputDeviceId?: string | null;
+  /** Root-mean-square signal level from 0–1, used only for local VAD. */
+  onLevel?: (level: number) => void;
 }
 
 /** Base64 for the IPC hop. At ~32 kB/s the encoding cost is not measurable. */
@@ -35,14 +42,10 @@ function encodeChunk(buffer: ArrayBuffer): string {
  */
 export async function startMicrophoneCapture(
   onChunk: (base64: string) => void,
+  options: MicrophoneCaptureOptions = {},
 ): Promise<MicrophoneCapture> {
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
+    audio: voiceInputConstraints(options.inputDeviceId),
   });
 
   // Asking for the target rate directly avoids resampling when the device can
@@ -69,6 +72,7 @@ export async function startMicrophoneCapture(
       processorOptions: { targetRate: VOICE_SAMPLE_RATE },
     });
     worklet.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      options.onLevel?.(pcm16RootMeanSquare(event.data));
       onChunk(encodeChunk(event.data));
     };
     source.connect(worklet);
@@ -93,4 +97,15 @@ export async function startMicrophoneCapture(
       await context.close().catch(() => {});
     },
   };
+}
+
+export function pcm16RootMeanSquare(buffer: ArrayBuffer): number {
+  const samples = new Int16Array(buffer);
+  if (samples.length === 0) return 0;
+  let squareSum = 0;
+  for (const sample of samples) {
+    const normalized = sample / (sample < 0 ? 0x8000 : 0x7fff);
+    squareSum += normalized * normalized;
+  }
+  return Math.sqrt(squareSum / samples.length);
 }
