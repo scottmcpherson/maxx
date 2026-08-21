@@ -2,12 +2,12 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="Maxx Preview"
-BUNDLE_ID="com.maxx.preview"
+APP_NAME="maxx.original"
+BUNDLE_ID="com.maxx.original"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$ROOT_DIR/release/mac-arm64/Maxx Preview.app"
+APP_BUNDLE="$ROOT_DIR/release/mac-arm64/maxx.original.app"
 if [[ "$(uname -m)" == "x86_64" ]]; then
-  APP_BUNDLE="$ROOT_DIR/release/mac/Maxx Preview.app"
+  APP_BUNDLE="$ROOT_DIR/release/mac/maxx.original.app"
 fi
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 RUNTIME_BINARY="$APP_BUNDLE/Contents/Resources/bin/maxx-runtime"
@@ -31,9 +31,11 @@ node script/stage_runtime.mjs
 "$ROOT_DIR/node_modules/.bin/tsc" --noEmit
 "$ROOT_DIR/node_modules/.bin/vite" build
 "$ROOT_DIR/node_modules/.bin/tsc" -p electron/tsconfig.json
-"$ROOT_DIR/node_modules/.bin/electron-builder" --mac dir \
-  --config.productName="Maxx Preview" \
-  --config.appId="com.maxx.preview"
+CSC_IDENTITY_AUTO_DISCOVERY=false "$ROOT_DIR/node_modules/.bin/electron-builder" --mac dir \
+  --config.productName="$APP_NAME" \
+  --config.appId="$BUNDLE_ID"
+/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE" --args --checkout-build
