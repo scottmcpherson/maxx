@@ -11,6 +11,7 @@ import { Icons } from "./Icons";
 export type SettingsSection =
   | "providers"
   | "voice"
+  | "computerUse"
   | "connections"
   | "keyboardShortcuts"
   | "experimental";
@@ -50,6 +51,7 @@ export function SettingsNavigation({
       <TabsList variant="sidebar" className="min-h-0 flex-1 justify-start overflow-y-auto" aria-label="Settings sections">
         <TabsTrigger variant="sidebar" value="providers"><Icons.activity data-icon="inline-start" />Providers</TabsTrigger>
         <TabsTrigger variant="sidebar" value="voice"><Icons.microphone data-icon="inline-start" />Voice</TabsTrigger>
+        <TabsTrigger variant="sidebar" value="computerUse"><Icons.computer data-icon="inline-start" />Computer Use</TabsTrigger>
         <TabsTrigger variant="sidebar" value="connections"><Icons.computer data-icon="inline-start" />Connections</TabsTrigger>
         <TabsTrigger variant="sidebar" value="keyboardShortcuts"><Icons.keyboard data-icon="inline-start" />Keyboard Shortcuts</TabsTrigger>
         <TabsTrigger variant="sidebar" value="experimental"><Icons.flask data-icon="inline-start" />Experimental</TabsTrigger>

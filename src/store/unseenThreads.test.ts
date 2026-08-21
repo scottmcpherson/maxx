@@ -8,7 +8,7 @@ import {
   unseenTargetForFinishedTurn,
 } from "./unseenThreads";
 import type { UnseenThreadMap } from "./unseenThreads";
-import { ChatThread, TurnFinishedEnvelope, WorkspaceDocument } from "../contract/types";
+import { ChatThread, DEFAULT_COMPUTER_USE_SETTINGS, TurnFinishedEnvelope, WorkspaceDocument } from "../contract/types";
 import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 
 function thread(overrides: Partial<ChatThread> & Pick<ChatThread, "id">): ChatThread {
@@ -31,6 +31,7 @@ function workspace(threads: ChatThread[]): WorkspaceDocument {
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
     projects: [{ id: "project-1", folderPath: "/tmp/proj", threads }],
   };
 }

@@ -694,8 +694,15 @@ fn pi_arguments(request: &TurnRequest) -> Vec<String> {
     if request.ephemeral {
         arguments.push("--no-session".into());
     }
-    if let Some(instructions) = &request.agent_instructions {
-        arguments.extend(["--append-system-prompt".into(), instructions.clone()]);
+    let mut system = request.agent_instructions.clone().unwrap_or_default();
+    if let Some(policy) = crate::host_tools::computer_policy(&request.host_tools) {
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(policy);
+    }
+    if !system.is_empty() {
+        arguments.extend(["--append-system-prompt".into(), system]);
     }
     if let Some(session_id) = &request.session_id {
         arguments.extend(["--session".into(), session_id.clone()]);

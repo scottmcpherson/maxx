@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHATS_PROJECT_ID, type WorkspaceDocument } from "../contract/types";
+import { CHATS_PROJECT_ID, DEFAULT_COMPUTER_USE_SETTINGS, type WorkspaceDocument } from "../contract/types";
 import type { BrowserAnnotation } from "../browser";
 import { LOCAL_HOST_ID } from "../host/session";
 import { ipc } from "../ipc";
@@ -272,6 +272,7 @@ function sampleWorkspace(folderPath: string, projectID = "project"): WorkspaceDo
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
   };
 }
 
@@ -709,6 +710,7 @@ describe("generated thread titles", () => {
       providerProfiles: [],
       agents: [],
       voice: DEFAULT_VOICE_SETTINGS,
+      computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
     };
     useAppStore.setState({ workspace });
 

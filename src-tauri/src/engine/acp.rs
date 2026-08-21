@@ -67,8 +67,18 @@ impl AcpEngine {
 
 fn grok_arguments(request: &TurnRequest) -> Result<Vec<String>, String> {
     let mut arguments = Vec::new();
-    if let Some(instructions) = &request.agent_instructions {
-        arguments.extend(["--rules".into(), instructions.clone(), "--no-memory".into()]);
+    let mut rules = request.agent_instructions.clone().unwrap_or_default();
+    if let Some(policy) = crate::host_tools::computer_policy(&request.host_tools) {
+        if !rules.is_empty() {
+            rules.push_str("\n\n");
+        }
+        rules.push_str(policy);
+    }
+    if !rules.is_empty() {
+        arguments.extend(["--rules".into(), rules]);
+    }
+    if request.agent_instructions.is_some() {
+        arguments.push("--no-memory".into());
     }
     arguments.push("agent".into());
     if let Some(model) = request.selected_model() {
@@ -1219,6 +1229,9 @@ fn configure_acp_environment(
             "browser,computer_use".into(),
         );
         policies.push(HERMES_MAXX_BROWSER_POLICY);
+    }
+    if let Some(policy) = crate::host_tools::computer_policy(host_tools) {
+        policies.push(policy);
     }
     if host_tools
         .iter()

@@ -402,6 +402,46 @@ export interface TitleGenerationRuntime {
   speed?: "normal" | "fast" | null;
 }
 
+export interface ComputerUseSettings {
+  enabled: boolean;
+  disabledProviders: ChatProvider[];
+  launchApplications: boolean;
+  foregroundControl: boolean;
+  clipboard: boolean;
+  browserAutomation: boolean;
+  browserFileTransfer: boolean;
+  trajectoryRecording: boolean;
+  trajectoryReplay: boolean;
+  processTermination: boolean;
+  existingBrowserProfiles: boolean;
+}
+
+export const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
+  enabled: false,
+  disabledProviders: [],
+  launchApplications: true,
+  foregroundControl: true,
+  clipboard: false,
+  browserAutomation: false,
+  browserFileTransfer: false,
+  trajectoryRecording: false,
+  trajectoryReplay: false,
+  processTermination: false,
+  existingBrowserProfiles: false,
+};
+
+export interface ComputerUseStatus {
+  supported: boolean;
+  enabled: boolean;
+  running: boolean;
+  permissions: {
+    accessibility: boolean;
+    screenRecording: boolean;
+  };
+  driverVersion?: string;
+  message?: string;
+}
+
 export interface WorkspaceDocument {
   schemaVersion: number;
   projects: ChatProject[];
@@ -409,6 +449,7 @@ export interface WorkspaceDocument {
   agents: AgentDefinition[];
   /** Null/absent means generated titles inherit the runtime used by the chat. */
   titleGenerationRuntime?: TitleGenerationRuntime | null;
+  computerUse: ComputerUseSettings;
   voice: VoiceSettings;
 }
 

@@ -7,6 +7,15 @@
 
 use std::fmt;
 
+pub const MAXX_COMPUTER_POLICY: &str = "maxx_computer is Maxx's native desktop-control surface. Use it for macOS applications and system UI, and use maxx_browser instead for websites. Observe the current desktop before acting and verify the resulting state after each action.";
+
+pub fn computer_policy(host_tools: &[std::sync::Arc<HostToolAccess>]) -> Option<&'static str> {
+    host_tools
+        .iter()
+        .any(|tool| tool.name == "maxx_computer")
+        .then_some(MAXX_COMPUTER_POLICY)
+}
+
 /// One authenticated, Maxx-owned MCP server available to a provider session.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HostToolAccess {

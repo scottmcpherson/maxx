@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_WORKSPACE_SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -501,6 +501,8 @@ pub struct WorkspaceDocument {
         default
     )]
     pub title_generation_runtime: Option<TitleGenerationRuntime>,
+    #[serde(rename = "computerUse", default)]
+    pub computer_use: crate::computer_use::ComputerUseSettings,
     #[serde(rename = "concurrencyPolicy", default)]
     pub concurrency_policy: ProviderConcurrencyPolicy,
     #[serde(rename = "retentionPolicy", default)]
@@ -523,6 +525,7 @@ impl Default for WorkspaceDocument {
             provider_profiles: ProviderProfile::default_profiles(),
             agents: Vec::new(),
             title_generation_runtime: None,
+            computer_use: crate::computer_use::ComputerUseSettings::default(),
             concurrency_policy: ProviderConcurrencyPolicy::default(),
             retention_policy: RuntimeRetentionPolicy::default(),
             voice: crate::voice::VoiceSettings::default(),
@@ -622,6 +625,7 @@ impl WorkspacePersistence {
 /// recover profiles referenced by threads (disabled placeholders), order
 /// runtime events canonically, sort profiles.
 pub fn normalize(document: &mut WorkspaceDocument) {
+    document.computer_use.normalize();
     for profile in &mut document.provider_profiles {
         profile.hidden_models = profile
             .hidden_models

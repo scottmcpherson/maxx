@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ipc } from "../ipc";
-import { CHATS_PROJECT_ID, isChatsProject, projectName } from "../contract/types";
+import { CHATS_PROJECT_ID, DEFAULT_COMPUTER_USE_SETTINGS, isChatsProject, projectName } from "../contract/types";
 import type { ChatThread } from "../contract/types";
 import {
   attachRemote,
@@ -123,6 +123,7 @@ export function Sidebar({
         providerProfiles: [],
         agents: [],
         voice: DEFAULT_VOICE_SETTINGS,
+        computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
       },
       hostStatus?.name ?? "This computer",
     );

@@ -449,8 +449,15 @@ fn opencode_prompt_body(request: &TurnRequest) -> Result<Value, String> {
         }));
     }
     let mut body = json!({"parts": parts});
-    if let Some(instructions) = &request.agent_instructions {
-        body["system"] = Value::String(instructions.clone());
+    let mut system = request.agent_instructions.clone().unwrap_or_default();
+    if let Some(policy) = crate::host_tools::computer_policy(&request.host_tools) {
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(policy);
+    }
+    if !system.is_empty() {
+        body["system"] = Value::String(system);
     }
     if let Some(model) = request.selected_model() {
         if let Some((provider_id, model_id)) = model.split_once('/') {

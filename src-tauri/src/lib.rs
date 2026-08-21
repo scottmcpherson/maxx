@@ -3,6 +3,7 @@ pub mod automation;
 pub mod automation_service;
 pub mod browser_runtime;
 pub mod commands;
+pub mod computer_use;
 pub mod engine;
 pub mod events;
 pub mod git;

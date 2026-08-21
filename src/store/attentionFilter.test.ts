@@ -7,6 +7,7 @@ import {
 } from "./attentionFilter";
 import {
   ChatThread,
+  DEFAULT_COMPUTER_USE_SETTINGS,
   RuntimeInteractionRecord,
   WorkspaceDocument,
 } from "../contract/types";
@@ -44,6 +45,7 @@ function workspace(threadsByProject: Record<string, ChatThread[]>): WorkspaceDoc
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
     projects: Object.entries(threadsByProject).map(([id, threads]) => ({
       id,
       folderPath: `/tmp/${id}`,

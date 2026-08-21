@@ -718,6 +718,19 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             crate::voice::update_voice_settings(state.app.clone(), required(&params, "settings")?)
                 .await,
         ),
+        "computer_use_status" => {
+            value(crate::computer_use::computer_use_status(state.app.clone()).await)
+        }
+        "update_computer_use_settings" => value(
+            crate::computer_use::update_computer_use_settings(
+                state.app.clone(),
+                required(&params, "settings")?,
+            )
+            .await,
+        ),
+        "computer_use_open_settings" => {
+            value(crate::computer_use::computer_use_open_settings(state.app.clone()).await)
+        }
         "voice_start" => value(
             crate::voice::voice_start(
                 state.app.clone(),
@@ -1155,6 +1168,12 @@ async fn run_async() -> Result<(), String> {
     .await
     .map_err(|error| error.to_string())?;
     let app = Arc::new(AppState::load(browser.clone(), events.clone()));
+    let computer = crate::computer_use::ComputerUseService::start(
+        host.clone(),
+        app.workspace.lock().await.computer_use.clone(),
+    )
+    .await?;
+    app.runtime.set_computer_use_service(computer);
     let automation_path = crate::state::workspace_path().with_file_name("automations.sqlite3");
     let automations =
         crate::automation_service::AutomationService::start(automation_path, events.clone())

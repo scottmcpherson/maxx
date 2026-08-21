@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceDocument } from "../contract/types";
+import { DEFAULT_COMPUTER_USE_SETTINGS, type WorkspaceDocument } from "../contract/types";
 import {
   attachRemote,
   detachRemote,
@@ -19,6 +19,7 @@ function workspace(folderPath: string): WorkspaceDocument {
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
   };
 }
 

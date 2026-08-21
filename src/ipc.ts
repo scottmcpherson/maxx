@@ -47,6 +47,8 @@ import {
   ChatTextSelection,
   ChatThread,
   ChatSurface,
+  ComputerUseSettings,
+  ComputerUseStatus,
   ProviderHealth,
   ProviderCommandCatalog,
   ProviderModelCatalog,
@@ -494,6 +496,10 @@ export const ipc = {
   voiceMicrophoneAccess: () => invoke<VoiceMicrophoneAccess>("voice_microphone_access"),
   updateVoiceSettings: (settings: VoiceSettings) =>
     invoke<VoiceSettings>("update_voice_settings", { settings }),
+  computerUseStatus: () => invoke<ComputerUseStatus>("computer_use_status"),
+  updateComputerUseSettings: (settings: ComputerUseSettings) =>
+    invoke<ComputerUseSettings>("update_computer_use_settings", { settings }),
+  computerUseOpenSettings: () => invoke<ComputerUseStatus>("computer_use_open_settings"),
   voiceTestStt: (settings?: VoiceSettings, hostId?: string | null) =>
     invokeOnHost<VoiceProviderTestResult>(hostId, "voice_test_stt", settings ? { settings } : {}),
   voiceListVoices: (settings: VoiceSettings, hostId?: string | null) =>

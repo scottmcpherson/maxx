@@ -6,6 +6,7 @@
 //! contract in `contract`.
 
 pub mod agents;
+pub mod computer_use;
 pub mod contract;
 pub mod error;
 pub mod handoff;
@@ -18,6 +19,7 @@ pub mod stamp;
 pub mod voice;
 
 pub use contract::*;
+pub use computer_use::ComputerUseSettings;
 pub use error::CoreError;
 pub use handoff::{
     render_handoff, render_handoff_with_agents, ContextHandoff, DEFAULT_HANDOFF_BUDGET,

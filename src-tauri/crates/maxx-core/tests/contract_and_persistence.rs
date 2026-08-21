@@ -259,6 +259,31 @@ fn title_generation_runtime_round_trips_and_can_be_unset() {
 }
 
 #[test]
+fn computer_use_settings_round_trip_with_safe_useful_defaults() {
+    let dir = std::env::temp_dir().join(format!("maxx-core-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("workspace.json");
+    let persistence = WorkspacePersistence::new(&path);
+
+    let mut document = WorkspaceDocument::default();
+    assert!(!document.computer_use.enabled);
+    assert!(document.computer_use.launch_applications);
+    assert!(document.computer_use.foreground_control);
+    document.computer_use.enabled = true;
+    document.computer_use.disabled_providers = vec![ChatProvider::Pi];
+    document.computer_use.clipboard = true;
+    persistence.save(&document).unwrap();
+
+    let loaded = persistence.load().unwrap().document;
+    assert!(loaded.computer_use.enabled);
+    assert_eq!(loaded.computer_use.disabled_providers, vec![ChatProvider::Pi]);
+    assert!(loaded.computer_use.clipboard);
+    assert!(!loaded.computer_use.trajectory_recording);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn threads_referencing_missing_profiles_recover_a_disabled_placeholder() {
     let orphan_instance = Uuid::new_v4();
     let mut thread = ChatThread::new("Orphan".into(), ChatProvider::Grok, "Default".into());

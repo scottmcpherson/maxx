@@ -11,6 +11,7 @@ use maxx_core::contract::*;
 use maxx_core::normalize::ProviderEventDraft;
 use maxx_core::TurnStamper;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -43,6 +44,8 @@ pub struct Runtime {
     request_routes: Mutex<HashMap<Uuid, ChatProvider>>,
     browser: Option<Arc<BrowserRuntime>>,
     automations: RwLock<Option<Arc<crate::automation_service::AutomationService>>>,
+    computer: RwLock<Option<Arc<crate::computer_use::ComputerUseService>>>,
+    host_tools_reload_pending: AtomicBool,
 }
 
 impl Runtime {
@@ -72,6 +75,41 @@ impl Runtime {
             request_routes: Mutex::new(HashMap::new()),
             browser,
             automations: RwLock::new(None),
+            computer: RwLock::new(None),
+            host_tools_reload_pending: AtomicBool::new(false),
+        }
+    }
+
+    pub fn set_computer_use_service(&self, service: Arc<crate::computer_use::ComputerUseService>) {
+        *self
+            .computer
+            .write()
+            .expect("computer runtime lock poisoned") = Some(service);
+    }
+
+    pub fn computer_use_service(&self) -> Option<Arc<crate::computer_use::ComputerUseService>> {
+        self.computer
+            .read()
+            .expect("computer runtime lock poisoned")
+            .clone()
+    }
+
+    pub async fn computer_access_for(
+        &self,
+        provider: ChatProvider,
+        provider_instance_id: Uuid,
+        thread_id: Uuid,
+    ) -> Option<Arc<crate::host_tools::HostToolAccess>> {
+        let service = self.computer_use_service()?;
+        match service
+            .access_for(provider, provider_instance_id, thread_id)
+            .await
+        {
+            Ok(access) => access,
+            Err(error) => {
+                log::warn!("Computer Use is unavailable for this turn: {error}");
+                None
+            }
         }
     }
 
@@ -166,6 +204,19 @@ impl Runtime {
                 .host_tools
                 .retain(|tool| tool.name != "maxx_browser");
             request.host_tools.push(Arc::new(access.as_host_tool()));
+        }
+        request
+            .host_tools
+            .retain(|tool| tool.name != "maxx_computer");
+        if let Some(access) = self
+            .computer_access_for(
+                request.provider,
+                request.provider_instance_id,
+                request.thread_id,
+            )
+            .await
+        {
+            request.host_tools.push(access);
         }
         request
             .host_tools
@@ -305,7 +356,31 @@ impl Runtime {
     }
 
     pub async fn finish_turn(&self, turn_id: Uuid) {
-        self.live_turns.lock().await.remove(&turn_id);
+        let empty = {
+            let mut live = self.live_turns.lock().await;
+            live.remove(&turn_id);
+            live.is_empty()
+        };
+        if empty && self.host_tools_reload_pending.swap(false, Ordering::AcqRel) {
+            self.shutdown_engines().await;
+        }
+    }
+
+    /// Provider processes cache their MCP configuration. Restart idle
+    /// processes after a global Computer Use change; active turns finish first.
+    pub async fn reload_host_tools(&self) {
+        if self.live_turns.lock().await.is_empty() {
+            self.shutdown_engines().await;
+        } else {
+            self.host_tools_reload_pending
+                .store(true, Ordering::Release);
+        }
+    }
+
+    async fn shutdown_engines(&self) {
+        for engine in self.engines.values() {
+            engine.shutdown().await;
+        }
     }
 
     /// Relinquish the structured transport before a provider-native terminal
@@ -358,6 +433,9 @@ impl Runtime {
         if let Some(browser) = &self.browser {
             browser.interrupt_thread(thread_id).await;
         }
+        if let Some(computer) = self.computer_use_service() {
+            computer.revoke_thread(thread_id).await;
+        }
         if let Some(engine) = self.engines.get(&provider) {
             engine.cancel(turn_id).await;
         }
@@ -403,8 +481,9 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) {
-        for engine in self.engines.values() {
-            engine.shutdown().await;
+        self.shutdown_engines().await;
+        if let Some(computer) = self.computer_use_service() {
+            computer.shutdown().await;
         }
         self.live_turns.lock().await.clear();
         self.request_routes.lock().await.clear();

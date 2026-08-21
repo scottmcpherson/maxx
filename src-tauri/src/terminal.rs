@@ -335,6 +335,13 @@ impl TerminalBroker {
         ) {
             host_tools.push(access);
         }
+        if let Some(access) = state
+            .runtime
+            .computer_access_for(thread.provider, thread.instance_id(), thread.id)
+            .await
+        {
+            host_tools.push(access);
+        }
         // Prove the structured runtime is idle and relinquish its connection
         // before using a short-lived reader to establish the native boundary.
         state
@@ -629,6 +636,17 @@ impl TerminalBroker {
                 thread_snapshot.speed.clone(),
                 true,
             ) {
+                host_tools.push(access);
+            }
+            if let Some(access) = state
+                .runtime
+                .computer_access_for(
+                    thread_snapshot.provider,
+                    thread_snapshot.instance_id(),
+                    thread_snapshot.id,
+                )
+                .await
+            {
                 host_tools.push(access);
             }
             let request =

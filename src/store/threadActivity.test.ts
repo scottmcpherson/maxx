@@ -10,6 +10,7 @@ import {
   threadActivity,
 } from "./threadActivity";
 import {
+  DEFAULT_COMPUTER_USE_SETTINGS,
   EventKind,
   ProviderRuntimeEvent,
   RuntimeEventEnvelope,
@@ -58,6 +59,7 @@ function workspaceWithThread(
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
     projects: [
       {
         id: "project-1",

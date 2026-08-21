@@ -753,12 +753,17 @@ fn codex_answers(decision: &RuntimeInteractionDecision) -> Value {
 }
 
 fn codex_developer_instructions(request: &TurnRequest) -> String {
-    match request.agent_instructions.as_deref() {
+    let mut instructions = match request.agent_instructions.as_deref() {
         Some(instructions) => {
             format!("{MAXX_BROWSER_DEVELOPER_INSTRUCTIONS}\n\n{instructions}")
         }
         None => ORDINARY_THREAD_DEVELOPER_INSTRUCTIONS.to_string(),
+    };
+    if let Some(policy) = crate::host_tools::computer_policy(&request.host_tools) {
+        instructions.push_str("\n\n");
+        instructions.push_str(policy);
     }
+    instructions
 }
 
 fn codex_thread_start_params(request: &TurnRequest) -> Value {

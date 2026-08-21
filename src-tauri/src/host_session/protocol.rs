@@ -113,7 +113,10 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         "update_profiles"
         | "update_title_generation_runtime"
         | "update_agents"
-        | "import_agent_image" => Some(Capability::SettingsManage),
+        | "import_agent_image"
+        | "computer_use_status"
+        | "update_computer_use_settings"
+        | "computer_use_open_settings" => Some(Capability::SettingsManage),
         "voice_status"
         | "voice_test_stt"
         | "voice_list_models"

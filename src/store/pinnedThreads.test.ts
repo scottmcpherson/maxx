@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ChatThread, WorkspaceDocument } from "../contract/types";
+import { DEFAULT_COMPUTER_USE_SETTINGS, type ChatThread, type WorkspaceDocument } from "../contract/types";
 import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 import {
   loadPinnedThreadIDs,
@@ -30,6 +30,7 @@ function workspace(): WorkspaceDocument {
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
     projects: [
       {
         id: "project-1",

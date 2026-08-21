@@ -35,10 +35,12 @@ import type {
 import {
   AgentDefinition,
   CHATS_PROJECT_ID,
+  DEFAULT_COMPUTER_USE_SETTINGS,
   ChatProvider,
   ChatTextSelection,
   ChatSurface,
   ChatThread,
+  ComputerUseSettings,
   ProviderProfile,
   RuntimeEventEnvelope,
   RuntimeInteractionDecision,
@@ -226,6 +228,7 @@ interface AppStoreState {
   saveTitleGenerationRuntime: (runtime: TitleGenerationRuntime | null) => Promise<void>;
   saveAgents: (agents: AgentDefinition[]) => Promise<void>;
   saveVoiceSettings: (settings: VoiceSettings) => Promise<void>;
+  saveComputerUseSettings: (settings: ComputerUseSettings) => Promise<void>;
   startSideThread: (
     projectID: string,
     parentThreadID: string,
@@ -323,6 +326,7 @@ function catalogFromState(state: {
     providerProfiles: [],
     agents: [],
     voice: DEFAULT_VOICE_SETTINGS,
+    computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
   };
   let catalog = emptyCatalog(local, state.hostStatus?.name ?? "This computer");
   for (const session of state.remoteSessions) {
@@ -1236,6 +1240,16 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().refresh();
     } catch (error) {
       set({ error: String(error) });
+    }
+  },
+
+  saveComputerUseSettings: async (settings) => {
+    try {
+      await ipc.updateComputerUseSettings(settings);
+      await get().refresh();
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
     }
   },
 

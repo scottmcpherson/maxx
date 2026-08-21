@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../ipc";
-import { providerDisplayName } from "../contract/types";
-import type { ProviderHealth, ProviderProfile } from "../contract/types";
+import { ALL_PROVIDERS, DEFAULT_COMPUTER_USE_SETTINGS, providerDisplayName } from "../contract/types";
+import type { ComputerUseSettings, ComputerUseStatus, ProviderHealth, ProviderProfile } from "../contract/types";
 import {
   disableUnavailableProfiles,
   providerCanBeEnabled,
@@ -37,11 +37,14 @@ import type {
 import { VoiceTtsPlayer } from "../voice/tts";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
+import { ProviderIcon } from "./ProviderIcon";
 import { ProviderSettingsRow } from "./ProviderSettingsRow";
 import { RuntimePicker } from "./RuntimePicker";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
@@ -312,6 +315,8 @@ export function SettingsPanel({ section, query }: { section: SettingsSection; qu
         );
       case "voice":
         return <VoiceSettingsSection />;
+      case "computerUse":
+        return <ComputerUseSettingsSection />;
       case "connections":
         return <ConnectionsSettingsSection />;
       case "experimental":
@@ -356,6 +361,200 @@ export function SettingsPanel({ section, query }: { section: SettingsSection; qu
         {sectionBody()}
       </div>
     </main>
+  );
+}
+
+function ComputerUseSettingsSection() {
+  const workspace = useAppStore((state) => state.workspace);
+  const saveSettings = useAppStore((state) => state.saveComputerUseSettings);
+  const stored = workspace?.computerUse ?? DEFAULT_COMPUTER_USE_SETTINGS;
+  const [settings, setSettings] = useState<ComputerUseSettings>(stored);
+  const [status, setStatus] = useState<ComputerUseStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => setSettings(stored), [stored]);
+
+  const refreshStatus = async () => {
+    try {
+      setStatus(await ipc.computerUseStatus());
+      setActionError(null);
+    } catch (error) {
+      setActionError(String(error));
+    }
+  };
+
+  useEffect(() => { void refreshStatus(); }, []);
+
+  const update = async (patch: Partial<ComputerUseSettings>) => {
+    const next = {
+      ...settings,
+      ...patch,
+      ...(patch.browserAutomation === false
+        ? { browserFileTransfer: false, existingBrowserProfiles: false }
+        : {}),
+    };
+    setSettings(next);
+    setBusy(true);
+    setActionError(null);
+    try {
+      await saveSettings(next);
+      await refreshStatus();
+    } catch (error) {
+      setSettings(settings);
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleProvider = (provider: ComputerUseSettings["disabledProviders"][number], enabled: boolean) => {
+    const disabledProviders = enabled
+      ? settings.disabledProviders.filter((candidate) => candidate !== provider)
+      : [...new Set([...settings.disabledProviders, provider])];
+    void update({ disabledProviders });
+  };
+
+  const openSettings = async () => {
+    setActionError(null);
+    try {
+      setStatus(await ipc.computerUseOpenSettings());
+    } catch (error) {
+      setActionError(String(error));
+    }
+  };
+
+  const capabilityRows: Array<{
+    key: keyof Pick<ComputerUseSettings, "launchApplications" | "foregroundControl" | "clipboard" | "browserAutomation" | "browserFileTransfer" | "trajectoryRecording" | "trajectoryReplay" | "processTermination" | "existingBrowserProfiles">;
+    label: string;
+    description: string;
+    requiresBrowserAutomation?: boolean;
+  }> = [
+    { key: "launchApplications", label: "Launch applications", description: "Let agents open apps needed to complete a task." },
+    { key: "foregroundControl", label: "Foreground control", description: "Let agents bring apps forward and use visible mouse and keyboard control when direct background control is unavailable." },
+    { key: "clipboard", label: "Clipboard", description: "Allow agents to read from and write to the system clipboard." },
+    { key: "browserAutomation", label: "Browser automation", description: "Allow typed web navigation and page interaction in a separate Cua-managed browser profile." },
+    { key: "browserFileTransfer", label: "Browser file transfer", description: "Allow agents to upload local files through browser inputs and save browser downloads.", requiresBrowserAutomation: true },
+    { key: "existingBrowserProfiles", label: "Existing browser profiles", description: "Allow attachment to signed-in Chromium profiles on this Mac. Cua restarts with its explicit existing-profile grant.", requiresBrowserAutomation: true },
+    { key: "trajectoryRecording", label: "Trajectory recording", description: "Allow agents to save action metadata, accessibility state, screenshots, and optional video for a run." },
+    { key: "trajectoryReplay", label: "Trajectory replay", description: "Allow agents to replay actions from a previously saved trajectory." },
+    { key: "processTermination", label: "Terminate applications", description: "Allow agents to force an application to quit." },
+  ];
+
+  const needsPermissions = settings.enabled && status && (!status.permissions.accessibility || !status.permissions.screenRecording);
+
+  return (
+    <>
+      <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
+        <div>
+          <h1 className={settingsPageTitleClass}>Computer Use</h1>
+          <p className={settingsPageDescriptionClass}>Give every enabled agent native desktop control through Maxx’s built-in Cua runtime. No per-chat setup is required.</p>
+        </div>
+      </header>
+
+      {(actionError || status?.message || needsPermissions) && (
+        <Alert>
+          <AlertDescription className="flex items-center justify-between gap-3">
+            <span>{actionError ?? status?.message ?? "Allow Accessibility and Screen Recording for Maxx to use the desktop."}</span>
+            {needsPermissions && <Button type="button" variant="outline" size="sm" onClick={() => void openSettings()}>Open System Settings</Button>}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <Collapsible open={settings.enabled} onOpenChange={(enabled) => void update({ enabled })}>
+        <Card className={settingsCardClass} aria-label="Computer Use settings">
+          <CardContent className="p-0">
+            <Field orientation="horizontal" className="items-center p-3">
+              <FieldContent>
+                <FieldLabel htmlFor="computer-use-enabled">Enable Computer Use</FieldLabel>
+                <FieldDescription>Expose <code>maxx_computer</code> globally to enabled harnesses. Changes apply to existing chats automatically.</FieldDescription>
+              </FieldContent>
+              <CollapsibleTrigger
+                nativeButton={false}
+                role="switch"
+                aria-checked={settings.enabled}
+                render={(
+                  <Switch
+                    id="computer-use-enabled"
+                    aria-label="Enable Computer Use"
+                    checked={settings.enabled}
+                    disabled={busy || status?.supported === false}
+                  />
+                )}
+              />
+            </Field>
+            <CollapsibleContent
+              className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height,opacity] duration-200 ease-out data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0 motion-reduce:transition-none [&[hidden]:not([hidden='until-found'])]:hidden"
+              aria-label="Computer Use harness settings"
+            >
+              <div className="border-t border-border/50">
+                {ALL_PROVIDERS.map((provider) => (
+                  <div className={settingsCompactControlRowClass} key={provider}>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="flex shrink-0" aria-hidden="true">
+                        <ProviderIcon provider={provider} size={20} />
+                      </span>
+                      <div className={settingsRowCopyClass}>
+                        <strong>{providerDisplayName(provider)}</strong>
+                        <small>Computer Use is available in every {providerDisplayName(provider)} chat.</small>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={!settings.disabledProviders.includes(provider)}
+                      disabled={busy}
+                      aria-label={`Enable Computer Use for ${providerDisplayName(provider)}`}
+                      onCheckedChange={(enabled) => toggleProvider(provider, enabled)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </CollapsibleContent>
+          </CardContent>
+        </Card>
+      </Collapsible>
+
+      {settings.enabled && (
+        <div className="animate-in fade-in-0 slide-in-from-top-1 duration-200 motion-reduce:animate-none">
+          <h2 className="mb-2 text-sm font-medium">Capabilities</h2>
+          <Card className={settingsCardClass} aria-label="Computer Use capabilities">
+            <CardContent className="px-0">
+              <Field orientation="horizontal" className={settingsCompactControlRowClass}>
+                <FieldContent>
+                  <FieldLabel>Core desktop control</FieldLabel>
+                  <FieldDescription>
+                    Inspect screens and accessibility state, click, type, scroll, move windows, and manage sessions. Included whenever Computer Use is enabled; macOS Screen Recording permission is required for live screenshots but does not save recordings.
+                  </FieldDescription>
+                </FieldContent>
+                <Badge variant="secondary">Always on</Badge>
+              </Field>
+              {capabilityRows.map((row) => {
+                const disabled = busy || Boolean(row.requiresBrowserAutomation && !settings.browserAutomation);
+                return (
+                  <Field
+                    orientation="horizontal"
+                    className={settingsCompactControlRowClass}
+                    data-disabled={disabled || undefined}
+                    key={row.key}
+                  >
+                    <FieldContent>
+                      <FieldLabel htmlFor={`computer-use-${row.key}`}>{row.label}</FieldLabel>
+                      <FieldDescription>{row.description}</FieldDescription>
+                    </FieldContent>
+                    <Switch
+                      id={`computer-use-${row.key}`}
+                      checked={settings[row.key]}
+                      disabled={disabled}
+                      aria-label={row.label}
+                      onCheckedChange={(enabled) => void update({ [row.key]: enabled })}
+                    />
+                  </Field>
+                );
+              })}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </>
   );
 }
 

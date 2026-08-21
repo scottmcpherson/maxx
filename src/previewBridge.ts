@@ -6,6 +6,7 @@ import type {
   ProviderProfile,
   WorkspaceDocument,
 } from "./contract/types";
+import { DEFAULT_COMPUTER_USE_SETTINGS } from "./contract/types";
 import type { HostStatus, RemoteHostStatus, TailscaleDiscovery } from "./host/types";
 import { DEFAULT_VOICE_SETTINGS } from "./voice/types";
 
@@ -114,6 +115,7 @@ let localWorkspace: WorkspaceDocument = {
   ],
   providerProfiles: profiles,
   agents,
+  computerUse: DEFAULT_COMPUTER_USE_SETTINGS,
   voice: DEFAULT_VOICE_SETTINGS,
 };
 
@@ -356,6 +358,10 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
     case "update_title_generation_runtime":
       localWorkspace = { ...localWorkspace, titleGenerationRuntime: params.runtime as WorkspaceDocument["titleGenerationRuntime"] };
       result = localWorkspace.titleGenerationRuntime ?? null;
+      break;
+    case "update_computer_use_settings":
+      localWorkspace = { ...localWorkspace, computerUse: params.settings as WorkspaceDocument["computerUse"] };
+      result = localWorkspace.computerUse;
       break;
     case "update_voice_settings":
       localWorkspace = { ...localWorkspace, voice: params.settings as WorkspaceDocument["voice"] };

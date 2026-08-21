@@ -7,12 +7,12 @@
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "cargo build --manifest-path src-tauri/Cargo.toml && concurrently --kill-others --names renderer,desktop \"pnpm dev:renderer\" \"wait-on http://localhost:1420 && pnpm dev:desktop\"",
+    "dev": "node script/stage_cua_driver.mjs && cargo build --manifest-path src-tauri/Cargo.toml && concurrently --kill-others --names renderer,desktop \"pnpm dev:renderer\" \"wait-on http://localhost:1420 && pnpm dev:desktop\"",
     "dev:renderer": "vite",
     "dev:desktop": "tsc -p electron/tsconfig.json && electron . --dev",
     "build": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json",
-    "build:runtime": "cargo build --release --manifest-path src-tauri/Cargo.toml && node script/stage_runtime.mjs",
-    "build:runtime:universal": "cargo build --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin && cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin && node script/stage_runtime.mjs --universal",
+    "build:runtime": "cargo build --release --manifest-path src-tauri/Cargo.toml && node script/stage_runtime.mjs && node script/stage_cua_driver.mjs",
+    "build:runtime:universal": "cargo build --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin && cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin && node script/stage_runtime.mjs --universal && node script/stage_cua_driver.mjs",
     "build:desktop": "pnpm build && pnpm build:runtime && electron-builder --mac dir",
     "release:mac": "pnpm build && pnpm build:runtime:universal && electron-builder --mac dmg zip --universal",
     "test:app": "electron . --app-smoke",
@@ -43,6 +43,14 @@
         "to": "bin/maxx-runtime"
       },
       {
+        "from": "build/cua-driver",
+        "to": "bin/cua-driver"
+      },
+      {
+        "from": "third_party/cua-driver-LICENSE",
+        "to": "licenses/cua-driver-LICENSE"
+      },
+      {
         "from": "src-tauri/icons/tray.png",
         "to": "assets/tray.png"
       }
@@ -70,6 +78,7 @@
   "dependencies": {
     "@base-ui/react": "^1.7.0",
     "@streamdown/code": "^1.1.1",
+    "@trycua/cua-driver": "0.21.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "0.19.0",
     "@xterm/xterm": "^6.0.0",

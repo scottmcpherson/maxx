@@ -22,6 +22,7 @@ import {
 import { BrowserManager } from "./browser-manager.js";
 import { buildInstanceSettings } from "./build-instance.js";
 import { ChromeImporter } from "./chrome-importer.js";
+import { ComputerUseHost, computerUseBinaryPath } from "./computer-use-host.js";
 import type {
   BrowserAnnotationSelection,
   BrowserEngineContext,
@@ -72,7 +73,9 @@ let runtime: SidecarClient | null = null;
 let chromeImporter: ChromeImporter | null = null;
 let tray: Tray | null = null;
 let updater: MaxxUpdater | null = null;
+let computerUseHost: ComputerUseHost | null = null;
 let quitting = false;
+let quitCleanupStarted = false;
 const authorizedMedia = new Set<string>();
 const RUNTIME_METHODS = new Set([
   "workspace_snapshot", "active_turns", "git_status", "git_branches", "git_checkout", "git_create_branch", "git_commit", "git_push",
@@ -85,6 +88,7 @@ const RUNTIME_METHODS = new Set([
   "terminal_read", "terminal_stop", "shell_terminal_start", "shell_terminal_status",
   "shell_terminal_input", "shell_terminal_resize", "shell_terminal_read", "shell_terminal_stop",
   "list_provider_models", "list_provider_commands", "resolve_media_source", "voice_status", "voice_test_stt", "voice_list_models", "voice_list_voices", "update_voice_settings",
+  "computer_use_status", "update_computer_use_settings", "computer_use_open_settings",
   "voice_start", "voice_send_audio", "voice_stop", "voice_interrupt_turn", "voice_tts_start", "voice_tts_read", "voice_tts_cancel", "browser_ui_tabs", "browser_ui_open_tab",
   "browser_ui_select_tab", "browser_ui_close_tab", "browser_ui_reorder_tabs", "browser_ui_navigate", "browser_ui_back",
   "browser_ui_forward", "browser_ui_reload", "browser_ui_artifact",
@@ -239,6 +243,11 @@ async function createWindow(): Promise<void> {
     backgroundColor: "#1c1c1e",
     webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true },
   });
+  if (appSmoke) {
+    mainWindow.webContents.on("console-message", (_event, level, message) => {
+      if (level >= 2) process.stderr.write(`MAXX_APP_SMOKE_RENDERER ${message}\n`);
+    });
+  }
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) void shell.openExternal(url);
     return { action: "deny" };
@@ -264,6 +273,11 @@ async function createWindow(): Promise<void> {
   });
   const executable = runtimeExecutable();
   if (!existsSync(executable)) throw new Error(`Maxx runtime is missing at ${executable}; build it with cargo build --manifest-path src-tauri/Cargo.toml`);
+  computerUseHost ??= new ComputerUseHost(
+    computerUseBinaryPath(projectDirectory, app.isPackaged),
+    checkoutBuild ? "com.maxx.original" : "com.maxx.app",
+    development,
+  );
   runtime = new SidecarClient({
     executable,
     cwd: runtimeWorkingDirectory(),
@@ -301,6 +315,27 @@ async function createWindow(): Promise<void> {
         await browser!.interrupt(String((params as { tabId?: unknown }).tabId));
         return null;
       }
+      if (method === "computer.status") {
+        return computerUseHost!.status(Boolean((params as { enabled?: unknown }).enabled)) as unknown as JsonValue;
+      }
+      if (method === "computer.start") {
+        const value = params as {
+          requestPermissions?: unknown;
+          settings?: { enabled?: unknown; existingBrowserProfiles?: unknown };
+        };
+        return await computerUseHost!.start(
+          Boolean(value.settings?.enabled),
+          Boolean(value.requestPermissions),
+          Boolean(value.settings?.existingBrowserProfiles),
+        ) as unknown as JsonValue;
+      }
+      if (method === "computer.open-settings") {
+        return await computerUseHost!.openSettings(true) as unknown as JsonValue;
+      }
+      if (method === "computer.stop") {
+        await computerUseHost!.stop();
+        return null;
+      }
       throw Object.assign(new Error(`Unknown host method ${method}`), { code: "host.unknown-method" });
     },
     onLog: (line) => console.error(`[maxx-runtime] ${line}`),
@@ -310,6 +345,10 @@ async function createWindow(): Promise<void> {
 }
 
 async function runAppSmoke(): Promise<void> {
+  const smokeStage = (stage: string): void => {
+    process.stderr.write(`MAXX_APP_SMOKE_STAGE ${stage}\n`);
+  };
+  smokeStage("start");
   registerMediaProtocol();
   registerIPC();
   installMenu();
@@ -400,6 +439,45 @@ async function runAppSmoke(): Promise<void> {
     return settingsRendered && Boolean(composerActions?.dictation && composerActions?.conversation);
   })()`);
   if (voiceSettingsUI !== true) throw new Error("packaged Voice settings controls did not render");
+  smokeStage("voice-settings-complete");
+  const computerUseStatus = await runtime!.request("computer_use_status", {}, 5_000) as Record<string, JsonValue>;
+  smokeStage("computer-status-complete");
+  if (computerUseStatus.supported !== true || computerUseStatus.enabled !== false
+    || !existsSync(path.join(process.resourcesPath, "bin", "cua-driver"))) {
+    throw new Error(`packaged Computer Use runtime was not staged correctly: ${JSON.stringify(computerUseStatus)}`);
+  }
+  const computerUseSettingsUI = await mainWindow!.webContents.executeJavaScript(`(async () => {
+    const waitFor = async (probe, timeout = 5000) => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const value = probe();
+        if (value) return value;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return null;
+    };
+    const settingsButton = [...document.querySelectorAll('.sidebar-footer button')]
+      .find((button) => button.textContent?.includes('Settings'));
+    settingsButton?.click();
+    const computerButton = await waitFor(() => [...document.querySelectorAll('[aria-label="Settings sections"] button')]
+      .find((button) => button.textContent?.includes('Computer Use')));
+    computerButton?.click();
+    const master = await waitFor(() => document.querySelector('[aria-label="Enable Computer Use"]'));
+    return {
+      master: Boolean(master),
+      computerButton: Boolean(computerButton),
+      tabs: [...document.querySelectorAll('[aria-label="Settings sections"] button')].map((button) => button.textContent?.trim()),
+      heading: document.querySelector('main h1')?.textContent?.trim(),
+      masterChecked: master?.getAttribute('aria-checked'),
+      harnessesHidden: !document.querySelector('[aria-label="Computer Use harness settings"]'),
+      capabilitiesHidden: !document.querySelector('[aria-label="Computer Use capabilities"]'),
+    };
+  })()`) as { master: boolean; computerButton: boolean; tabs: string[]; heading?: string; masterChecked: string | null; harnessesHidden: boolean; capabilitiesHidden: boolean };
+  if (!computerUseSettingsUI.master || computerUseSettingsUI.masterChecked !== "false"
+    || !computerUseSettingsUI.harnessesHidden || !computerUseSettingsUI.capabilitiesHidden) {
+    throw new Error(`packaged Computer Use settings controls did not render with smart defaults: ${JSON.stringify(computerUseSettingsUI)}`);
+  }
+  smokeStage("computer-settings-complete");
   const initial = await runtime!.request("workspace_snapshot", {}, 5_000) as Record<string, JsonValue>;
   if (!Array.isArray(initial.projects) || initial.projects.length !== 0) throw new Error("smoke runtime was not isolated from the user's workspace");
   const automation = await runtime!.request("create_automation", {
@@ -655,7 +733,8 @@ async function runAppSmoke(): Promise<void> {
   if (!projectlessUI.collapsed || !projectlessUI.pinned || !projectlessUI.renamed || !projectlessUI.deleted) {
     throw new Error(`projectless chat behaviors failed: ${JSON.stringify(projectlessUI)}`);
   }
-  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voicePlayback, voiceSettingsUI, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, automation: true, emptyChatUI, gitUI, projectlessUI })}\n`);
+  smokeStage("complete");
+  process.stdout.write(`MAXX_APP_SMOKE ${JSON.stringify({ ok: true, ...state, voicePlayback, voiceSettingsUI, computerUseSettingsUI: true, computerUseRuntime: true, runtimeAck: true, runtimeProvider: "hermes", runtimeModel: HERMES_SMOKE_MODEL, annotationPersisted, isolatedWorkspace: true, automation: true, emptyChatUI, gitUI, projectlessUI })}\n`);
 }
 
 async function runBrowserSmoke(): Promise<void> {
@@ -1152,8 +1231,25 @@ else {
     }
     await initializeUpdater();
     app.on("activate", () => { if (!mainWindow) void createWindow(); else mainWindow.show(); });
-  }).catch((error) => { dialog.showErrorBox("Maxx could not start", String(error)); app.quit(); });
-  app.on("before-quit", () => { quitting = true; browser?.shutdown(); runtime?.shutdown(); });
+  }).catch((error) => {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    process.stderr.write(`MAXX_STARTUP_FAILED ${detail}\n`);
+    if (smokeMode) {
+      app.exit(1);
+      return;
+    }
+    dialog.showErrorBox("Maxx could not start", detail);
+    app.quit();
+  });
+  app.on("before-quit", (event) => {
+    quitting = true;
+    browser?.shutdown();
+    runtime?.shutdown();
+    if (quitCleanupStarted || !computerUseHost) return;
+    event.preventDefault();
+    quitCleanupStarted = true;
+    void computerUseHost.stop().finally(() => app.quit());
+  });
   app.on("quit", () => runtime?.terminate());
   app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 }

@@ -1,3 +1,9 @@
 allowBuilds:
   electron: true
   electron-winstaller: false
+supportedArchitectures:
+  os:
+    - darwin
+  cpu:
+    - arm64
+    - x64
