@@ -7,6 +7,7 @@ import {
 } from "react";
 import { AgentDefinition } from "../contract/types";
 import { splitMentions } from "../mentions";
+import { Textarea } from "./ui/textarea";
 
 /**
  * Composer textarea with live @mention highlighting. The textarea's own text is
@@ -41,11 +42,20 @@ export const MentionTextarea = forwardRef<
   useEffect(syncScroll);
 
   return (
-    <div className="composer-input">
-      <div ref={mirrorRef} className="composer-input-mirror" aria-hidden="true">
+    <div className="relative flex flex-col">
+      <div
+        ref={mirrorRef}
+        className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-0.5 pt-0.5 pb-1.5 leading-normal text-foreground"
+        aria-hidden="true"
+      >
         {segments.map((segment, index) =>
           segment.kind === "mention" ? (
-            <span key={index} className="composer-mention">{segment.text}</span>
+            <span
+              key={index}
+              className="rounded bg-primary/15 text-primary box-decoration-clone shadow-[0_0_0_2.5px_color-mix(in_oklch,var(--primary)_15%,transparent)]"
+            >
+              {segment.text}
+            </span>
           ) : (
             <span key={index}>{segment.text}</span>
           ),
@@ -53,8 +63,10 @@ export const MentionTextarea = forwardRef<
         {/* Keeps a trailing newline from collapsing in the mirror. */}
         {"​"}
       </div>
-      <textarea
+      <Textarea
         ref={setRefs}
+        variant="composer"
+        className="relative min-h-6 max-h-45 resize-none px-0.5 pt-0.5 pb-1.5 leading-normal text-transparent caret-foreground"
         value={value}
         onScroll={(event) => {
           syncScroll();

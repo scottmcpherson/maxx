@@ -31,6 +31,12 @@ export const Icons = {
       <path d="m15.5 4.5 4 4M10 14l1-4 6.5-6.5a2 2 0 0 1 3 3L14 13l-4 1Z" />
     </IconBase>
   ),
+  pencil: (props: IconProps) => (
+    <IconBase {...props}>
+      <path d="m4 20 1.25-4.75L16.9 3.6a2.1 2.1 0 0 1 3 3L8.25 18.25 4 20Z" />
+      <path d="m14.75 5.75 3.5 3.5M5.25 15.25l3 3" />
+    </IconBase>
+  ),
   search: (props: IconProps) => (
     <IconBase {...props}><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></IconBase>
   ),

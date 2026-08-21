@@ -14,6 +14,27 @@ import { LOCAL_HOST_ID } from "../host/session";
 import { useAppStore } from "../store/appStore";
 import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 type ScheduleType = AutomationSchedule["type"];
 
@@ -137,7 +158,6 @@ function errorMessage(error: unknown): string {
 }
 
 export function AutomationsView() {
-  const sidebarOpen = useAppStore((state) => state.sidebarOpen);
   const setAutomationsOpen = useAppStore((state) => state.setAutomationsOpen);
   const workspace = useAppStore((state) => state.workspace);
   const refreshWorkspace = useAppStore((state) => state.refresh);
@@ -149,6 +169,7 @@ export function AutomationsView() {
   const [pendingID, setPendingID] = useState<string | null>(null);
   const [editingID, setEditingID] = useState<string | null>(null);
   const [draft, setDraft] = useState<AutomationDraft | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Automation | null>(null);
 
   const providerOptions = useMemo(() => {
     const configured = workspace?.providerProfiles
@@ -260,10 +281,16 @@ export function AutomationsView() {
   };
 
   const remove = (automation: Automation) => {
-    if (typeof window !== "undefined" && !window.confirm(`Delete “${automation.title}”?`)) return;
+    setDeleteTarget(automation);
+  };
+
+  const confirmRemove = async () => {
+    const automation = deleteTarget;
+    if (!automation) return;
     void withPending(automation.id, async () => {
       await ipc.deleteAutomation(automation.id);
     });
+    setDeleteTarget(null);
   };
 
   const openAutomationChat = async (automation: Automation) => {
@@ -305,65 +332,145 @@ export function AutomationsView() {
   };
 
   return (
-    <main className="automations-view">
-      <header className={`automations-header${sidebarOpen ? "" : " sidebar-closed"}`} onMouseDown={beginWindowDrag}>
-        <button type="button" className="agents-back" onClick={() => setAutomationsOpen(false)}>
-          <Icons.chevronLeft size={15} />
-          Back
-        </button>
-        <div className="automations-header-title"><Icons.clock size={16} /> Automations</div>
+    <main className="flex min-h-0 flex-1 flex-col">
+      <header className="flex h-12 shrink-0 items-center border-b px-4" onMouseDown={beginWindowDrag}>
         {!draft && (
-          <button type="button" className="agents-primary-button automations-new-button" onClick={openNew}>
-            <Icons.plus size={14} /> New automation
-          </button>
+          <Button type="button" className="ml-auto" onClick={openNew}><Icons.plus data-icon="inline-start" /> New automation</Button>
         )}
       </header>
 
-      <div className="automations-content">
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
         {draft ? (
-          <form className="automation-editor" onSubmit={(event) => void submit(event)}>
-            <div className="settings-content-header automation-editor-header">
+          <form className="mx-auto flex max-w-3xl flex-col gap-6" onSubmit={(event) => void submit(event)}>
+            <div className="flex items-start justify-between gap-4">
               <div>
-                <h1>{editingID ? "Edit automation" : "New automation"}</h1>
-                <p>Maxx runs schedules independently of the harness that created them.</p>
+                <h1 className="text-xl font-semibold">{editingID ? "Edit automation" : "New automation"}</h1>
+                <p className="text-sm text-muted-foreground">Maxx runs schedules independently of the harness that created them.</p>
               </div>
-              <button type="button" className="settings-secondary-button" onClick={closeEditor}>Cancel</button>
+              <Button type="button" variant="outline" onClick={closeEditor}>Cancel</Button>
             </div>
-            <label className="agent-field"><span>Name</span><input value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} placeholder="Walk the dog" autoFocus /></label>
-            <label className="agent-field"><span>What should happen?</span><textarea value={draft.prompt} onChange={(event) => updateDraft("prompt", event.target.value)} placeholder={draft.kind === "notification" ? "Walk the dog" : "Summarize new issues in this repository"} rows={3} /></label>
-            <fieldset className="automation-fieldset"><legend>Action</legend><div className="automation-segmented">
-              {(["notification", "agent_turn"] as const).map((kind) => <button key={kind} type="button" className={draft.kind === kind ? "selected" : ""} onClick={() => updateDraft("kind", kind)}>{displayKind(kind)}</button>)}
-            </div>{draft.kind === "agent_turn" && <div className="automation-runtime-fields"><label className="agent-field"><span>Harness</span><select value={draft.provider} onChange={(event) => updateDraft("provider", event.target.value as ChatProvider)}>{providerOptions.map((provider) => <option key={provider} value={provider}>{providerDisplayName(provider)}</option>)}</select></label><label className="agent-field"><span>Model</span><input value={draft.model} onChange={(event) => updateDraft("model", event.target.value)} placeholder="Default" /></label></div>}</fieldset>
-            <fieldset className="automation-fieldset"><legend>Schedule</legend><div className="automation-segmented">
-              {(["once", "interval", "cron"] as const).map((type) => <button key={type} type="button" className={draft.scheduleType === type ? "selected" : ""} onClick={() => updateDraft("scheduleType", type)}>{type === "once" ? "Once" : type === "interval" ? "Interval" : "Cron"}</button>)}
-            </div><div className="automation-schedule-fields">
-              {draft.scheduleType === "once" && <label className="agent-field"><span>Date and time</span><input type="datetime-local" value={draft.onceAt} onChange={(event) => updateDraft("onceAt", event.target.value)} required /></label>}
-              {draft.scheduleType === "interval" && <label className="agent-field"><span>Repeat every (minutes)</span><input type="number" min="1" step="1" value={draft.intervalMinutes} onChange={(event) => updateDraft("intervalMinutes", event.target.value)} required /></label>}
-              {draft.scheduleType === "cron" && <label className="agent-field"><span>Cron expression</span><input value={draft.cronExpression} onChange={(event) => updateDraft("cronExpression", event.target.value)} placeholder="0 9 * * 1-5" required /></label>}
-              <label className="agent-field"><span>Timezone</span><input value={draft.scheduleType === "once" ? localTimezone() : draft.timezone} onChange={(event) => updateDraft("timezone", event.target.value)} placeholder="America/New_York" disabled={draft.scheduleType === "once"} required /></label>
-            </div></fieldset>
-            {actionError && <div className="automation-error" role="alert">{actionError}</div>}
-            <div className="automation-editor-actions"><span className="automation-editor-hint">Schedules are stored by Maxx and delivered through native notifications or the selected harness.</span><button type="submit" className="agents-primary-button">{editingID ? "Save changes" : "Create automation"}</button></div>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="automation-name">Name</FieldLabel>
+                <Input id="automation-name" value={draft.title} onChange={(event) => updateDraft("title", event.target.value)} placeholder="Walk the dog" autoFocus />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="automation-prompt">What should happen?</FieldLabel>
+                <Textarea id="automation-prompt" value={draft.prompt} onChange={(event) => updateDraft("prompt", event.target.value)} placeholder={draft.kind === "notification" ? "Walk the dog" : "Summarize new issues in this repository"} rows={3} />
+              </Field>
+              <FieldSet>
+                <FieldLegend variant="label">Action</FieldLegend>
+                <ToggleGroup value={[draft.kind]} onValueChange={(value) => { if (value[0]) updateDraft("kind", value[0] as AutomationKind); }}>
+                  <ToggleGroupItem value="notification">Notification</ToggleGroupItem>
+                  <ToggleGroupItem value="agent_turn">Agent turn</ToggleGroupItem>
+                </ToggleGroup>
+                {draft.kind === "agent_turn" && (
+                  <FieldGroup className="mt-3">
+                    <Field>
+                      <FieldLabel htmlFor="automation-provider">Harness</FieldLabel>
+                      <NativeSelect id="automation-provider" value={draft.provider} onChange={(event) => updateDraft("provider", event.target.value as ChatProvider)}>
+                        {providerOptions.map((provider) => <NativeSelectOption key={provider} value={provider}>{providerDisplayName(provider)}</NativeSelectOption>)}
+                      </NativeSelect>
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="automation-model">Model</FieldLabel>
+                      <Input id="automation-model" value={draft.model} onChange={(event) => updateDraft("model", event.target.value)} placeholder="Default" />
+                    </Field>
+                  </FieldGroup>
+                )}
+              </FieldSet>
+              <FieldSet>
+                <FieldLegend variant="label">Schedule</FieldLegend>
+                <ToggleGroup value={[draft.scheduleType]} onValueChange={(value) => { if (value[0]) updateDraft("scheduleType", value[0] as ScheduleType); }}>
+                  <ToggleGroupItem value="once">Once</ToggleGroupItem>
+                  <ToggleGroupItem value="interval">Interval</ToggleGroupItem>
+                  <ToggleGroupItem value="cron">Cron</ToggleGroupItem>
+                </ToggleGroup>
+                <FieldGroup className="mt-3">
+                  {draft.scheduleType === "once" && <Field><FieldLabel htmlFor="automation-once">Date and time</FieldLabel><Input id="automation-once" type="datetime-local" value={draft.onceAt} onChange={(event) => updateDraft("onceAt", event.target.value)} required /></Field>}
+                  {draft.scheduleType === "interval" && <Field><FieldLabel htmlFor="automation-interval">Repeat every (minutes)</FieldLabel><Input id="automation-interval" type="number" min="1" step="1" value={draft.intervalMinutes} onChange={(event) => updateDraft("intervalMinutes", event.target.value)} required /></Field>}
+                  {draft.scheduleType === "cron" && <Field><FieldLabel htmlFor="automation-cron">Cron expression</FieldLabel><Input id="automation-cron" value={draft.cronExpression} onChange={(event) => updateDraft("cronExpression", event.target.value)} placeholder="0 9 * * 1-5" required /></Field>}
+                  <Field>
+                    <FieldLabel htmlFor="automation-timezone">Timezone</FieldLabel>
+                    <Input id="automation-timezone" value={draft.scheduleType === "once" ? localTimezone() : draft.timezone} onChange={(event) => updateDraft("timezone", event.target.value)} placeholder="America/New_York" disabled={draft.scheduleType === "once"} required />
+                  </Field>
+                </FieldGroup>
+              </FieldSet>
+            </FieldGroup>
+            {actionError && <Alert variant="destructive"><AlertDescription>{actionError}</AlertDescription></Alert>}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <FieldDescription>Schedules are stored by Maxx and delivered through native notifications or the selected harness.</FieldDescription>
+              <Button type="submit">{editingID ? "Save changes" : "Create automation"}</Button>
+            </div>
           </form>
         ) : (
-          <div className="automations-list-wrap">
-            <div className="settings-content-header automations-content-header"><div><h1>Automations</h1><p>Schedule notifications and agent turns across all of your harnesses.</p></div></div>
-            {actionError && <div className="automation-error" role="alert">{actionError}</div>}
-            {loading && <div className="automation-state" role="status">Loading automations…</div>}
-            {!loading && loadError && <div className="automation-state automation-state-error" role="alert"><p>Couldn’t load automations.</p><small>{loadError}</small><button type="button" className="settings-secondary-button" onClick={() => void load()}>Try again</button></div>}
-            {!loading && !loadError && automations.length === 0 && <div className="automation-state automation-empty"><Icons.clock size={28} /><h2>No automations yet</h2><p>Create a notification or an agent turn that Maxx can run for you.</p><button type="button" className="agents-primary-button" onClick={openNew}><Icons.plus size={14} /> New automation</button></div>}
-            {!loading && !loadError && automations.length > 0 && <div className="automations-list">{automations.map((automation) => <AutomationCard key={automation.id} automation={automation} pending={pendingID === automation.id} onEdit={() => openEdit(automation)} onToggle={() => togglePaused(automation)} onRun={() => runNow(automation)} onDelete={() => remove(automation)} onOpenChat={() => void openAutomationChat(automation)} />)}</div>}
+          <div className="mx-auto flex max-w-4xl flex-col gap-6">
+            <div><h1 className="text-xl font-semibold">Automations</h1><p className="text-sm text-muted-foreground">Schedule notifications and agent turns across all of your harnesses.</p></div>
+            {actionError && <Alert variant="destructive"><AlertDescription>{actionError}</AlertDescription></Alert>}
+            {loading && <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Spinner /> Loading automations…</div>}
+            {!loading && loadError && <Alert variant="destructive"><AlertTitle>Couldn’t load automations.</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><small>{loadError}</small><Button type="button" variant="outline" size="sm" onClick={() => void load()}>Try again</Button></AlertDescription></Alert>}
+            {!loading && !loadError && automations.length === 0 && <Empty><EmptyHeader><EmptyMedia variant="icon"><Icons.clock /></EmptyMedia><EmptyTitle>No automations yet</EmptyTitle><EmptyDescription>Create a notification or an agent turn that Maxx can run for you.</EmptyDescription></EmptyHeader><EmptyContent><Button type="button" onClick={openNew}><Icons.plus data-icon="inline-start" /> New automation</Button></EmptyContent></Empty>}
+            {!loading && !loadError && automations.length > 0 && <div className="flex flex-col gap-3">{automations.map((automation) => <AutomationCard key={automation.id} automation={automation} pending={pendingID === automation.id} onEdit={() => openEdit(automation)} onToggle={() => togglePaused(automation)} onRun={() => runNow(automation)} onDelete={() => remove(automation)} onOpenChat={() => void openAutomationChat(automation)} />)}</div>}
           </div>
         )}
       </div>
+      <AlertDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && pendingID === null) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete automation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              “{deleteTarget?.title ?? "This automation"}” will be permanently removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={pendingID !== null}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={pendingID !== null}
+              onClick={() => void confirmRemove()}
+            >
+              Delete automation
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
 
 function AutomationCard({ automation, pending, onEdit, onToggle, onRun, onDelete, onOpenChat }: { automation: Automation; pending: boolean; onEdit: () => void; onToggle: () => void; onRun: () => void; onDelete: () => void; onOpenChat: () => void }) {
   const isPaused = automation.status === "paused";
-  return <article className="automation-card">
-    <div className="automation-card-main"><div className="automation-card-heading"><h2>{automation.title}</h2><span className={`automation-status status-${automation.status}`}><i />{automationStatusLabel(automation.status)}</span></div><p className="automation-prompt">{automation.prompt}</p><div className="automation-meta"><span><Icons.clock size={13} /> {formatAutomationSchedule(automation.schedule)}</span><span>{displayKind(automation.kind)}</span>{automation.kind === "agent_turn" && automation.runtime?.provider && <span>{providerDisplayName(automation.runtime.provider)} · {automation.runtime.model ?? "Default"}</span>}</div><div className="automation-runs"><span><b>Next</b>{formatAutomationTimestamp(automation.nextRunAt)}</span><span><b>Last run</b>{automation.lastRun ? `${automation.lastRun.status} · ${formatAutomationTimestamp(automation.lastRun.finishedAt ?? automation.lastRun.startedAt)}` : "Never"}</span></div></div>
-    <div className="automation-card-actions">{automation.kind === "agent_turn" && automation.runtime?.threadID && <button type="button" className="settings-secondary-button" onClick={onOpenChat}>Open chat</button>}<button type="button" className="settings-secondary-button" disabled={pending || automation.status === "running"} onClick={onRun}>{pending ? "Working…" : "Run now"}</button><button type="button" className="settings-secondary-button" disabled={pending || automation.status === "running" || automation.status === "completed"} onClick={onToggle}>{isPaused ? "Resume" : "Pause"}</button><button type="button" className="settings-secondary-button" disabled={pending || automation.status === "running"} onClick={onEdit}>Edit</button><button type="button" className="automation-delete-button" disabled={pending || automation.status === "running"} onClick={onDelete}>Delete</button></div>
-  </article>;
+  return (
+    <Card>
+      <CardHeader className="flex-row items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <CardTitle className="flex flex-wrap items-center gap-2"><span className="truncate">{automation.title}</span><Badge variant={automation.status === "needs_attention" ? "destructive" : automation.status === "active" ? "default" : "secondary"}>{automationStatusLabel(automation.status)}</Badge></CardTitle>
+          <CardDescription className="mt-2">{automation.prompt}</CardDescription>
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
+          <span className="flex items-center gap-1.5"><Icons.clock /> {formatAutomationSchedule(automation.schedule)}</span>
+          <span>{displayKind(automation.kind)}</span>
+          {automation.kind === "agent_turn" && automation.runtime?.provider && <span>{providerDisplayName(automation.runtime.provider)} · {automation.runtime.model ?? "Default"}</span>}
+        </div>
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <span className="flex flex-col gap-0.5"><b>Next</b><span className="text-muted-foreground">{formatAutomationTimestamp(automation.nextRunAt)}</span></span>
+          <span className="flex flex-col gap-0.5"><b>Last run</b><span className="text-muted-foreground">{automation.lastRun ? `${automation.lastRun.status} · ${formatAutomationTimestamp(automation.lastRun.finishedAt ?? automation.lastRun.startedAt)}` : "Never"}</span></span>
+        </div>
+      </CardContent>
+      <CardFooter className="flex flex-wrap justify-end gap-2">
+        {automation.kind === "agent_turn" && automation.runtime?.threadID && <Button type="button" variant="outline" size="sm" onClick={onOpenChat}>Open chat</Button>}
+        <Button type="button" variant="outline" size="sm" disabled={pending || automation.status === "running"} onClick={onRun}>{pending ? "Working…" : "Run now"}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={pending || automation.status === "running" || automation.status === "completed"} onClick={onToggle}>{isPaused ? "Resume" : "Pause"}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={pending || automation.status === "running"} onClick={onEdit}>Edit</Button>
+        <Button type="button" variant="destructive" size="sm" disabled={pending || automation.status === "running"} onClick={onDelete}>Delete</Button>
+      </CardFooter>
+    </Card>
+  );
 }

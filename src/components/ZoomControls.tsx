@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   DEFAULT_ZOOM_PERCENT,
   applyZoomPercent,
@@ -77,38 +78,35 @@ export function ZoomControls({ onReady }: ZoomControlsProps) {
   const atDefault = percent === DEFAULT_ZOOM_PERCENT;
 
   return (
-    <div className="zoom-controls" role="status" aria-live="polite" aria-label="Zoom level">
-      <span className="zoom-controls-percent">{formatZoomPercent(percent)}</span>
-      <button
+    <div className="fixed top-2.5 right-3 z-10000 flex h-8 items-center gap-0.5 rounded-lg border border-border bg-popover/95 py-0 pr-1 pl-2.5 text-popover-foreground shadow-xl animate-in fade-in slide-in-from-top-1 [-webkit-app-region:no-drag]" role="status" aria-live="polite" aria-label="Zoom level">
+      <span className="min-w-11 pe-1 text-center text-xs tabular-nums text-muted-foreground">{formatZoomPercent(percent)}</span>
+      <Button
         type="button"
-        className="zoom-controls-btn"
+        variant="outline"
+        size="icon-xs"
         title="Zoom out"
         aria-label="Zoom out"
         disabled={atMin}
         onClick={() => commit(zoomOut(percent))}
-      >
-        −
-      </button>
-      <button
+      >−</Button>
+      <Button
         type="button"
-        className="zoom-controls-btn"
+        variant="outline"
+        size="icon-xs"
         title="Zoom in"
         aria-label="Zoom in"
         disabled={atMax}
         onClick={() => commit(zoomIn(percent))}
-      >
-        +
-      </button>
-      <button
+      >+</Button>
+      <Button
         type="button"
-        className="zoom-controls-reset"
+        variant="ghost"
+        size="xs"
         title="Reset zoom"
         aria-label="Reset zoom"
         disabled={atDefault}
         onClick={() => commit(DEFAULT_ZOOM_PERCENT)}
-      >
-        Reset
-      </button>
+      >Reset</Button>
     </div>
   );
 }

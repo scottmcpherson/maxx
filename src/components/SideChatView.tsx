@@ -10,6 +10,9 @@ import { MentionTextarea } from "./MentionTextarea";
 import { QueuedMessages } from "./QueuedMessages";
 import { RuntimePicker } from "./RuntimePicker";
 import { TextSelectionPill } from "./TextSelectionPill";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { IconButton } from "@/components/ui/icon-button";
+import { Spinner } from "@/components/ui/spinner";
 
 export function SideChatView({
   project,
@@ -80,13 +83,15 @@ export function SideChatView({
   };
 
   return (
-    <div className="side-chat-view" aria-label="Side chat">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background" aria-label="Side chat">
       {rows.length === 0 ? (
-        <div className="side-chat-empty">
-          <Icons.bubble size={34} />
-          <strong>Side chat</strong>
-          <span>Ask a focused question with the full context of the primary chat.</span>
-        </div>
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><Icons.bubble /></EmptyMedia>
+            <EmptyTitle>Side chat</EmptyTitle>
+            <EmptyDescription>Ask a focused question with the full context of the primary chat.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
         <ThreadTimeline
           key={thread.id}
@@ -101,7 +106,7 @@ export function SideChatView({
         />
       )}
 
-      <footer className="side-chat-composer">
+      <footer className="flex shrink-0 flex-col gap-2 px-6 pt-2 pb-8">
         <QueuedMessages
           messages={queuedMessages}
           isRunning={isRunning}
@@ -111,7 +116,7 @@ export function SideChatView({
           onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
           onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
         />
-        <div className="composer">
+        <div className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
           <TextSelectionPill selections={pendingSelections} onClear={onClearSelections} />
           <PendingImageStrip paths={images.paths} onRemove={images.remove} />
           <MentionTextarea
@@ -129,8 +134,8 @@ export function SideChatView({
               }
             }}
           />
-          <div className="composer-toolbar">
-            <div className="composer-leading-actions">
+          <div className="flex min-h-7 items-end justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1">
               <AttachImagesButton onChoose={() => void images.choose()} />
               <RuntimePicker
                 provider={thread.provider}
@@ -141,6 +146,7 @@ export function SideChatView({
                 workingDirectory={threadWorkingDirectory(project.folderPath, thread)}
                 hostId={hostID}
                 disabled={isRunning}
+                triggerVariant="ghost"
                 onChange={(next) => void updateThreadRuntime(
                   project.id,
                   thread.id,
@@ -151,21 +157,22 @@ export function SideChatView({
                 )}
               />
             </div>
-            <div className="composer-actions">
+            <div className="flex items-center gap-2.5">
               {isRunning && (
-                <button className="send-button stop" type="button" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
-                  <Icons.stop size={14} />
-                </button>
+                <IconButton className="rounded-full" label="Stop generation" variant="destructive" size="icon-sm" onClick={() => void cancelActiveTurn(thread.id)}>
+                  <Icons.stop />
+                </IconButton>
               )}
-              <button
-                className="send-button"
-                type="button"
-                title={submitting ? "Sending message" : "Send message"}
+              <IconButton
+                label={submitting ? "Sending message" : "Send message"}
+                variant="default"
+                size="icon-sm"
+                className="rounded-full"
                 disabled={submitting || (!draft.trim() && images.paths.length === 0 && pendingSelections.length === 0)}
                 onClick={() => void submit()}
               >
-                <Icons.arrowUp size={16} />
-              </button>
+                {submitting ? <Spinner /> : <Icons.arrowUp />}
+              </IconButton>
             </div>
           </div>
         </div>

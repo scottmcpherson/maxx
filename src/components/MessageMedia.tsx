@@ -3,6 +3,9 @@ import { ipc, mediaURL } from "../ipc";
 import { isLocalHost } from "../host/session";
 import { mediaDataUrl } from "../host/mediaUpload";
 import { MessageMedia as MessageMediaValue, MessageMediaKind } from "../media";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { Skeleton } from "./ui/skeleton";
+import { cn } from "../lib/utils";
 
 interface RenderSource {
   url: string;
@@ -70,39 +73,39 @@ export function MessageMedia({
 
   if (error) {
     return (
-      <div className="message-media-unavailable" role="status">
-        <strong>Could not load {kind}</strong>
-        <span title={error}>{destination}</span>
-      </div>
+      <Alert variant="destructive" role="status" className="max-w-full">
+        <AlertTitle>Could not load {kind}</AlertTitle>
+        <AlertDescription title={error}>{destination}</AlertDescription>
+      </Alert>
     );
   }
-  if (!source) return <div className="message-media-placeholder" aria-label={`Loading ${kind}`} />;
+  if (!source) return <Skeleton className="h-45 w-full max-w-[45rem] rounded-xl" aria-label={`Loading ${kind}`} />;
 
   const label = altText || source.displayName;
   if (source.kind === "video") {
     return (
-      <figure className="message-media message-media-video">
-        <video controls preload="metadata" aria-label={label} onError={() => setError("The video could not be decoded") }>
+      <figure className="flex w-full max-w-[45rem] flex-col items-start gap-1.5">
+        <video className="block max-h-[32.5rem] w-full rounded-xl border border-border bg-muted object-contain" controls preload="metadata" aria-label={label} onError={() => setError("The video could not be decoded") }>
           <source src={source.url} />
         </video>
-        {altText && <figcaption>{altText}</figcaption>}
+        {altText && <figcaption className="text-xs leading-snug text-muted-foreground">{altText}</figcaption>}
       </figure>
     );
   }
   if (source.kind === "audio") {
     return (
-      <figure className="message-media message-media-audio">
-        {altText && <figcaption>{altText}</figcaption>}
-        <audio controls preload="metadata" aria-label={label} onError={() => setError("The audio could not be decoded") }>
+      <figure className="flex w-full max-w-[35rem] flex-col items-start gap-1.5">
+        {altText && <figcaption className="text-xs leading-snug text-muted-foreground">{altText}</figcaption>}
+        <audio className="w-full" controls preload="metadata" aria-label={label} onError={() => setError("The audio could not be decoded") }>
           <source src={source.url} />
         </audio>
       </figure>
     );
   }
   return (
-    <figure className="message-media message-media-image">
-      <img src={source.url} alt={label} onError={() => setError("The image could not be decoded")} />
-      {altText && altText !== source.displayName && <figcaption>{altText}</figcaption>}
+    <figure className="flex w-full max-w-[45rem] flex-col items-start gap-1.5">
+      <img className={cn("block max-h-[32.5rem] max-w-full rounded-xl border border-border bg-muted object-contain", source.kind === "image" && "h-auto w-auto")} src={source.url} alt={label} onError={() => setError("The image could not be decoded")} />
+      {altText && altText !== source.displayName && <figcaption className="text-xs leading-snug text-muted-foreground">{altText}</figcaption>}
     </figure>
   );
 }

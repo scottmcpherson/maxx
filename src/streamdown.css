@@ -21,8 +21,8 @@
   --color-foreground: var(--text);
   --color-muted: var(--bg-raised);
   --color-muted-foreground: var(--text-dim);
-  --color-primary: var(--purple);
-  --color-primary-foreground: #ffffff;
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
   --color-sidebar: var(--bg-card);
   --color-border: var(--border);
   --font-mono: var(--mono);

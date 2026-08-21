@@ -48,11 +48,9 @@ describe("VoiceConversationControls", () => {
   it("switches the composer action between conversation and stop", () => {
     const start = VoiceConversationActionButton({ onClick: vi.fn() });
     expect(start.props["aria-label"]).toBe("Start conversation");
-    expect(start.props.className).toContain("voice-conversation-action");
 
     const stop = VoiceConversationActionButton({ active: true, onClick: vi.fn() });
     expect(stop.props["aria-label"]).toBe("Stop conversation");
-    expect(stop.props.className).toContain("stop");
   });
 
   it("exposes manual finish and retry states", () => {

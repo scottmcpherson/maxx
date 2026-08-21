@@ -7,6 +7,26 @@ import { AGENT_COLORS, AgentAvatar } from "./AgentAvatar";
 import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
 import { RuntimePicker } from "./RuntimePicker";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Textarea } from "@/components/ui/textarea";
 
 /** Seconds since 2001-01-01, the workspace document's date encoding. */
 const appleNow = () => Date.now() / 1000 - 978_307_200;
@@ -30,8 +50,8 @@ function newAgentDraft(): AgentDefinition {
 }
 
 /**
- * Main-area agents section: a directory-style grid of agent cards, with a
- * detail editor when a card (or the ghost "new agent" card) is opened.
+ * Main-area agents section: a directory-style grid of agent cards with a
+ * shared modal editor for creating and updating agents.
  */
 export function AgentsView() {
   const workspace = useAppStore((state) => state.workspace);
@@ -40,7 +60,7 @@ export function AgentsView() {
   const sidebarOpen = useAppStore((state) => state.sidebarOpen);
   const agents = useMemo(() => workspace?.agents ?? [], [workspace]);
 
-  // null selectedID = grid; otherwise the detail editor for that agent.
+  // A selected ID opens the shared create/edit dialog over the grid.
   const [selectedID, setSelectedID] = useState<string | null>(null);
   const [draft, setDraft] = useState<AgentDefinition | null>(null);
   const [isNew, setIsNew] = useState(false);
@@ -88,8 +108,7 @@ export function AgentsView() {
       const target = event.target as HTMLElement | null;
       // Let inputs keep Escape for their own blur/cancel behaviour.
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (selectedID || isNew) backToGrid();
-      else setAgentsOpen(false);
+      if (!selectedID && !isNew) setAgentsOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -132,12 +151,7 @@ export function AgentsView() {
       ? [...agents, cleaned]
       : agents.map((agent) => (agent.id === cleaned.id ? cleaned : agent));
     await saveAgents(next);
-    if (isNew) {
-      // Return to the grid so the new card is the visible result.
-      backToGrid();
-    } else {
-      setDraft(cleaned);
-    }
+    backToGrid();
   };
 
   const remove = async () => {
@@ -146,12 +160,6 @@ export function AgentsView() {
       await saveAgents(agents.filter((agent) => agent.id !== draft.id));
     }
     backToGrid();
-  };
-
-  const shuffleColor = () => {
-    if (!draft) return;
-    const currentIndex = AGENT_COLORS.indexOf(draft.colorHex);
-    setDraft({ ...draft, colorHex: AGENT_COLORS[(currentIndex + 1) % AGENT_COLORS.length] });
   };
 
   // Copies the picked file into the backend's agent-images store; the stored
@@ -175,103 +183,121 @@ export function AgentsView() {
   const inDetail = !!draft && (isNew || !!selectedID);
 
   return (
-    <main className="agents-view">
+    <main className="flex min-h-0 flex-1 flex-col">
       {/* Same job as settings-titlebar: window drag + traffic-light clearance.
-          Page identity lives in the content header (Settings pattern), so the
-          grid does not repeat “Agents” up here. Detail mode keeps a Back control. */}
+          Page identity lives in the content header (Settings pattern). */}
       <header
-        className={`agents-header ${sidebarOpen ? "" : "sidebar-closed"}`}
+        className="flex h-12 shrink-0 items-center border-b px-4"
         onMouseDown={beginWindowDrag}
       >
-        {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
-        {inDetail ? (
-          <button type="button" className="agents-back" onClick={backToGrid}>
-            <Icons.chevronRight size={13} className="back-chevron" />
-            Agents
-          </button>
-        ) : null}
+        {!sidebarOpen && <span className="w-8" aria-hidden="true" />}
       </header>
 
-      <div className="agents-content">
-        {inDetail && draft ? (
-          <AgentEditor
-            draft={draft}
-            setDraft={setDraft}
-            isNew={isNew}
-            canSave={canSave}
-            onSave={() => void save()}
-            onRemove={() => void remove()}
-            onShuffleColor={shuffleColor}
-            onPickImage={() => void pickImage()}
-            onClearImage={clearImage}
-          />
-        ) : (
-          <div className="agents-content-inner">
-            <header className="settings-content-header agents-content-header">
-              <div>
-                <h1>Agents</h1>
-                <p>
-                  Preconfigured personas with pinned instructions and a runtime. Mention one in
-                  a thread — “@Charlie please review this” — and it replies in a side thread.
-                </p>
-              </div>
-            </header>
-            <div className="agents-grid">
-              {agents.map((agent) => {
-                const threads = threadCounts.get(agent.id) ?? 0;
-                return (
-                  <button
-                    key={agent.id}
-                    type="button"
-                    className="agent-card"
-                    onClick={() => {
-                      setIsNew(false);
-                      setSelectedID(agent.id);
-                    }}
-                  >
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
+        <div className="mx-auto flex max-w-5xl flex-col gap-6">
+          <header>
+            <div>
+              <h1 className="text-xl font-semibold">Agents</h1>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                Preconfigured personas with pinned instructions and a harness/model. Mention one in
+                a thread — “@Charlie please review this” — and it replies in a side thread.
+              </p>
+            </div>
+          </header>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {agents.map((agent) => {
+              const threads = threadCounts.get(agent.id) ?? 0;
+              return (
+                <Button
+                  key={agent.id}
+                  type="button"
+                  variant="card"
+                  className="h-56 min-w-0 flex-col items-stretch justify-start gap-4 overflow-hidden whitespace-normal p-5 text-left"
+                  onClick={() => {
+                    setIsNew(false);
+                    setSelectedID(agent.id);
+                  }}
+                >
+                  <span className="flex min-w-0 items-center gap-3">
                     <AgentAvatar
                       name={agent.name}
                       colorHex={agent.colorHex}
                       emoji={agent.emoji}
                       imagePath={agent.imagePath}
-                      size={56}
+                      size={48}
                     />
-                    <span className="agent-card-name">{agent.name}</span>
-                    <span className="agent-card-runtime">
-                      <ProviderIcon provider={agent.provider} size={12} />
-                      {providerDisplayName(agent.provider)}
-                      {agent.model && agent.model.toLowerCase() !== "default"
-                        ? ` · ${agent.model}`
-                        : ""}
+                    <span className="min-w-0 flex-1 truncate text-base font-medium">
+                      {agent.name}
                     </span>
-                    {agent.instructions.trim() && (
-                      <p className="agent-card-instructions">{agent.instructions.trim()}</p>
-                    )}
-                    <span className="agent-card-stat">
+                  </span>
+                  <span className="line-clamp-3 min-w-0 break-words text-sm leading-relaxed text-muted-foreground">
+                    {agent.instructions.trim() || "No instructions added."}
+                  </span>
+                  <span className="mt-auto flex w-full min-w-0 items-center gap-3 text-xs text-muted-foreground">
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <ProviderIcon provider={agent.provider} size={12} />
+                      <span className="truncate">
+                        {providerDisplayName(agent.provider)}
+                        {agent.model && agent.model.toLowerCase() !== "default"
+                          ? ` · ${agent.model}`
+                          : ""}
+                      </span>
+                    </span>
+                    <span className="shrink-0">
                       {threads === 0
                         ? "Not used yet"
                         : threads === 1
                           ? "1 thread"
                           : `${threads} threads`}
                     </span>
-                  </button>
-                );
-              })}
-              <button type="button" className="agent-card agent-card-ghost" onClick={startNew}>
-                <span className="agent-card-ghost-plus">
-                  <Icons.plus size={19} />
-                </span>
-                <span className="agent-card-name">New agent</span>
-                <span className="agent-card-instructions">
-                  {agents.length === 0
-                    ? "Create your first agent persona."
-                    : "Add another persona."}
-                </span>
-              </button>
-            </div>
+                  </span>
+                </Button>
+              );
+            })}
+            <Button
+              type="button"
+              variant="outline"
+              className="h-auto min-h-56 flex-col items-center justify-center gap-3 border-dashed p-5"
+              onClick={startNew}
+            >
+              <span className="flex size-10 items-center justify-center rounded-full bg-muted">
+                <Icons.plus />
+              </span>
+              <span className="text-base font-medium">New agent</span>
+              <span className="text-center text-sm text-muted-foreground">
+                {agents.length === 0
+                  ? "Create your first agent persona."
+                  : "Add another persona."}
+              </span>
+            </Button>
           </div>
-        )}
+        </div>
       </div>
+
+      <Dialog
+        open={inDetail}
+        onOpenChange={(open) => {
+          if (!open) backToGrid();
+        }}
+      >
+        <DialogContent
+          className="flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-2xl"
+          aria-label="Agent editor"
+        >
+          {draft && (
+            <AgentEditor
+              draft={draft}
+              setDraft={setDraft}
+              isNew={isNew}
+              canSave={canSave}
+              onSave={() => void save()}
+              onRemove={() => void remove()}
+              onPickImage={() => void pickImage()}
+              onClearImage={clearImage}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }
@@ -283,7 +309,6 @@ function AgentEditor({
   canSave,
   onSave,
   onRemove,
-  onShuffleColor,
   onPickImage,
   onClearImage,
 }: {
@@ -293,58 +318,119 @@ function AgentEditor({
   canSave: boolean;
   onSave: () => void;
   onRemove: () => void;
-  onShuffleColor: () => void;
   onPickImage: () => void;
   onClearImage: () => void;
 }) {
   const workspace = useAppStore((state) => state.workspace);
+  const [avatarEditorOpen, setAvatarEditorOpen] = useState(false);
   return (
-    <section className="agent-editor" aria-label="Agent editor">
-      <div className="agent-editor-identity">
-        <div className="agent-editor-avatar">
-          <button
-            type="button"
-            className="agent-avatar-pick"
-            title="Choose image"
-            aria-label="Choose agent image"
-            onClick={onPickImage}
-          >
+    <form
+      className="flex min-h-0 flex-1 flex-col gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave();
+      }}
+    >
+      <DialogHeader className="shrink-0 pr-8">
+        <DialogTitle>{isNew ? "Create agent" : "Edit agent"}</DialogTitle>
+        <DialogDescription>Configure this agent's persona and harness/model.</DialogDescription>
+      </DialogHeader>
+      <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto md:grid-cols-[9rem_minmax(0,1fr)]">
+        <div className="flex justify-center md:sticky md:top-0 md:items-start">
+          <div className="relative w-fit">
             <AgentAvatar
               name={draft.name || "?"}
               colorHex={draft.colorHex}
               emoji={draft.emoji}
               imagePath={draft.imagePath}
-              size={64}
+              size={112}
             />
-          </button>
-          {draft.imagePath ? (
-            <button
-              type="button"
-              className="agent-avatar-shuffle"
-              title="Remove image"
-              aria-label="Remove agent image"
-              onClick={onClearImage}
-            >
-              <Icons.close size={11} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="agent-avatar-shuffle"
-              title="Shuffle avatar color"
-              aria-label="Shuffle avatar color"
-              onClick={onShuffleColor}
-            >
-              <Icons.shuffle size={12} />
-            </button>
-          )}
+            <Popover open={avatarEditorOpen} onOpenChange={setAvatarEditorOpen}>
+              <PopoverTrigger
+                render={(
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="icon"
+                    className="absolute right-0 bottom-0 rounded-full"
+                    title="Edit avatar"
+                    aria-label="Edit agent avatar"
+                  />
+                )}
+              >
+                <Icons.pencil />
+              </PopoverTrigger>
+              <PopoverContent side="right" align="center" className="w-64">
+                <PopoverHeader>
+                  <PopoverTitle>Edit avatar</PopoverTitle>
+                  <PopoverDescription>Choose a color or use a custom image.</PopoverDescription>
+                </PopoverHeader>
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">Color</span>
+                  <div className="grid grid-cols-5 gap-1">
+                    {AGENT_COLORS.map((color) => {
+                      const selected = !draft.imagePath && draft.colorHex === color;
+                      return (
+                        <Button
+                          key={color}
+                          type="button"
+                          variant={selected ? "secondary" : "ghost"}
+                          size="icon-sm"
+                          className="rounded-full"
+                          aria-label={`Use avatar color ${color}`}
+                          aria-pressed={selected}
+                          onClick={() => {
+                            setDraft((current) => current
+                              ? { ...current, colorHex: color, imagePath: null }
+                              : current);
+                          }}
+                        >
+                          <span
+                            className="size-5 rounded-full"
+                            style={{ backgroundColor: color }}
+                            aria-hidden="true"
+                          />
+                        </Button>
+                      );
+                    })}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      setAvatarEditorOpen(false);
+                      onPickImage();
+                    }}
+                  >
+                    Choose image…
+                  </Button>
+                  {draft.imagePath && (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      className="w-full"
+                      onClick={() => {
+                        onClearImage();
+                        setAvatarEditorOpen(false);
+                      }}
+                    >
+                      Remove image
+                    </Button>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
+          </div>
         </div>
-        <div className="agent-editor-identity-fields">
-          <label className="agent-field">
-            <span>Name</span>
-            <input
+
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="agent-name">Name</FieldLabel>
+            <Input
               // Remount per draft so autoFocus fires for each new agent.
               key={draft.id}
+              id="agent-name"
               value={draft.name}
               placeholder="Charlie"
               aria-label="Agent name"
@@ -355,67 +441,60 @@ function AgentEditor({
                   : current)
               }
             />
-          </label>
-        </div>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="agent-instructions">Instructions</FieldLabel>
+            <Textarea
+              id="agent-instructions"
+              className="min-h-36"
+              value={draft.instructions}
+              rows={7}
+              placeholder="You are Charlie, a meticulous code reviewer. Focus on correctness and name concrete risks."
+              aria-label="Agent instructions"
+              onChange={(event) =>
+                setDraft((current) => current
+                  ? { ...current, instructions: event.target.value }
+                  : current)
+              }
+            />
+            <FieldDescription>
+              Added to the system prompt whenever this agent handles a turn.
+            </FieldDescription>
+          </Field>
+
+          <Field>
+            <FieldLabel>Harness/Model</FieldLabel>
+            <RuntimePicker
+              provider={draft.provider}
+              model={draft.model}
+              effort={draft.effort}
+              speed={draft.speed}
+              profiles={workspace?.providerProfiles ?? []}
+              placement="top"
+              triggerShowsProvider
+              onChange={(next) =>
+                setDraft((current) => current
+                  ? {
+                      ...current,
+                      provider: next.provider,
+                      model: next.model,
+                      effort: next.effort ?? null,
+                      speed: next.speed ?? null,
+                    }
+                  : current)
+              }
+            />
+          </Field>
+        </FieldGroup>
       </div>
-
-      <label className="agent-field">
-        <span>Instructions</span>
-        <textarea
-          value={draft.instructions}
-          rows={7}
-          placeholder="You are Charlie, a meticulous code reviewer. Focus on correctness and name concrete risks."
-          aria-label="Agent instructions"
-          onChange={(event) =>
-            setDraft((current) => current
-              ? { ...current, instructions: event.target.value }
-              : current)
-          }
-        />
-        <p className="agent-field-hint">
-          Added to the system prompt whenever this agent handles a turn.
-        </p>
-      </label>
-
-      <div className="agent-field">
-        <span>Runtime</span>
-        <div className="runtime-picker-field">
-          <RuntimePicker
-            provider={draft.provider}
-            model={draft.model}
-            effort={draft.effort}
-            speed={draft.speed}
-            profiles={workspace?.providerProfiles ?? []}
-            placement="bottom"
-            triggerShowsProvider
-            onChange={(next) =>
-              setDraft((current) => current
-                ? {
-                    ...current,
-                    provider: next.provider,
-                    model: next.model,
-                    effort: next.effort ?? null,
-                    speed: next.speed ?? null,
-                  }
-                : current)
-            }
-          />
-        </div>
-      </div>
-
-      <div className="agent-editor-actions">
-        <button type="button" className="agents-danger-button" onClick={onRemove}>
+      <DialogFooter className="shrink-0 flex-row items-center justify-between gap-3">
+        <Button type="button" variant="destructive" onClick={onRemove}>
           {isNew ? "Discard" : "Delete agent"}
-        </button>
-        <button
-          type="button"
-          className="agents-primary-button"
-          disabled={!canSave}
-          onClick={onSave}
-        >
+        </Button>
+        <Button type="submit" disabled={!canSave}>
           {isNew ? "Create agent" : "Save changes"}
-        </button>
-      </div>
-    </section>
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }

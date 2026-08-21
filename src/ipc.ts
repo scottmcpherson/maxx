@@ -12,7 +12,15 @@ import type {
   BrowserTabSummary,
   BrowserUiReveal,
 } from "./browser";
-import { isMenuActionID, type MenuActionID, type MenuActionPayload } from "./menu";
+import {
+  isMenuActionID,
+  isNativeContextMenuAction,
+  isNativeContextMenuKind,
+  type MenuActionID,
+  type MenuActionPayload,
+  type NativeContextMenuPayload,
+  type NativeContextMenuRequest,
+} from "./menu";
 import type { UpdateStatus } from "./updates";
 import type {
   VoiceCredentialStatus,
@@ -536,10 +544,32 @@ export const ipc = {
   setShortcutAccelerators: (toggleSidebar: string | null, toggleBrowser: string | null) =>
     invoke<void>("set_shortcut_accelerators", { toggleSidebar, toggleBrowser }),
 
+  /** Opens an OS-native context menu at renderer content coordinates. */
+  openContextMenu: (request: NativeContextMenuRequest) =>
+    invoke<void>("context_menu_popup", { ...request }),
+
   /** Native menu / tray activations. Unknown ids are dropped, not thrown on. */
   onMenuAction: (handler: (id: MenuActionID) => void): Promise<UnlistenFn> =>
     listen<MenuActionPayload>("menu://action", (payload) => {
       if (isMenuActionID(payload.id)) handler(payload.id);
+    }),
+  onContextMenuAction: (handler: (payload: NativeContextMenuPayload) => void): Promise<UnlistenFn> =>
+    listen<unknown>("context-menu://action", (payload) => {
+      if (!payload || typeof payload !== "object") return;
+      const value = payload as Record<string, unknown>;
+      if (!isNativeContextMenuKind(value.kind) || !isNativeContextMenuAction(value.action)) return;
+      if (typeof value.projectID !== "string" || !value.projectID) return;
+      if (value.hostID !== undefined && typeof value.hostID !== "string") return;
+      if (value.threadID !== undefined && typeof value.threadID !== "string") return;
+      if (value.pinned !== undefined && typeof value.pinned !== "boolean") return;
+      handler({
+        kind: value.kind,
+        action: value.action,
+        projectID: value.projectID,
+        hostID: value.hostID,
+        threadID: value.threadID,
+        pinned: value.pinned,
+      });
     }),
   onUpdateStatus: (handler: (status: UpdateStatus) => void): Promise<UnlistenFn> =>
     listen<UpdateStatus>("updater://status", handler),

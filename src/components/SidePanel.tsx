@@ -21,11 +21,46 @@ import {
 import { useAppStore } from "../store/appStore";
 import { appendChatTextSelection } from "../sideChat";
 import { beginWindowDrag } from "../windowDrag";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Empty,
+  EmptyContent,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { IconButton } from "@/components/ui/icon-button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { Spinner } from "@/components/ui/spinner";
 import { Icons } from "./Icons";
 import { ShellTerminalView } from "./ShellTerminalView";
 import { SideChatView } from "./SideChatView";
 
 const EMPTY_ANNOTATIONS: BrowserAnnotation[] = [];
+
+function measureVisibleBrowserBounds(stage: HTMLElement): { x: number; y: number; width: number; height: number } {
+  const stageRect = stage.getBoundingClientRect();
+  const shellRect = stage.closest<HTMLElement>(".browser-shell")?.getBoundingClientRect();
+  const left = Math.max(0, stageRect.left, shellRect?.left ?? 0);
+  const top = Math.max(0, stageRect.top, shellRect?.top ?? 0);
+  const right = Math.min(window.innerWidth, stageRect.right, shellRect?.right ?? window.innerWidth);
+  const bottom = Math.min(window.innerHeight, stageRect.bottom, shellRect?.bottom ?? window.innerHeight);
+
+  return {
+    x: Math.round(left),
+    y: Math.round(top),
+    width: Math.max(0, Math.round(right - left)),
+    height: Math.max(0, Math.round(bottom - top)),
+  };
+}
 
 function tabWithNativeState(tab: BrowserTabSummary, state: BrowserNativeState): BrowserTabSummary {
   return {
@@ -42,6 +77,7 @@ function tabWithNativeState(tab: BrowserTabSummary, state: BrowserNativeState): 
 export function SidePanel({
   threadID,
   showContent,
+  animating,
   expanded,
   onToggleExpanded,
 }: {
@@ -119,7 +155,6 @@ export function SidePanel({
   const [dropTarget, setDropTarget] = useState<{ tabID: string; edge: BrowserTabDropEdge } | null>(null);
   const [tabOverflow, setTabOverflow] = useState({ left: false, right: false });
   const [addMenuOpen, setAddMenuOpen] = useState(false);
-  const addMenuRef = useRef<HTMLDivElement | null>(null);
 
   const updateTabOverflow = useCallback(() => {
     const strip = tabStripRef.current;
@@ -139,22 +174,6 @@ export function SidePanel({
   useEffect(() => {
     persistSidePanelTabState(threadID, panelState);
   }, [panelState, threadID]);
-
-  useEffect(() => {
-    if (!addMenuOpen) return;
-    const dismiss = (event: PointerEvent) => {
-      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
-    };
-    const dismissWithEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAddMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", dismiss);
-    document.addEventListener("keydown", dismissWithEscape);
-    return () => {
-      document.removeEventListener("pointerdown", dismiss);
-      document.removeEventListener("keydown", dismissWithEscape);
-    };
-  }, [addMenuOpen]);
 
   useEffect(() => {
     if ((!terminalMode && selectedTabID) || !annotationMode) return;
@@ -288,20 +307,40 @@ export function SidePanel({
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    let frame = 0;
+    const shell = stage.closest<HTMLElement>(".browser-shell");
+    let scheduledFrame = 0;
+    let transitionFrame = 0;
+    let previousBounds = "";
+    const publishNow = (): void => {
+      const bounds = measureVisibleBrowserBounds(stage);
+      const serialized = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
+      if (serialized === previousBounds) return;
+      previousBounds = serialized;
+      void ipc.browserViewBounds(bounds);
+    };
     const publish = (): void => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const rect = stage.getBoundingClientRect();
-        void ipc.browserViewBounds({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-      });
+      cancelAnimationFrame(scheduledFrame);
+      scheduledFrame = requestAnimationFrame(publishNow);
     };
     const observer = new ResizeObserver(publish);
     observer.observe(stage);
+    if (shell) observer.observe(shell);
     window.addEventListener("resize", publish);
     publish();
-    return () => { cancelAnimationFrame(frame); observer.disconnect(); window.removeEventListener("resize", publish); };
-  }, [annotations.length, selectedTabID, surfaceError]);
+    if (animating) {
+      const followTransition = (): void => {
+        publishNow();
+        transitionFrame = requestAnimationFrame(followTransition);
+      };
+      transitionFrame = requestAnimationFrame(followTransition);
+    }
+    return () => {
+      cancelAnimationFrame(scheduledFrame);
+      cancelAnimationFrame(transitionFrame);
+      observer.disconnect();
+      window.removeEventListener("resize", publish);
+    };
+  }, [animating, annotations.length, selectedTabID, surfaceError]);
 
   useEffect(() => {
     void ipc.browserViewVisible(showContent && Boolean(selectedTabID));
@@ -652,90 +691,90 @@ export function SidePanel({
                         : <Icons.globe size={12} />}
                     <span className="browser-tab-title">{title}</span>
                     {browserTab?.controllerSessionId && <span className="browser-agent-control" title="Agent controls this tab" />}
-                    <button className="browser-tab-close" type="button" title="Close tab"
+                    <Button className="browser-tab-close" variant="ghost" size="icon-xs" type="button" title="Close tab"
                       aria-label={`Close ${title}`}
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => { event.stopPropagation(); void closeTab(panelTab); }}>
-                      <Icons.close size={12} />
-                    </button>
+                      <Icons.close />
+                    </Button>
                   </div>
                 );
               })}
             </div>
           </div>
           {panelTabs.length > 0 && (
-            <div className="side-panel-add" ref={addMenuRef}>
-              <button className="icon-button browser-new-tab" type="button" title="New tab" aria-label="New tab"
-                aria-haspopup="menu" aria-expanded={addMenuOpen}
-                onClick={() => setAddMenuOpen((open) => !open)}><Icons.plus size={13} /></button>
-              {addMenuOpen && (
-                <div className="side-panel-add-menu" role="menu" aria-label="New tab type">
-                  <button type="button" role="menuitem" onClick={() => void openTab()}>
-                    <Icons.globe size={15} /><span>Browser</span>
-                  </button>
-                  <button type="button" role="menuitem" onClick={openTerminalTab}>
-                    <Icons.terminal size={15} /><span>Terminal</span>
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => void openSideChatTab()}>
-                    <Icons.bubble size={15} /><span>Side chat</span>
-                  </button>
-                </div>
-              )}
-            </div>
+            <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen}>
+              <DropdownMenuTrigger
+                render={<Button className="browser-new-tab" variant="ghost" size="icon-sm" aria-label="New tab" />}
+              >
+                <Icons.plus />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" aria-label="New tab type">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={() => void openTab()}>
+                    <Icons.globe /><span>Browser</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={openTerminalTab}>
+                    <Icons.terminal /><span>Terminal</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void openSideChatTab()}>
+                    <Icons.bubble /><span>Side chat</span>
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
-        <button
-          className={`icon-button browser-expand-toggle${expanded ? " is-active" : ""}`}
-          type="button"
-          title={expanded ? "Restore right panel" : "Expand right panel"}
-          aria-label={expanded ? "Restore right panel" : "Expand right panel"}
+        <IconButton
+          className="browser-expand-toggle"
+          label={expanded ? "Restore right panel" : "Expand right panel"}
           aria-pressed={expanded}
           onClick={onToggleExpanded}
         >
-          {expanded ? <Icons.collapse size={13} /> : <Icons.expand size={13} />}
-        </button>
+          {expanded ? <Icons.collapse /> : <Icons.expand />}
+        </IconButton>
       </div>
 
       {selectedPanelTab?.type === "browser" && (annotationMode ? (
         <div className="browser-annotation-toolbar">
           <div className="browser-annotation-toolbar-actions">
-            <button type="button" className="icon-button" title="Cancel annotations" aria-label="Cancel annotations" onClick={cancelAnnotations}>
-              <Icons.close size={14} />
-            </button>
-            <button type="button" className="icon-button" title="Clear annotations" aria-label="Clear annotations"
+            <IconButton label="Cancel annotations" onClick={cancelAnnotations}>
+              <Icons.close />
+            </IconButton>
+            <IconButton label="Clear annotations"
               disabled={annotations.length === 0} onClick={() => clearBrowserAnnotations(threadID)}>
-              <Icons.trash size={14} />
-            </button>
+              <Icons.trash />
+            </IconButton>
           </div>
           <span className="browser-annotation-toolbar-title">Annotating <span>•</span> {annotationLocation}</span>
-          <button type="button" className="browser-annotation-send"
+          <Button type="button" size="sm"
             disabled={annotations.length === 0 || turnRunning || submittingAnnotations}
             aria-busy={submittingAnnotations} onClick={() => void submitAnnotations()}>
+            {submittingAnnotations && <Spinner data-icon="inline-start" />}
             {submittingAnnotations ? "Sending…" : <>Send <span>{annotations.length}</span></>}
-          </button>
+          </Button>
         </div>
       ) : (
       <form className="browser-navbar" onSubmit={submitAddress}>
-        <button type="button" className="icon-button" title="Back" aria-label="Back" disabled={!selectedTab?.canGoBack}
-          onClick={() => selectedTabID && void ipc.browserUiBack(selectedTabID)}><Icons.chevronLeft size={14} /></button>
-        <button type="button" className="icon-button" title="Forward" aria-label="Forward" disabled={!selectedTab?.canGoForward}
-          onClick={() => selectedTabID && void ipc.browserUiForward(selectedTabID)}><Icons.chevronRight size={14} /></button>
-        <button type="button" className="icon-button" title="Reload" aria-label="Reload" disabled={!selectedTabID}
-          onClick={() => selectedTabID && void ipc.browserUiReload(selectedTabID)}><Icons.reload size={13} /></button>
-        <input ref={inputRef} className="browser-address" type="text" spellCheck={false} autoComplete="off" autoCorrect="off"
+        <IconButton label="Back" disabled={!selectedTab?.canGoBack}
+          onClick={() => selectedTabID && void ipc.browserUiBack(selectedTabID)}><Icons.chevronLeft /></IconButton>
+        <IconButton label="Forward" disabled={!selectedTab?.canGoForward}
+          onClick={() => selectedTabID && void ipc.browserUiForward(selectedTabID)}><Icons.chevronRight /></IconButton>
+        <IconButton label="Reload" disabled={!selectedTabID}
+          onClick={() => selectedTabID && void ipc.browserUiReload(selectedTabID)}><Icons.reload /></IconButton>
+        <Input ref={inputRef} className="browser-address" type="text" spellCheck={false} autoComplete="off" autoCorrect="off"
           autoCapitalize="off" aria-label="Address" placeholder="Search or enter website" value={draft}
           onFocus={(event) => event.currentTarget.select()} onChange={(event) => setDraft(event.target.value)} />
-        {(pendingNavigation || selectedTab?.loading) && <span className="browser-native-loading" aria-label="Loading" />}
+        {(pendingNavigation || selectedTab?.loading) && <Spinner className="browser-native-loading" aria-label="Loading" />}
         {!terminalMode && (
-          <button className="icon-button" type="button" title="Annotate webpage"
-            aria-label="Annotate webpage" disabled={!selectedTabID}
-            onClick={beginAnnotations}><Icons.annotation size={15} /></button>
+          <IconButton label="Annotate webpage" disabled={!selectedTabID}
+            onClick={beginAnnotations}><Icons.annotation /></IconButton>
         )}
-        <button type="button" className="icon-button" title="Fill saved Chrome password" aria-label="Fill saved password"
+        <IconButton label="Fill saved Chrome password"
           disabled={!selectedTabID} onClick={() => selectedTabID && void ipc.browserFillSavedPassword(selectedTabID)
             .then((filled) => { if (!filled) setSurfaceError("No imported password is saved for this website."); })}>
-          <Icons.lock size={13} />
-        </button>
+          <Icons.lock />
+        </IconButton>
       </form>
       ))}
 
@@ -743,39 +782,54 @@ export function SidePanel({
         <div className="browser-import-banner">
           <span><strong>Import data from Chrome</strong><small>Bring over your passwords and cookies to the built-in browser</small></span>
           {chromeImport.profiles.length > 1 && (
-            <select aria-label="Chrome profile" value={chromeProfileID ?? ""} onChange={(event) => setChromeProfileID(event.target.value)}>
-              {chromeImport.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-            </select>
+            <NativeSelect aria-label="Chrome profile" size="sm" value={chromeProfileID ?? ""} onChange={(event) => setChromeProfileID(event.target.value)}>
+              {chromeImport.profiles.map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}
+            </NativeSelect>
           )}
-          <button type="button" disabled={importingChrome} onClick={() => void importChrome()}>{importingChrome ? "Importing…" : "Import"}</button>
-          <button type="button" className="icon-button" aria-label="Dismiss Chrome import" onClick={() => setImportDismissed(true)}><Icons.close size={11} /></button>
+          <Button type="button" size="sm" disabled={importingChrome} onClick={() => void importChrome()}>
+            {importingChrome && <Spinner data-icon="inline-start" />}{importingChrome ? "Importing…" : "Import"}
+          </Button>
+          <IconButton label="Dismiss Chrome import" onClick={() => setImportDismissed(true)}><Icons.close /></IconButton>
         </div>
       )}
 
       {surfaceError && (
-        <div className="browser-context-bar">
-          <span className="browser-surface-error">{surfaceError}</span>
-        </div>
+        <Alert className="m-2" variant="destructive">
+          <AlertDescription>{surfaceError}</AlertDescription>
+        </Alert>
       )}
 
       {panelTabs.length === 0 && (
-        <div className="side-panel-empty">
-          <div className="side-panel-empty-card">
-            <span className="side-panel-empty-title">Open a tab</span>
-            <button type="button" onClick={() => void openTab()}>
-              <Icons.globe size={18} />
-              <span><strong>Browser</strong><small>Browse and annotate the web</small></span>
-            </button>
-            <button type="button" onClick={openTerminalTab}>
-              <Icons.terminal size={18} />
-              <span><strong>Terminal</strong><small>Open a shell in this project</small></span>
-            </button>
-            <button type="button" onClick={() => void openSideChatTab()}>
-              <Icons.bubble size={18} />
-              <span><strong>Side chat</strong><small>Ask with this chat’s context</small></span>
-            </button>
-          </div>
-        </div>
+        <Empty className="items-center justify-center gap-4 rounded-none px-5 text-left">
+          <EmptyHeader className="w-full max-w-md items-start gap-0">
+            <EmptyTitle className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Open a tab
+            </EmptyTitle>
+          </EmptyHeader>
+          <EmptyContent className="max-w-md items-stretch gap-3 text-left">
+            <Button className="min-h-20 w-full justify-start gap-4 rounded-xl px-4 py-3 text-left whitespace-normal" variant="card" onClick={() => void openTab()}>
+              <Icons.globe className="size-5" data-icon="inline-start" />
+              <span className="flex min-w-0 flex-col items-start gap-0.5">
+                <strong className="font-semibold text-foreground">Browser</strong>
+                <span className="text-xs font-normal text-muted-foreground">Browse and annotate the web</span>
+              </span>
+            </Button>
+            <Button className="min-h-20 w-full justify-start gap-4 rounded-xl px-4 py-3 text-left whitespace-normal" variant="card" onClick={openTerminalTab}>
+              <Icons.terminal className="size-5" data-icon="inline-start" />
+              <span className="flex min-w-0 flex-col items-start gap-0.5">
+                <strong className="font-semibold text-foreground">Terminal</strong>
+                <span className="text-xs font-normal text-muted-foreground">Open a shell in this project</span>
+              </span>
+            </Button>
+            <Button className="min-h-20 w-full justify-start gap-4 rounded-xl px-4 py-3 text-left whitespace-normal" variant="card" onClick={() => void openSideChatTab()}>
+              <Icons.bubble className="size-5" data-icon="inline-start" />
+              <span className="flex min-w-0 flex-col items-start gap-0.5">
+                <strong className="font-semibold text-foreground">Side chat</strong>
+                <span className="text-xs font-normal text-muted-foreground">Ask with this chat’s context</span>
+              </span>
+            </Button>
+          </EmptyContent>
+        </Empty>
       )}
       {selectedPanelTab?.type === "browser" && (
         <div ref={stageRef} className="browser-native-stage" aria-label="Webpage">

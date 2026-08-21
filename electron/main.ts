@@ -22,7 +22,15 @@ import {
 import { BrowserManager } from "./browser-manager.js";
 import { buildInstanceSettings } from "./build-instance.js";
 import { ChromeImporter } from "./chrome-importer.js";
-import type { BrowserAnnotationSelection, BrowserEngineContext, BrowserOperation, BrowserViewBounds, JsonValue } from "./contracts.js";
+import type {
+  BrowserAnnotationSelection,
+  BrowserEngineContext,
+  BrowserOperation,
+  BrowserViewBounds,
+  JsonValue,
+  NativeContextMenuAction,
+  NativeContextMenuRequest,
+} from "./contracts.js";
 import { SidecarClient } from "./sidecar-client.js";
 import { MaxxUpdater } from "./updater.js";
 
@@ -167,6 +175,36 @@ function installMenu(toggleSidebar?: string | null, toggleBrowser?: string | nul
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function popupNativeContextMenu(request: NativeContextMenuRequest): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const send = (action: NativeContextMenuAction): void => {
+    const payload: Record<string, JsonValue> = {
+      kind: request.kind,
+      action,
+      projectID: request.projectID,
+    };
+    if (request.hostID) payload.hostID = request.hostID;
+    if (request.threadID) payload.threadID = request.threadID;
+    if (request.pinned !== undefined) payload.pinned = request.pinned;
+    emitRenderer("context-menu://action", payload);
+  };
+  const template: Electron.MenuItemConstructorOptions[] = request.kind === "thread"
+    ? [
+      { label: request.pinned ? "Unpin chat" : "Pin chat", click: () => send("pin") },
+      { label: "Rename chat", click: () => send("rename") },
+      { type: "separator" },
+      { label: "Delete chat", click: () => send("delete") },
+    ]
+    : [
+      { label: "Remove project", click: () => send("remove_project") },
+    ];
+  const menu = Menu.buildFromTemplate(template);
+  const bounds = mainWindow.getContentBounds();
+  const x = Number.isFinite(request.x) ? Math.max(0, Math.min(Math.round(request.x), bounds.width)) : 0;
+  const y = Number.isFinite(request.y) ? Math.max(0, Math.min(Math.round(request.y), bounds.height)) : 0;
+  menu.popup({ window: mainWindow, x, y });
+}
+
 function trayIconPath(): string {
   return app.isPackaged
     ? path.join(process.resourcesPath, "assets", "tray.png")
@@ -298,7 +336,7 @@ async function runAppSmoke(): Promise<void> {
   let emptyChatUI = { heading: "", chooseProject: false, environment: false, branch: false };
   while (Date.now() < emptyChatDeadline) {
     emptyChatUI = await mainWindow!.webContents.executeJavaScript(`(() => ({
-      heading: document.querySelector('.new-agent-heading')?.textContent?.trim() ?? '',
+      heading: document.querySelector('[data-slot="new-thread-heading"]')?.textContent?.trim() ?? '',
       chooseProject: Boolean(document.querySelector('[aria-label="Choose project"]')),
       environment: Boolean(document.querySelector('[aria-label="Choose where to work"]')),
       branch: Boolean(document.querySelector('[aria-label="Choose branch"]'))
@@ -350,8 +388,10 @@ async function runAppSmoke(): Promise<void> {
       && document.querySelector('[aria-label="Text-to-speech voice"]')
       && document.querySelector('[aria-label="Voice turn detection"]')
     );
-    if (enableVoice instanceof HTMLInputElement && !enableVoice.checked) enableVoice.click();
-    document.querySelector('.settings-back')?.click();
+    if (enableVoice instanceof HTMLElement && enableVoice.getAttribute('aria-checked') !== 'true') enableVoice.click();
+    const backButton = [...document.querySelectorAll('button')]
+      .find((button) => button.textContent?.trim() === 'Back');
+    backButton?.click();
     const composerActions = await waitFor(() => {
       const dictation = document.querySelector('[aria-label="Dictate a message"]');
       const conversation = document.querySelector('[aria-label="Start conversation"]');
@@ -425,13 +465,13 @@ async function runAppSmoke(): Promise<void> {
   };
   while (Date.now() < gitDeadline) {
     gitUI = await mainWindow!.webContents.executeJavaScript(`(() => {
-      const rail = document.querySelector('.context-rail');
-      const environment = rail?.querySelector('.git-environment-section');
+      const rail = document.querySelector('[data-slot="context-rail"]');
+      const environment = rail?.querySelector('[data-slot="git-environment"]');
       const text = environment?.textContent ?? '';
       const action = Array.from(environment?.querySelectorAll('button') ?? [])
         .find((button) => button.textContent?.includes('Commit or push'));
-      if (action && !document.querySelector('.git-commit-dialog')) action.click();
-      const dialog = document.querySelector('.git-commit-dialog');
+      if (action && !document.querySelector('[data-smoke="git-commit-dialog"]')) action.click();
+      const dialog = document.querySelector('[data-smoke="git-commit-dialog"]');
       const dialogText = dialog?.textContent ?? '';
       return {
         rail: Boolean(rail),
@@ -445,7 +485,7 @@ async function runAppSmoke(): Promise<void> {
         includeUnstagedChanges: dialogText.includes('Include unstaged changes'),
         dialogActions: dialogText.includes('Commit and push') && dialogText.includes('Push'),
         manualRefresh: Boolean(environment?.querySelector('[aria-label="Refresh Git status"]')),
-        counts: environment?.querySelector('.git-change-counts')?.textContent ?? ''
+        counts: environment?.querySelector('[data-slot="git-change-counts"]')?.textContent ?? ''
       };
     })()`) as typeof gitUI;
     if (gitUI.rail && gitUI.environment && gitUI.changes && gitUI.action && !gitUI.trigger && !gitUI.popup
@@ -932,6 +972,30 @@ function registerIPC(): void {
         return chromeImporter?.import(String(params.profileId));
       case "browser_fill_saved_password":
         return browser?.fillSavedPassword(String(params.tabId)) ?? false;
+      case "context_menu_popup": {
+        const kind = params.kind;
+        if (kind !== "thread" && kind !== "project") throw new Error("Unknown context menu kind");
+        const projectID = params.projectID;
+        if (typeof projectID !== "string" || !projectID) throw new Error("Context menu project id is required");
+        const hostID = params.hostID;
+        if (hostID !== undefined && typeof hostID !== "string") throw new Error("Context menu host id must be a string");
+        const threadID = params.threadID;
+        if (kind === "thread" && (typeof threadID !== "string" || !threadID)) {
+          throw new Error("Context menu thread id is required");
+        }
+        const pinned = params.pinned;
+        if (pinned !== undefined && typeof pinned !== "boolean") throw new Error("Context menu pinned state must be boolean");
+        popupNativeContextMenu({
+          kind,
+          x: typeof params.x === "number" ? params.x : 0,
+          y: typeof params.y === "number" ? params.y : 0,
+          hostID,
+          projectID,
+          threadID: typeof threadID === "string" ? threadID : undefined,
+          pinned,
+        });
+        return null;
+      }
       case "dialog_open_project": {
         const result = await dialog.showOpenDialog(mainWindow!, { title: "Open project folder", properties: ["openDirectory"] });
         return result.canceled ? null : result.filePaths[0] ?? null;

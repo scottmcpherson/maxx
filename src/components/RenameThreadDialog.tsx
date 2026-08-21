@@ -1,8 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { XIcon } from "lucide-react";
 import { LOCAL_HOST_ID } from "../host/session";
 import { useAppStore } from "../store/appStore";
-import { Icons } from "./Icons";
 
 export function RenameThreadDialog() {
   const target = useAppStore((state) => state.renamingThread);
@@ -22,15 +33,18 @@ export function RenameThreadDialog() {
   const [title, setTitle] = useState(thread?.title ?? "");
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    setTitle(thread?.title ?? "");
+    setSaving(false);
+  }, [thread?.id, thread?.title]);
+
   useLayoutEffect(() => {
-    inputRef.current?.select();
-  }, []);
+    if (target && thread) inputRef.current?.select();
+  }, [target, thread]);
 
   useEffect(() => {
     if (target && targetWorkspace && !thread) setRenamingThread(null);
   }, [setRenamingThread, target, targetWorkspace, thread]);
-
-  if (!target || !thread) return null;
 
   const close = () => {
     if (!saving) setRenamingThread(null);
@@ -38,6 +52,7 @@ export function RenameThreadDialog() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (!target || !thread) return;
     const nextTitle = title.trim();
     if (!nextTitle || saving) return;
     if (nextTitle === thread.title) {
@@ -52,61 +67,45 @@ export function RenameThreadDialog() {
     }
   };
 
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-    }
-  };
-
   return (
-    <div className="rename-thread-backdrop" onMouseDown={close}>
-      <form
-        className="rename-thread-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="rename-thread-title"
-        onSubmit={submit}
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={handleKeyDown}
-      >
-        <header className="rename-thread-header">
-          <div>
-            <h2 id="rename-thread-title">Rename chat</h2>
-            <p>Keep it short and recognizable</p>
-          </div>
-          <button
-            type="button"
-            className="icon-button rename-thread-close"
-            aria-label="Close rename dialog"
-            onClick={close}
+    <Dialog
+      open={Boolean(target && thread)}
+      onOpenChange={(open) => {
+        if (!open) close();
+      }}
+    >
+      <DialogContent showCloseButton={false}>
+        <DialogClose
+          disabled={saving}
+          render={<Button variant="ghost" size="icon-sm" className="absolute top-2 right-2" />}
+        >
+          <XIcon />
+          <span className="sr-only">Close rename dialog</span>
+        </DialogClose>
+        <form onSubmit={submit} className="flex flex-col gap-4">
+          <DialogHeader>
+            <DialogTitle id="rename-thread-title">Rename chat</DialogTitle>
+            <DialogDescription>Keep it short and recognizable</DialogDescription>
+          </DialogHeader>
+          <Input
+            ref={inputRef}
+            autoFocus
+            value={title}
+            aria-label="Chat name"
+            spellCheck={false}
+            onChange={(event) => setTitle(event.target.value)}
             disabled={saving}
-          >
-            <Icons.close size={15} />
-          </button>
-        </header>
-        <input
-          ref={inputRef}
-          className="rename-thread-input"
-          autoFocus
-          value={title}
-          aria-label="Chat name"
-          spellCheck={false}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-        <footer className="rename-thread-actions">
-          <button type="button" className="rename-thread-button secondary" onClick={close} disabled={saving}>
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="rename-thread-button primary"
-            disabled={!title.trim() || saving}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </footer>
-      </form>
-    </div>
+          />
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={close} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!title.trim() || saving}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

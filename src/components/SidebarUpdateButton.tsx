@@ -1,5 +1,7 @@
 import { useAppStore } from "../store/appStore";
 import { shouldShowUpdateButton } from "../updates";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Icons } from "./Icons";
 
 export function SidebarUpdateButton() {
@@ -18,16 +20,17 @@ export function SidebarUpdateButton() {
       : "Update available";
 
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       className={`nav-row sidebar-update-button${downloading ? " is-downloading" : ""}`}
       disabled={downloading}
       onClick={() => void (ready ? restartToInstallUpdate() : installUpdate())}
       title={label}
     >
-      {ready ? <Icons.reload size={15} /> : <Icons.download size={15} />}
+      {downloading ? <Spinner data-icon="inline-start" /> : ready ? <Icons.reload data-icon="inline-start" /> : <Icons.download data-icon="inline-start" />}
       <span>{label}</span>
       <small>{status.version}</small>
-    </button>
+    </Button>
   );
 }

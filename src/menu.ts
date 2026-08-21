@@ -36,6 +36,40 @@ export function isMenuActionID(value: unknown): value is MenuActionID {
   return (MENU_ACTION_IDS as readonly string[]).includes(value as string);
 }
 
+/** Context actions are rendered by Electron's native Menu.popup. */
+export const NATIVE_CONTEXT_MENU_KINDS = ["thread", "project"] as const;
+export type NativeContextMenuKind = (typeof NATIVE_CONTEXT_MENU_KINDS)[number];
+
+export const NATIVE_CONTEXT_MENU_ACTIONS = ["pin", "rename", "delete", "remove_project"] as const;
+export type NativeContextMenuAction = (typeof NATIVE_CONTEXT_MENU_ACTIONS)[number];
+
+export interface NativeContextMenuRequest {
+  kind: NativeContextMenuKind;
+  x: number;
+  y: number;
+  hostID?: string;
+  projectID: string;
+  threadID?: string;
+  pinned?: boolean;
+}
+
+export interface NativeContextMenuPayload {
+  kind: NativeContextMenuKind;
+  action: NativeContextMenuAction;
+  hostID?: string;
+  projectID: string;
+  threadID?: string;
+  pinned?: boolean;
+}
+
+export function isNativeContextMenuKind(value: unknown): value is NativeContextMenuKind {
+  return (NATIVE_CONTEXT_MENU_KINDS as readonly string[]).includes(value as string);
+}
+
+export function isNativeContextMenuAction(value: unknown): value is NativeContextMenuAction {
+  return (NATIVE_CONTEXT_MENU_ACTIONS as readonly string[]).includes(value as string);
+}
+
 /**
  * Keys the native menu binds as *static* `CmdOrCtrl+<key>` accelerators.
  *

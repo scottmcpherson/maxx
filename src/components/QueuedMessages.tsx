@@ -1,6 +1,16 @@
 import type { QueuedMessage } from "../messageQueue";
 import { queuedMessageSummary } from "../messageQueue";
-import { Icons } from "./Icons";
+import { IconButton } from "./ui/icon-button";
+import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemTitle,
+} from "./ui/item";
+import { XIcon } from "lucide-react";
 
 export function QueuedMessages({
   messages,
@@ -21,47 +31,51 @@ export function QueuedMessages({
 }) {
   if (messages.length === 0) return null;
   return (
-    <div className="queued-messages" aria-label={`${messages.length} queued ${messages.length === 1 ? "message" : "messages"}`}>
+    <div className="flex flex-col gap-1.5" aria-label={`${messages.length} queued ${messages.length === 1 ? "message" : "messages"}`}>
       {messages.map((message, index) => {
         const summary = queuedMessageSummary(message);
         return (
-          <div className="queued-message" key={message.id}>
-            <span className="queued-message-position" aria-label={`Queue position ${index + 1}`}>
+          <Item key={message.id} variant="muted" size="sm" className="min-h-10 gap-2 border-border/70 px-2 py-1.5">
+            <Badge variant="outline" className="size-5 justify-center rounded-full px-0 text-[0.65rem] text-muted-foreground" aria-label={`Queue position ${index + 1}`}>
               {index + 1}
-            </span>
-            <span className="queued-message-copy" title={summary}>
-              <strong>Queued</strong>
-              <span>{summary}</span>
-            </span>
+            </Badge>
+            <ItemContent className="min-w-0 gap-0">
+              <ItemTitle className="text-xs text-muted-foreground">Queued</ItemTitle>
+              <ItemDescription className="truncate text-xs" title={summary}>{summary}</ItemDescription>
+            </ItemContent>
+            <ItemActions className="gap-1">
             {isRunning && canSteer && message.kind === "prompt" ? (
-              <button
-                className="queued-message-action"
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={actionPending}
                 title="Send this message into the active turn"
                 onClick={() => onSteer(message.id)}
               >
                 Steer
-              </button>
+              </Button>
             ) : !isRunning ? (
-              <button
-                className="queued-message-action"
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={actionPending}
                 title="Retry sending this message"
                 onClick={() => onRetry(message.id)}
               >
                 Retry
-              </button>
+              </Button>
             ) : null}
-            <button
-              className="queued-message-remove"
-              aria-label="Remove queued message"
+            <IconButton
+              label="Remove queued message"
+              tooltip="Remove from queue"
+              size="icon-xs"
               disabled={actionPending}
-              title="Remove from queue"
               onClick={() => onRemove(message.id)}
             >
-              <Icons.close size={13} />
-            </button>
-          </div>
+              <XIcon />
+            </IconButton>
+            </ItemActions>
+          </Item>
         );
       })}
     </div>

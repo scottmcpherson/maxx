@@ -6,6 +6,10 @@ import {
   isSettledUpdateStatus,
   updateStatusTone,
 } from "../updates";
+import { Alert, AlertAction, AlertDescription } from "./ui/alert";
+import { Button } from "./ui/button";
+import { XIcon } from "lucide-react";
+import { cn } from "../lib/utils";
 
 /**
  * Result of "Check for Updates…". The check is user-initiated, so it always
@@ -26,17 +30,28 @@ export function UpdateToast() {
   if (status.state === "available" || status.state === "downloading" || status.state === "ready") return null;
 
   return (
-    <div className={`update-toast tone-${updateStatusTone(status)}`} role="status" aria-live="polite">
-      <span className="update-toast-message">{describeUpdateStatus(status)}</span>
-      <button
-        type="button"
-        className="update-toast-dismiss"
-        title="Dismiss"
-        aria-label="Dismiss update status"
-        onClick={() => setUpdateStatus(null)}
-      >
-        ×
-      </button>
-    </div>
+    <Alert
+      variant={updateStatusTone(status) === "warning" ? "destructive" : "default"}
+      className={cn(
+        "fixed inset-s-4 bottom-4 z-50 flex w-fit max-w-[min(35rem,calc(100vw-2rem))] items-center gap-2 rounded-lg bg-popover px-3 py-2 text-popover-foreground shadow-lg",
+        updateStatusTone(status) === "good" && "border-primary/50 text-primary",
+      )}
+      role="status"
+      aria-live="polite"
+    >
+      <AlertDescription className="select-text text-sm">{describeUpdateStatus(status)}</AlertDescription>
+      <AlertAction>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          title="Dismiss"
+          aria-label="Dismiss update status"
+          onClick={() => setUpdateStatus(null)}
+        >
+          <XIcon />
+        </Button>
+      </AlertAction>
+    </Alert>
   );
 }

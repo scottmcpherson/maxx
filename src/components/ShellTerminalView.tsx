@@ -6,6 +6,9 @@ import { ipc } from "../ipc";
 import { createTerminalEmulator, encodeTerminalInput } from "../terminalEmulator";
 import { decodeBase64Chunks, writeTerminalBatch } from "../terminalStream";
 import { Icons } from "./Icons";
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 
 export function ShellTerminalView({
   projectID,
@@ -123,30 +126,30 @@ export function ShellTerminalView({
   }, [hostID, sessionID, status?.startedAt]);
 
   return (
-    <section className="panel-terminal" aria-label="Terminal">
+    <section className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-background [&_.terminal-emulator]:inset-[0.75rem_0.5rem_0.5rem_0.875rem]" aria-label="Terminal">
       <div ref={containerRef} className="terminal-emulator" />
       {starting && (
-        <div className="terminal-state-card" role="status">
-          <span className="loading-orb" />
+        <div className="absolute top-1/2 left-1/2 flex min-w-[min(21.875rem,calc(100%-2.75rem))] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-xl border border-border bg-card/95 p-4.5 text-center text-sm text-muted-foreground shadow-xl" role="status">
+          <Spinner />
           <strong>Opening terminal</strong>
           <span>Starting a shell in this chat’s working directory.</span>
         </div>
       )}
       {!starting && status?.state === "exited" && (
-        <div className="terminal-ended-bar" role="status">
+        <div className="absolute bottom-3.5 left-1/2 z-3 flex max-w-[calc(100%-1.75rem)] flex-wrap items-center justify-center gap-2.5 rounded-xl border border-border bg-card/95 p-2.5 text-sm text-muted-foreground shadow-xl" role="status">
           <Icons.terminal size={17} />
-          <div className="terminal-ended-copy">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-center sm:text-left">
             <strong>Terminal session ended</strong>
             <span>{error || "The shell exited."}</span>
           </div>
-          <button onClick={() => void openTerminal(true)}>Restart terminal</button>
+          <Button size="sm" onClick={() => void openTerminal(true)}>Restart terminal</Button>
         </div>
       )}
       {error && status?.state !== "exited" && (
-        <div className="terminal-error" role="alert">
-          <span>{error}</span>
-          <button onClick={() => { setError(null); void openTerminal(); }}>Try again</button>
-        </div>
+        <Alert className="absolute right-3 bottom-3 left-3 z-3" variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+          <AlertAction><Button size="sm" variant="outline" onClick={() => { setError(null); void openTerminal(); }}>Try again</Button></AlertAction>
+        </Alert>
       )}
     </section>
   );

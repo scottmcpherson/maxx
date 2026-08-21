@@ -4,6 +4,12 @@ import { projectName } from "../contract/types";
 import type { GitBranchList, GitEnvironmentMode, GitRepositoryStatus } from "../git";
 import { ipc } from "../ipc";
 import { Icons } from "./Icons";
+import { Button } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 
 export interface NewThreadHostedProject {
   project: ChatProject;
@@ -81,22 +87,6 @@ export function NewThreadContextBar({
   }, [selected?.hostId, selected?.project.id]);
 
   useEffect(() => {
-    if (!openMenu) return;
-    const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpenMenu(null);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenMenu(null);
-    };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [openMenu]);
-
-  useEffect(() => {
     if (creatingBranch) requestAnimationFrame(() => newBranchRef.current?.focus());
   }, [creatingBranch]);
 
@@ -152,52 +142,65 @@ export function NewThreadContextBar({
   const currentBranch = branches?.current ?? status?.branch ?? "Branch";
 
   return (
-    <div className="new-agent-context-row" ref={rootRef}>
-      <div className="new-agent-context-controls">
-        <div className="new-agent-context-control">
-          <div className={`new-agent-project-chip${selected ? " has-project" : ""}`}>
+    <div className="flex min-h-10 flex-wrap items-center gap-2 px-3 py-1" ref={rootRef}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div
+          className={cn(
+            "group relative flex items-center rounded-lg",
+            selected && "hover:bg-muted focus-within:bg-muted",
+          )}
+        >
+          <Popover open={openMenu === "project"} onOpenChange={(open) => setOpenMenu(open ? "project" : null)}>
             {selected && (
-              <button
+              <Button
                 type="button"
-                className="new-agent-project-clear"
+                variant="ghost"
+                size="icon-xs"
+                className="peer invisible absolute start-1 top-1/2 z-10 -translate-y-1/2 scale-80 rounded-full text-muted-foreground opacity-0 transition-[color,background-color,opacity,transform] hover:bg-foreground/25! hover:text-foreground group-hover:visible group-hover:scale-100 group-hover:opacity-100 focus-visible:visible focus-visible:scale-100 focus-visible:opacity-100"
                 aria-label={`Remove ${projectName(selected.project)} project`}
                 title="Create chat without a project"
                 disabled={disabled}
                 onClick={onClearProject}
               >
-                <Icons.close size={12} />
-              </button>
+                <Icons.close />
+              </Button>
             )}
-            <button
-              type="button"
-              className={`new-agent-context-button${openMenu === "project" ? " is-active" : ""}`}
-              aria-label="Choose project"
-              aria-expanded={openMenu === "project"}
-              disabled={disabled}
-              onClick={() => setOpenMenu((current) => current === "project" ? null : "project")}
+            <PopoverTrigger
+              render={(
+                <Button
+                  variant="ghost"
+                  className={cn(selected && "group-hover:bg-transparent peer-focus-visible:[&_svg]:opacity-0 aria-expanded:bg-transparent")}
+                  aria-label="Choose project"
+                  disabled={disabled}
+                />
+              )}
             >
-              <Icons.folder size={15} />
-              <span>{selected ? projectName(selected.project) : "Choose project"}</span>
-            </button>
-          </div>
-          {openMenu === "project" && (
-            <div className="new-agent-context-menu new-agent-project-menu" role="menu" aria-label="Projects">
-              <label className="new-agent-menu-search">
-                <Icons.search size={14} />
-                <input
+              <Icons.folder
+                data-icon="inline-start"
+                className={cn(selected && "transition-opacity group-hover:opacity-0")}
+              />
+              <span className="max-w-56 truncate">{selected ? projectName(selected.project) : "Choose project"}</span>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-80 p-2" role="menu" aria-label="Projects">
+              <Field>
+                <FieldLabel htmlFor="project-search" className="sr-only">Search projects</FieldLabel>
+                <Input
+                  id="project-search"
                   autoFocus
                   value={projectSearch}
                   placeholder="Search projects"
                   aria-label="Search projects"
                   onChange={(event) => setProjectSearch(event.target.value)}
                 />
-              </label>
-              <div className="new-agent-menu-scroll">
+              </Field>
+              <div className="mt-2 flex max-h-64 flex-col gap-1 overflow-y-auto">
                 {filteredProjects.map((item) => {
                   const checked = item.project.id === selected?.project.id && item.hostId === selected.hostId;
                   return (
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left"
                       role="menuitemradio"
                       aria-checked={checked}
                       key={`${item.hostId}:${item.project.id}`}
@@ -207,121 +210,117 @@ export function NewThreadContextBar({
                         setOpenMenu(null);
                       }}
                     >
-                      <Icons.folder size={15} />
-                      <span className="new-agent-menu-label">
-                        <b>{projectName(item.project)}</b>
-                        {item.hostId !== "local" && <small>{item.hostName}</small>}
+                      <Icons.folder data-icon="inline-start" />
+                      <span className="flex min-w-0 flex-1 flex-col text-left">
+                        <b className="truncate">{projectName(item.project)}</b>
+                        {item.hostId !== "local" && <small className="truncate text-muted-foreground">{item.hostName}</small>}
                       </span>
-                      {checked && <Icons.check size={14} />}
-                    </button>
+                      {checked && <Icons.check aria-hidden="true" />}
+                    </Button>
                   );
                 })}
-                {filteredProjects.length === 0 && <p className="new-agent-menu-empty">No matching projects</p>}
+                {filteredProjects.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No matching projects</p>}
               </div>
-              <div className="new-agent-menu-separator" />
+              <Separator className="my-2" />
               {remoteHosts.map((host) => (
-                <button type="button" role="menuitem" key={host.id} onClick={() => onAddRemoteProject(host)}>
-                  <Icons.globe size={15} />
-                  <span className="new-agent-menu-label"><b>New remote project</b><small>{host.name}</small></span>
-                </button>
+                <Button type="button" variant="ghost" className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left" role="menuitem" key={host.id} onClick={() => { onAddRemoteProject(host); setOpenMenu(null); }}>
+                  <Icons.globe data-icon="inline-start" />
+                  <span className="flex flex-col text-left"><b>New remote project</b><small className="text-muted-foreground">{host.name}</small></span>
+                </Button>
               ))}
-              <button type="button" role="menuitem" onClick={onAddLocalProject}>
-                <Icons.plus size={15} />
-                <span className="new-agent-menu-label"><b>New project</b></span>
-              </button>
-            </div>
-          )}
+              <Button type="button" variant="ghost" className="w-full justify-start gap-2 px-2" role="menuitem" onClick={() => { onAddLocalProject(); setOpenMenu(null); }}>
+                <Icons.plus data-icon="inline-start" />
+                <span><b>New project</b></span>
+              </Button>
+            </PopoverContent>
+          </Popover>
         </div>
 
         {selected && status && (
-          <div className="new-agent-context-control">
-            <button
-              type="button"
-              className={`new-agent-context-button${openMenu === "environment" ? " is-active" : ""}`}
-              aria-label="Choose where to work"
-              aria-expanded={openMenu === "environment"}
-              disabled={disabled}
-              onClick={() => setOpenMenu((current) => current === "environment" ? null : "environment")}
+          <Popover open={openMenu === "environment"} onOpenChange={(open) => setOpenMenu(open ? "environment" : null)}>
+            <PopoverTrigger
+              render={<Button variant="ghost" aria-label="Choose where to work" disabled={disabled} />}
             >
-              {remote ? <Icons.globe size={15} /> : <Icons.computer size={15} />}
+              {remote ? <Icons.globe data-icon="inline-start" /> : <Icons.computer data-icon="inline-start" />}
               <span>{locationLabel}</span>
-            </button>
-            {openMenu === "environment" && (
-              <div className="new-agent-context-menu new-agent-environment-menu" role="menu" aria-label="Work in">
-                <header>Work in</header>
-                <button
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-64 p-2" role="menu" aria-label="Work in">
+              <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Work in</p>
+              <div className="flex flex-col gap-1">
+                <Button
                   type="button"
+                  variant="ghost"
+                  className="w-full justify-start gap-2 px-2"
                   role="menuitemradio"
                   aria-checked={environment === "current"}
                   onClick={() => { onEnvironmentChange("current"); setOpenMenu(null); }}
                 >
-                  {remote ? <Icons.globe size={15} /> : <Icons.computer size={15} />}
-                  <span className="new-agent-menu-label"><b>{remote ? "Remote" : "Local"}</b></span>
-                  {environment === "current" && <Icons.check size={14} />}
-                </button>
-                <button
+                  {remote ? <Icons.globe data-icon="inline-start" /> : <Icons.computer data-icon="inline-start" />}
+                  <span className="flex-1 text-left"><b>{remote ? "Remote" : "Local"}</b></span>
+                  {environment === "current" && <Icons.check aria-hidden="true" />}
+                </Button>
+                <Button
                   type="button"
+                  variant="ghost"
+                  className="w-full justify-start gap-2 px-2"
                   role="menuitemradio"
                   aria-checked={environment === "worktree"}
                   onClick={() => { onEnvironmentChange("worktree"); setOpenMenu(null); }}
                 >
-                  <Icons.environment size={15} />
-                  <span className="new-agent-menu-label"><b>{remote ? "New remote worktree" : "New worktree"}</b></span>
-                  {environment === "worktree" && <Icons.check size={14} />}
-                </button>
+                  <Icons.environment data-icon="inline-start" />
+                  <span className="flex-1 text-left"><b>{remote ? "New remote worktree" : "New worktree"}</b></span>
+                  {environment === "worktree" && <Icons.check aria-hidden="true" />}
+                </Button>
               </div>
-            )}
-          </div>
+            </PopoverContent>
+          </Popover>
         )}
 
         {selected && branches && (
-          <div className="new-agent-context-control">
-            <button
-              type="button"
-              className={`new-agent-context-button${openMenu === "branch" ? " is-active" : ""}`}
-              aria-label="Choose branch"
-              aria-expanded={openMenu === "branch"}
-              disabled={disabled || gitBusy}
-              onClick={() => setOpenMenu((current) => current === "branch" ? null : "branch")}
+          <Popover open={openMenu === "branch"} onOpenChange={(open) => setOpenMenu(open ? "branch" : null)}>
+            <PopoverTrigger
+              render={<Button variant="ghost" aria-label="Choose branch" disabled={disabled || gitBusy} />}
             >
-              <Icons.branch size={15} />
-              <span>{currentBranch}</span>
-            </button>
-            {openMenu === "branch" && (
-              <div className="new-agent-context-menu new-agent-branch-menu" role="menu" aria-label="Branches">
-                <label className="new-agent-menu-search">
-                  <Icons.search size={14} />
-                  <input
-                    autoFocus
-                    value={branchSearch}
-                    placeholder={`Search ${projectName(selected.project)} branches`}
-                    aria-label="Search branches"
-                    onChange={(event) => setBranchSearch(event.target.value)}
-                  />
-                </label>
-                <header>Branches</header>
-                <div className="new-agent-menu-scroll">
+              <Icons.branch data-icon="inline-start" />
+              <span className="max-w-56 truncate">{currentBranch}</span>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-80 p-2" role="menu" aria-label="Branches">
+              <Field>
+                <FieldLabel htmlFor="branch-search" className="sr-only">Search branches</FieldLabel>
+                <Input
+                  id="branch-search"
+                  autoFocus
+                  value={branchSearch}
+                  placeholder={`Search ${projectName(selected.project)} branches`}
+                  aria-label="Search branches"
+                  onChange={(event) => setBranchSearch(event.target.value)}
+                />
+              </Field>
+              <p className="mt-2 px-2 py-1 text-xs font-medium text-muted-foreground">Branches</p>
+              <div className="flex max-h-56 flex-col gap-1 overflow-y-auto">
                   {filteredBranches.map((branch) => (
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      className="w-full justify-start gap-2 px-2"
                       role="menuitemradio"
                       aria-checked={branch === branches.current}
                       key={branch}
                       disabled={gitBusy}
                       onClick={() => void chooseBranch(branch)}
                     >
-                      <Icons.branch size={15} />
-                      <span className="new-agent-menu-label"><b>{branch}</b></span>
-                      {branch === branches.current && <Icons.check size={14} />}
-                    </button>
+                      <Icons.branch data-icon="inline-start" />
+                      <span className="flex-1 truncate text-left"><b>{branch}</b></span>
+                      {branch === branches.current && <Icons.check aria-hidden="true" />}
+                    </Button>
                   ))}
-                  {filteredBranches.length === 0 && <p className="new-agent-menu-empty">No matching branches</p>}
-                </div>
-                {gitError && <p className="new-agent-menu-error">{gitError}</p>}
-                <div className="new-agent-menu-separator" />
+                  {filteredBranches.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No matching branches</p>}
+              </div>
+              {gitError && <p className="px-2 py-2 text-sm text-destructive" role="alert">{gitError}</p>}
+              <Separator className="my-2" />
                 {creatingBranch ? (
-                  <form className="new-agent-create-branch" onSubmit={(event) => { event.preventDefault(); void createBranch(); }}>
-                    <input
+                  <form className="flex items-center gap-2" onSubmit={(event) => { event.preventDefault(); void createBranch(); }}>
+                    <Input
                       ref={newBranchRef}
                       value={newBranch}
                       placeholder="New branch name"
@@ -329,22 +328,21 @@ export function NewThreadContextBar({
                       disabled={gitBusy}
                       onChange={(event) => setNewBranch(event.target.value)}
                     />
-                    <button type="submit" disabled={!newBranch.trim() || gitBusy}>Create</button>
+                    <Button type="submit" size="sm" disabled={!newBranch.trim() || gitBusy}>Create</Button>
                   </form>
                 ) : (
-                  <button type="button" role="menuitem" onClick={() => setCreatingBranch(true)}>
-                    <Icons.plus size={15} />
-                    <span className="new-agent-menu-label"><b>Create and checkout new branch…</b></span>
-                  </button>
+                  <Button type="button" variant="ghost" className="w-full justify-start gap-2 px-2" role="menuitem" onClick={() => setCreatingBranch(true)}>
+                    <Icons.plus data-icon="inline-start" />
+                    <span><b>Create and checkout new branch…</b></span>
+                  </Button>
                 )}
-              </div>
-            )}
-          </div>
+            </PopoverContent>
+          </Popover>
         )}
       </div>
       {selected && remote && (
-        <span className="new-agent-remote-host">
-          {selected.hostName}<i aria-label="Connected" />
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          {selected.hostName}<span className="text-primary" aria-label="Connected">●</span>
         </span>
       )}
     </div>

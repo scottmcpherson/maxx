@@ -1,6 +1,7 @@
 import { formatKeyboardShortcut } from "../keyboardShortcuts";
 import { useAppStore } from "../store/appStore";
 import { Icons } from "./Icons";
+import { IconButton } from "./ui/icon-button";
 
 /**
  * The sidebar toggle, anchored to the window instead of to either surface.
@@ -18,14 +19,14 @@ export function SidebarToggle() {
   const shortcut = useAppStore((state) => state.keyboardShortcuts.toggleSidebar);
 
   return (
-    <button
-      className="icon-button window-sidebar-toggle"
-      title={`${sidebarOpen ? "Hide" : "Show"} sidebar (${formatKeyboardShortcut(shortcut)})`}
-      aria-label="Toggle sidebar"
+    <IconButton
+      className="window-sidebar-toggle"
+      label="Toggle sidebar"
+      tooltip={`${sidebarOpen ? "Hide" : "Show"} sidebar (${formatKeyboardShortcut(shortcut)})`}
       aria-expanded={sidebarOpen}
       onClick={() => toggleSidebar()}
     >
-      <Icons.sidebar size={15} />
-    </button>
+      <Icons.sidebar />
+    </IconButton>
   );
 }

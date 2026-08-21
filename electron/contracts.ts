@@ -1,5 +1,27 @@
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
+export type NativeContextMenuKind = "thread" | "project";
+export type NativeContextMenuAction = "pin" | "rename" | "delete" | "remove_project";
+
+export interface NativeContextMenuRequest {
+  kind: NativeContextMenuKind;
+  x: number;
+  y: number;
+  hostID?: string;
+  projectID: string;
+  threadID?: string;
+  pinned?: boolean;
+}
+
+export interface NativeContextMenuPayload {
+  kind: NativeContextMenuKind;
+  action: NativeContextMenuAction;
+  hostID?: string;
+  projectID: string;
+  threadID?: string;
+  pinned?: boolean;
+}
+
 export interface BrowserTabState {
   id: string;
   url: string;

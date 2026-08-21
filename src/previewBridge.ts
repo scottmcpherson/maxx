@@ -38,7 +38,7 @@ const profiles: ProviderProfile[] = [
     displayName: "Hermes",
     serverURL: "http://sparky.local:8000/v1",
     environment: {},
-    colorHex: "#8b5cf6",
+    colorHex: "#8a93a5",
     isEnabled: true,
     hiddenModels: [],
   },

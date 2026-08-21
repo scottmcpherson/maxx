@@ -7,6 +7,8 @@ import {
   mentionQueryAt,
 } from "../mentions";
 import { AgentAvatar } from "./AgentAvatar";
+import { Command, CommandGroup, CommandItem } from "./ui/command";
+import { cn } from "../lib/utils";
 
 export interface MentionMenuState {
   open: boolean;
@@ -98,15 +100,21 @@ export function useMentionMenu({
 export function MentionMenu({ menu }: { menu: MentionMenuState }) {
   if (!menu.open) return null;
   return (
-    <div className="mention-menu" role="listbox" aria-label="Mention an agent">
-      <div className="mention-menu-label">Agents</div>
-      {menu.candidates.map((agent, index) => (
-        <button
+    <Command
+      className="absolute inset-x-2 bottom-[calc(100%+0.4375rem)] z-40 max-h-60 overflow-y-auto rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
+      role="listbox"
+      aria-label="Mention an agent"
+    >
+      <CommandGroup heading="Agents">
+        {menu.candidates.map((agent, index) => (
+        <CommandItem
           key={agent.id}
-          type="button"
           role="option"
           aria-selected={index === menu.activeIndex}
-          className={`mention-menu-row ${index === menu.activeIndex ? "active" : ""}`}
+          className={cn(
+            "min-h-8 cursor-pointer gap-2 rounded-lg px-2 py-1 text-sm",
+            index === menu.activeIndex && "bg-muted text-foreground",
+          )}
           onMouseDown={(event) => {
             // Keep focus in the textarea while completing.
             event.preventDefault();
@@ -120,13 +128,14 @@ export function MentionMenu({ menu }: { menu: MentionMenuState }) {
             imagePath={agent.imagePath}
             size={18}
           />
-          <span className="mention-menu-name">{agent.name}</span>
-          <span className="mention-menu-provider">
+          <span className="shrink-0">{agent.name}</span>
+          <span className="min-w-0 flex-1 truncate text-right text-xs text-muted-foreground">
             {providerDisplayName(agent.provider)}
             {agent.model && agent.model.toLowerCase() !== "default" ? ` · ${agent.model}` : ""}
           </span>
-        </button>
-      ))}
-    </div>
+        </CommandItem>
+        ))}
+      </CommandGroup>
+    </Command>
   );
 }

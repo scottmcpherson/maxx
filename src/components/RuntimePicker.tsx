@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   ALL_PROVIDERS,
   ChatProvider,
@@ -42,6 +43,9 @@ import {
 import { visibleProviderModels } from "../providerSettings";
 import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
+import { Button } from "@/components/ui/button";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
 export type RuntimePickerChange = RuntimeSelection;
 
@@ -55,6 +59,7 @@ interface RuntimePickerProps {
   hostId?: string | null;
   disabled?: boolean;
   placement?: "top" | "bottom";
+  triggerVariant?: "control" | "ghost";
   /** Prefix the trigger with the provider name (settings-style contexts). */
   triggerShowsProvider?: boolean;
   /** Optional picker state that delegates selection to a surrounding context. */
@@ -70,10 +75,9 @@ interface DraftRuntimeSelection extends RuntimeSelection {
 }
 
 interface PopoverLayout {
-  placement: "top" | "bottom";
   left: number;
+  top: number;
   maxHeight: number;
-  overlap: number;
 }
 
 interface SearchResult {
@@ -84,8 +88,8 @@ interface SearchResult {
 
 type RuntimeRailSelection = ChatProvider | "recents";
 
-const PROVIDER_RAIL_BASE_HEIGHT = 52;
-const PROVIDER_RAIL_ROW_HEIGHT = 33;
+const PROVIDER_RAIL_BASE_HEIGHT = 51;
+const PROVIDER_RAIL_ROW_HEIGHT = 35;
 const POPOVER_FIXED_CHROME_HEIGHT = 110;
 
 function selectionDisplayText(
@@ -106,6 +110,7 @@ export function RuntimePicker({
   hostId = null,
   disabled = false,
   placement = "top",
+  triggerVariant = "control",
   triggerShowsProvider = false,
   inheritLabel,
   inheritDescription,
@@ -150,15 +155,18 @@ export function RuntimePicker({
     loadRecents(recentsContextKey));
   const [railSelection, setRailSelection] = useState<RuntimeRailSelection>(provider);
   const [popoverLayout, setPopoverLayout] = useState<PopoverLayout>({
-    placement,
     left: 0,
+    top: 0,
     maxHeight: 680,
-    overlap: 0,
   });
+  const [popoverChromeHeight, setPopoverChromeHeight] = useState(POPOVER_FIXED_CHROME_HEIGHT);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  const inheritRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const catalogEntries = catalogContext?.entries ?? cachedCatalogEntries;
 
@@ -183,7 +191,7 @@ export function RuntimePicker({
         provider: candidate,
         label: profile?.displayName || providerDisplayName(candidate),
         enabled: profile?.isEnabled ?? true,
-        color: profile?.colorHex ?? "#8b8b8b",
+        color: profile?.colorHex ?? "var(--muted-foreground)",
         models: visibleProviderModels(
           profile,
           resolveModels(candidate, catalogEntries[candidate]?.models),
@@ -221,9 +229,7 @@ export function RuntimePicker({
   const providerRailHeight = PROVIDER_RAIL_BASE_HEIGHT
     + Math.max(enabledProviders.length, 1) * PROVIDER_RAIL_ROW_HEIGHT;
   const canInherit = !!inheritLabel && !!onUseInherited;
-  const desiredPopoverHeight = POPOVER_FIXED_CHROME_HEIGHT
-    + providerRailHeight
-    + (canInherit ? 50 : 0);
+  const desiredPopoverHeight = popoverChromeHeight + providerRailHeight;
 
   const searchResults = useMemo<SearchResult[]>(() => {
     if (!query.trim()) return [];
@@ -306,11 +312,47 @@ export function RuntimePicker({
   useEffect(() => {
     if (!open) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !popoverRef.current?.contains(target)) {
+        setOpen(false);
+      }
     };
     window.addEventListener("pointerdown", closeOnOutsidePointer);
     return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const measureChrome = () => {
+      const popover = popoverRef.current;
+      const header = headerRef.current;
+      const footer = footerRef.current;
+      if (!popover || !header || !footer) return;
+
+      const style = window.getComputedStyle(popover);
+      const outerChrome = [
+        style.paddingTop,
+        style.paddingBottom,
+        style.borderTopWidth,
+        style.borderBottomWidth,
+      ].reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+      const measured = Math.ceil(
+        outerChrome
+        + header.getBoundingClientRect().height
+        + (inheritRef.current?.getBoundingClientRect().height ?? 0)
+        + footer.getBoundingClientRect().height,
+      );
+      setPopoverChromeHeight((current) => current === measured ? current : measured);
+    };
+
+    measureChrome();
+    const observer = new ResizeObserver(measureChrome);
+    if (headerRef.current) observer.observe(headerRef.current);
+    if (inheritRef.current) observer.observe(inheritRef.current);
+    if (footerRef.current) observer.observe(footerRef.current);
+    return () => observer.disconnect();
+  }, [canInherit, draftEffortLevels, open]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -335,18 +377,31 @@ export function RuntimePicker({
         Math.min(desiredPopoverHeight, viewportCap, 680) - availableHeight,
       );
       const width = Math.min(420, window.innerWidth - viewportPadding * 2);
-      const minimumLeft = viewportPadding - rect.left;
-      const maximumLeft = window.innerWidth - viewportPadding - width - rect.left;
+      const maxHeight = Math.max(0, Math.min(680, availableHeight + overlap));
+      const popoverHeight = Math.min(desiredPopoverHeight, maxHeight);
+      const left = Math.min(
+        Math.max(rect.left, viewportPadding),
+        window.innerWidth - viewportPadding - width,
+      );
+      const top = effectivePlacement === "top"
+        ? rect.top - anchorGap + overlap - popoverHeight
+        : rect.bottom + anchorGap - overlap;
       setPopoverLayout({
-        placement: effectivePlacement,
-        left: Math.min(Math.max(0, minimumLeft), maximumLeft),
-        maxHeight: Math.max(0, Math.min(680, availableHeight + overlap)),
-        overlap,
+        left,
+        top: Math.min(
+          Math.max(top, viewportPadding),
+          window.innerHeight - viewportPadding - popoverHeight,
+        ),
+        maxHeight,
       });
     };
     updateLayout();
     window.addEventListener("resize", updateLayout);
-    return () => window.removeEventListener("resize", updateLayout);
+    window.addEventListener("scroll", updateLayout, true);
+    return () => {
+      window.removeEventListener("resize", updateLayout);
+      window.removeEventListener("scroll", updateLayout, true);
+    };
   }, [desiredPopoverHeight, open, placement]);
 
   const restoreTriggerFocus = () => {
@@ -507,34 +562,35 @@ export function RuntimePicker({
 
   return (
     <div className="runtime-picker" ref={rootRef}>
-      <button
+      <Button
         ref={triggerRef}
         type="button"
-        className="runtime-trigger"
+        variant={triggerVariant}
+        className="w-full justify-start"
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`Provider and model selection: ${triggerDisplayText}`}
         disabled={disabled}
         onClick={togglePicker}
       >
-        {inherited ? <Icons.shuffle size={15} /> : <ProviderIcon provider={provider} size={15} />}
-        <span className="runtime-trigger-text">{triggerDisplayText}</span>
-        <Icons.chevronDown size={12} />
-      </button>
+        {inherited ? <Icons.shuffle data-icon="inline-start" /> : <ProviderIcon provider={provider} size={15} />}
+        <span className="min-w-0 flex-1 truncate text-left">{triggerDisplayText}</span>
+        <Icons.chevronDown data-icon="inline-end" />
+      </Button>
 
-      {open && (
+      {open && createPortal(
         <div
           ref={popoverRef}
-          className={`runtime-popover placement-${popoverLayout.placement}`}
+          className="runtime-popover"
           role="dialog"
           aria-modal="false"
           aria-label="Provider and model selection"
           style={{
             left: popoverLayout.left,
+            top: popoverLayout.top,
             maxHeight: popoverLayout.maxHeight,
             "--runtime-popover-height": `${desiredPopoverHeight}px`,
             "--runtime-provider-rail-height": `${providerRailHeight}px`,
-            "--runtime-popover-overlap": `${popoverLayout.overlap}px`,
           } as CSSProperties}
           onKeyDown={handlePopoverKeyDown}
           onMouseDown={(event) => {
@@ -545,41 +601,50 @@ export function RuntimePicker({
             if ((event.target as HTMLElement).closest("button")) event.preventDefault();
           }}
         >
-          <label className="runtime-search">
-            <Icons.search size={13} />
-            <input
-              ref={searchRef}
-              value={query}
-              aria-label="Search models and providers"
-              placeholder="Search models, providers…"
-              spellCheck={false}
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
+          <div ref={headerRef}>
+            <Field>
+              <FieldLabel htmlFor="runtime-search" className="sr-only">Search models and providers</FieldLabel>
+              <div className="relative">
+                <Icons.search className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input
+                  id="runtime-search"
+                  variant="ghost"
+                  className="pl-8"
+                  ref={searchRef}
+                  value={query}
+                  aria-label="Search models and providers"
+                  placeholder="Search models, providers…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+            </Field>
+          </div>
 
           {canInherit && (
-            <div className="runtime-inherit-option">
-              <button
+            <div ref={inheritRef} className="runtime-inherit-option">
+              <Button
                 type="button"
-                className={`runtime-option ${inherited ? "selected" : ""}`}
+                variant={inherited ? "secondary" : "ghost"}
+                className="h-auto w-full justify-start text-left"
                 aria-pressed={inherited}
                 data-runtime-navigable
                 onClick={() => {
                   onUseInherited();
                 }}
               >
-                <Icons.shuffle size={15} />
-                <span className="runtime-option-main">
+                <Icons.shuffle data-icon="inline-start" />
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span>{inheritLabel}</span>
                   {inheritDescription && (
-                    <span className="runtime-option-desc">{inheritDescription}</span>
+                    <span className="text-xs text-muted-foreground">{inheritDescription}</span>
                   )}
                 </span>
-                {inherited && <Icons.check size={14} />}
-              </button>
+                {inherited && <Icons.check aria-hidden="true" />}
+              </Button>
             </div>
           )}
 
@@ -590,9 +655,10 @@ export function RuntimePicker({
                 role="group"
                 aria-label="Recent selections and providers"
               >
-                <button
+                <Button
                   type="button"
-                  className={`runtime-option ${showingRecents ? "selected" : ""}`}
+                  variant={showingRecents ? "secondary" : "ghost"}
+                  className="h-auto min-h-8 w-full justify-center"
                   disabled={visibleRecents.length === 0}
                   aria-pressed={showingRecents}
                   aria-label="Recent selections"
@@ -603,16 +669,17 @@ export function RuntimePicker({
                     setQuery("");
                   }}
                 >
-                  <Icons.history size={19} />
-                </button>
+                  <Icons.history />
+                </Button>
                 <div className="runtime-provider-rail-divider" aria-hidden="true" />
                 {filtered.providers.map((item) => {
                   const selected = !query.trim() && railSelection === item.provider;
                   return (
-                    <button
+                    <Button
                       type="button"
                       key={item.provider}
-                      className={`runtime-option ${selected ? "selected" : ""}`}
+                      variant={selected ? "secondary" : "ghost"}
+                      className="h-auto min-h-8 w-full justify-center"
                       disabled={!item.enabled}
                       aria-pressed={selected}
                       aria-label={`${item.label}${item.enabled ? "" : " (disabled)"}`}
@@ -621,7 +688,7 @@ export function RuntimePicker({
                       onClick={() => chooseProvider(item.provider)}
                     >
                       <ProviderIcon provider={item.provider} size={20} />
-                    </button>
+                    </Button>
                   );
                 })}
                 {filtered.providers.length === 0 && (
@@ -638,10 +705,11 @@ export function RuntimePicker({
                 {query.trim() ? searchResults.map((result) => {
                   const selected = result.provider === draft.provider && result.option.model === draft.model;
                   return (
-                    <button
+                    <Button
                       type="button"
                       key={`${result.provider}:${result.option.model}`}
-                      className={`runtime-option ${selected ? "selected" : ""}`}
+                      variant={selected ? "secondary" : "ghost"}
+                      className="h-auto min-h-8 w-full min-w-0 justify-start overflow-hidden text-left"
                       aria-pressed={selected}
                       aria-label={`${result.providerLabel} · ${result.option.displayName}`}
                       data-runtime-navigable
@@ -650,14 +718,14 @@ export function RuntimePicker({
                       onClick={() => chooseModel(result.provider, result.option.model)}
                     >
                       <ProviderIcon provider={result.provider} size={15} />
-                      <span className="runtime-option-main">
-                        <span>{result.option.displayName}</span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-0.5 overflow-hidden">
+                        <span className="truncate">{result.option.displayName}</span>
                         {result.option.description && (
-                          <span className="runtime-option-desc">{result.option.description}</span>
+                          <span className="truncate text-xs text-muted-foreground">{result.option.description}</span>
                         )}
                       </span>
-                      {selected && <Icons.check size={14} />}
-                    </button>
+                      {selected && <Icons.check aria-hidden="true" />}
+                    </Button>
                   );
                 }) : showingRecents ? visibleRecents.map((recent) => {
                   const recentModels = resolveModels(
@@ -667,42 +735,44 @@ export function RuntimePicker({
                   const label = selectionDisplayText(recent, recentModels);
                   const selected = selectionKey(recent) === selectionKey(draft);
                   return (
-                    <button
+                    <Button
                       type="button"
                       key={`${recent.provider}-${recent.model}-${recent.effort ?? ""}-${recent.speed ?? ""}`}
-                      className={`runtime-option ${selected ? "selected" : ""}`}
+                      variant={selected ? "secondary" : "ghost"}
+                      className="h-auto min-h-8 w-full min-w-0 justify-start overflow-hidden text-left"
                       aria-pressed={selected}
                       aria-label={`${providerDisplayName(recent.provider)} · ${label}`}
                       data-runtime-navigable
                       onClick={() => chooseRecent(recent)}
                     >
                       <ProviderIcon provider={recent.provider} size={15} />
-                      <span className="runtime-option-main">{label}</span>
-                      {selected && <Icons.check size={14} />}
-                    </button>
+                      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+                      {selected && <Icons.check aria-hidden="true" />}
+                    </Button>
                   );
                 }) : activeDraftModels.map((option) => {
                   const selected = option.model === draft.model
                     || (draft.model.toLowerCase() === "default"
                       && option.model.toLowerCase() === "default");
                   return (
-                    <button
+                    <Button
                       type="button"
                       key={option.model}
-                      className={`runtime-option ${selected ? "selected" : ""}`}
+                      variant={selected ? "secondary" : "ghost"}
+                      className="h-auto min-h-8 w-full min-w-0 justify-start overflow-hidden text-left"
                       aria-pressed={selected}
                       data-runtime-navigable
                       title={option.description}
                       onClick={() => chooseModel(draft.provider, option.model)}
                     >
-                      <span className="runtime-option-main">
-                        <span>{option.displayName}</span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-0.5 overflow-hidden">
+                        <span className="truncate">{option.displayName}</span>
                         {option.description && (
-                          <span className="runtime-option-desc">{option.description}</span>
+                          <span className="truncate text-xs text-muted-foreground">{option.description}</span>
                         )}
                       </span>
-                      {selected && <Icons.check size={14} />}
-                    </button>
+                      {selected && <Icons.check aria-hidden="true" />}
+                    </Button>
                   );
                 })}
 
@@ -717,14 +787,15 @@ export function RuntimePicker({
                     Model discovery failed. No substitute models are being shown.
                     {selectedCatalogEntry.error ? ` ${selectedCatalogEntry.error}` : ""}
                   </span>
-                  <button
+                  <Button
                     type="button"
-                    className="runtime-status-retry"
+                    variant="outline"
+                    size="sm"
                     data-runtime-navigable
                     onClick={() => void ensureModels(draft.provider, true)}
                   >
                     Retry
-                  </button>
+                  </Button>
                 </div>
               )}
               {!!query.trim() && searchUnavailableProviders.length > 0 && !queryLoading && (
@@ -740,33 +811,37 @@ export function RuntimePicker({
             </div>
           </div>
 
-          <div className="runtime-effort-slot">
+          <div ref={footerRef} className="runtime-effort-slot h-16 min-h-16 shrink-0">
             <div className="runtime-knobs">
               <div className="runtime-knob-row" role="group" aria-label="Effort">
                 <span className="runtime-section-label">Effort</span>
                 {draftEffortLevels ? (
                   <div className="runtime-segmented">
-                    <button
+                    <Button
                       type="button"
-                      className={`runtime-seg ${!draft.effort ? "selected" : ""}`}
+                      variant={!draft.effort ? "secondary" : "ghost"}
+                      size="sm"
+                      className="min-w-0 flex-1 px-1.5"
                       aria-pressed={!draft.effort}
                       title="Use the provider's default effort"
                       data-runtime-navigable
                       onClick={() => setEffort(null)}
                     >
                       Auto
-                    </button>
+                    </Button>
                     {draftEffortLevels.map((level) => (
-                      <button
+                      <Button
                         type="button"
                         key={level}
-                        className={`runtime-seg ${draft.effort === level ? "selected" : ""}`}
+                        variant={draft.effort === level ? "secondary" : "ghost"}
+                        size="sm"
+                        className="min-w-0 flex-1 px-1.5"
                         aria-pressed={draft.effort === level}
                         data-runtime-navigable
                         onClick={() => setEffort(level)}
                       >
                         {formatEffortLabel(level)}
-                      </button>
+                      </Button>
                     ))}
                   </div>
                 ) : (
@@ -781,7 +856,8 @@ export function RuntimePicker({
             </div>
           </div>
 
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

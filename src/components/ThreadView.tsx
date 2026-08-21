@@ -56,6 +56,16 @@ import { NewThreadContextBar } from "./NewThreadContextBar";
 import { ProjectFolderIcon } from "./ProjectFolderIcon";
 import { createChatTextSelection } from "../sideChat";
 import { TextSelectionPill } from "./TextSelectionPill";
+import { Button } from "./ui/button";
+import { IconButton } from "./ui/icon-button";
+import { Badge } from "./ui/badge";
+import { Alert, AlertDescription } from "./ui/alert";
+import { Bubble, BubbleContent } from "./ui/bubble";
+import { Message, MessageContent } from "./ui/message";
+import { Marker, MarkerContent } from "./ui/marker";
+import { Spinner } from "./ui/spinner";
+import { Textarea } from "./ui/textarea";
+import { cn } from "../lib/utils";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
@@ -94,15 +104,15 @@ function TextSelectionActions({
   return createPortal(
     <div
       ref={ref}
-      className="text-selection-actions"
+      className="fixed z-40 flex items-center gap-1 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg"
       role="toolbar"
       aria-label="Selected text actions"
       style={{ left: selected.left, top: selected.top }}
     >
-      <button type="button" onClick={onAskInSideChat}>
-        <Icons.bubble size={14} />
+      <Button type="button" size="sm" variant="ghost" onClick={onAskInSideChat}>
+        <Icons.bubble data-icon="inline-start" />
         <span>Ask in side chat</span>
-      </button>
+      </Button>
     </div>,
     document.body,
   );
@@ -123,11 +133,11 @@ function Markdown({
 }) {
   const segments = useMemo(() => parseMessageContent(text), [text]);
   return (
-    <div className="message-content">
+    <div className="flex w-full min-w-0 flex-col items-start gap-3">
       {segments.map((segment) => segment.kind === "markdown" ? (
         <Streamdown
           key={segment.id}
-          className="markdown-body"
+          className="markdown-body w-full text-foreground"
           animated
           plugins={markdownPlugins}
           isAnimating={isAnimating}
@@ -353,7 +363,7 @@ export function ThreadView({
   }, [refresh, selectedHostID, selectedSurface, terminalModeEnabled, terminalProjectID, terminalThreadID]);
 
   if (!workspace) {
-    return <main className="thread-view loading"><span className="loading-orb" />Loading workspace…</main>;
+    return <main className="flex flex-1 min-w-0 items-center justify-center gap-2 bg-background text-sm text-muted-foreground"><Spinner />Loading workspace…</main>;
   }
 
   if (!thread || !project) {
@@ -459,42 +469,42 @@ export function ThreadView({
   };
 
   return (
-    <div className="workspace-stage" aria-hidden={browserExpanded} inert={browserExpanded}>
-      <main className="thread-view">
-        <header className={`thread-header ${sidebarOpen ? "" : "sidebar-closed"}`} onMouseDown={beginWindowDrag}>
+    <div className="workspace-stage flex h-full min-h-0 min-w-0 flex-1 bg-background" aria-hidden={browserExpanded} inert={browserExpanded}>
+      <main className="flex min-w-0 flex-1 flex-col bg-background">
+        <header className={cn("flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 [-webkit-app-region:drag]", !sidebarOpen && "ps-12")} onMouseDown={beginWindowDrag}>
           {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
-          <div className="thread-header-side collapsed-titlebar-controls">
+          <div className="flex items-center gap-2 [-webkit-app-region:no-drag]">
             {!sidebarOpen && (
               <>
-                <button className="icon-button" title="New agent" onClick={() => startNewThread()}>
-                  <Icons.compose size={15} />
-                </button>
-                <span className="titlebar-divider" aria-hidden="true" />
+                <IconButton label="New agent" tooltip="New agent" onClick={() => startNewThread()}>
+                  <Icons.compose />
+                </IconButton>
+                <span className="h-4 w-px bg-border" aria-hidden="true" />
               </>
             )}
           </div>
           <div
-            className="thread-title-breadcrumb"
+            className="flex min-w-0 flex-1 items-center gap-2 truncate text-sm"
             title={`${projectName(project)} / ${thread.title}`}
           >
             {!isChatsProject(project) && (
               <ProjectFolderIcon
                 remote={Boolean(selectedRemoteHost)}
                 hostName={selectedRemoteHost?.name}
-                className="thread-project-folder"
               />
             )}
-            <span className="thread-project-name">{projectName(project)}</span>
-            <span className="thread-title-separator" aria-hidden="true">/</span>
-            <span className="thread-title-text">{thread.title}</span>
+            <span className="max-w-40 shrink truncate text-muted-foreground">{projectName(project)}</span>
+            <span className="shrink-0 text-muted-foreground" aria-hidden="true">/</span>
+            <span className="min-w-0 flex-1 truncate text-foreground">{thread.title}</span>
             {selectedRemoteHost && <span className="sr-only">Remote project on {selectedRemoteHost.name}</span>}
           </div>
-          <div className="thread-header-side end">
+          <div className="flex items-center justify-end gap-2 [-webkit-app-region:no-drag]">
             <SummaryToggle project={project} thread={thread} hostID={selectedHostID} fits={summarySlotFree} />
             {terminalModeEnabled && !isChatsProject(project) && (
-              <button
-                className={`icon-button terminal-surface-toggle${terminalSurface ? " is-active" : ""}`}
-                title={
+              <IconButton
+                className={cn(terminalSurface && "bg-muted text-foreground")}
+                label={terminalSurface ? "Return to GUI chat" : "Open terminal chat"}
+                tooltip={
                   terminalSurface
                     ? "Return to GUI chat"
                     : isRunning
@@ -503,30 +513,29 @@ export function ThreadView({
                         ? "Send a first message before opening terminal mode"
                         : "Open this chat in terminal mode"
                 }
-                aria-label={terminalSurface ? "Return to GUI chat" : "Open terminal chat"}
                 aria-pressed={terminalSurface}
                 disabled={switchingSurface || (!terminalSurface && (isRunning || !thread.providerSessionID))}
                 onClick={() => void toggleTerminalSurface()}
               >
-                {switchingSurface ? <span className="mini-spinner" /> : <Icons.terminal size={14} />}
-              </button>
+                {switchingSurface ? <Spinner /> : <Icons.terminal />}
+              </IconButton>
             )}
             {(!selectedHostID || selectedHostID === "local") && (
-            <button
-              className={`icon-button${browserOpen ? " is-active" : ""}`}
-              title={`${browserOpen ? "Hide" : "Show"} right sidebar (${formatKeyboardShortcut(toggleBrowserShortcut)})`}
-              aria-label="Toggle right sidebar"
+            <IconButton
+              className={cn(browserOpen && "bg-muted text-foreground")}
+              label="Toggle right sidebar"
+              tooltip={`${browserOpen ? "Hide" : "Show"} right sidebar (${formatKeyboardShortcut(toggleBrowserShortcut)})`}
               aria-pressed={browserOpen}
               onClick={() => toggleBrowser()}
             >
-              <Icons.panel size={14} />
-            </button>
+              <Icons.panel />
+            </IconButton>
             )}
           </div>
         </header>
 
         {(surfaceError || (terminalSurface ? error : null)) && (
-          <div className="error-banner terminal-surface-error">{surfaceError || error}</div>
+          <Alert variant="destructive" className="mx-auto mt-2 w-[calc(100%-3rem)] max-w-3xl py-1.5"><AlertDescription className="text-xs">{surfaceError || error}</AlertDescription></Alert>
         )}
         {terminalSurface ? (
           <TerminalView
@@ -571,11 +580,11 @@ export function ThreadView({
           />
         )}
 
-        <footer className="composer-zone">
-          {error && <div className="error-banner">{error}</div>}
+        <footer className="flex shrink-0 flex-col gap-2 px-6 pb-2.5 pt-2">
+          {error && <Alert variant="destructive" className="mx-auto w-full max-w-3xl py-1.5"><AlertDescription className="text-xs">{error}</AlertDescription></Alert>}
           {changedFiles > 0 && (
-            <div className="activity-chips">
-              <span><Icons.files size={13} />{changedFiles} {changedFiles === 1 ? "File Changed" : "Files Changed"}</span>
+            <div className="mx-auto flex w-full max-w-3xl gap-1.5">
+              <Badge variant="outline"><Icons.files data-icon="inline-start" />{changedFiles} {changedFiles === 1 ? "File Changed" : "Files Changed"}</Badge>
             </div>
           )}
           <DictationStatus dictation={dictation} />
@@ -593,7 +602,7 @@ export function ThreadView({
             onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
             onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
           />
-          <div className="composer">
+          <div className="relative mx-auto flex w-full max-w-3xl min-h-16 flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
             <SlashCommandMenu menu={slashCommandMenu} />
             <MentionMenu menu={mentionMenu} />
             <BrowserAnnotationPills
@@ -644,8 +653,8 @@ export function ThreadView({
                 }
               }}
             />
-            <div className="composer-toolbar">
-              <div className="composer-leading-actions">
+            <div className="flex min-h-7 items-end justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1">
                 <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
                 <RuntimePicker
                 provider={thread.provider}
@@ -656,6 +665,7 @@ export function ThreadView({
                 hostId={selectedHostID}
                 workingDirectory={threadWorkingDirectory(project.folderPath, thread)}
                 disabled={isRunning}
+                triggerVariant="ghost"
                 onChange={(next) => {
                   if (selectedProjectID) {
                     void updateThreadRuntime(
@@ -672,7 +682,7 @@ export function ThreadView({
               </div>
               {/* Grouped so the toolbar keeps two flex children and the model
                   picker stays pinned to the leading edge. */}
-              <div className="composer-actions">
+              <div className="flex items-center gap-2">
                 <DictationButton
                   dictation={dictation}
                   visible={voiceEnabled}
@@ -686,23 +696,26 @@ export function ThreadView({
                   />
                 ) : isRunning ? (
                   <>
-                    <button className="send-button stop" title="Stop generation" onClick={() => void cancelActiveTurn(thread.id)}>
-                      <Icons.stop size={14} />
-                    </button>
-                    <button
-                      className="send-button"
+                    <IconButton className="rounded-full" label="Stop generation" tooltip="Stop generation" variant="destructive" size="icon-sm" onClick={() => void cancelActiveTurn(thread.id)}>
+                      <Icons.stop />
+                    </IconButton>
+                    <IconButton
+                      label={submitting ? "Queueing message" : "Queue message"}
+                      tooltip={submitting ? "Queueing message" : "Queue message"}
+                      variant="default"
+                      size="icon-sm"
+                      className="rounded-full"
                       title={submitting ? "Queueing message" : "Queue message"}
                       disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)}
                       onClick={() => void submit()}
                     >
-                      <Icons.arrowUp size={16} />
-                    </button>
+                      <Icons.arrowUp />
+                    </IconButton>
                   </>
                 ) : primaryComposerAction === "send" ? (
-                  <button className="send-button" title={submitting ? "Sending message" : "Send message"}
-                    disabled={submitting || !hasComposerContent} onClick={() => void submit()}>
-                    <Icons.arrowUp size={16} />
-                  </button>
+                  <IconButton className="rounded-full" label={submitting ? "Sending message" : "Send message"} tooltip={submitting ? "Sending message" : "Send message"} variant="default" size="icon-sm" disabled={submitting || !hasComposerContent} onClick={() => void submit()}>
+                    <Icons.arrowUp />
+                  </IconButton>
                 ) : (
                   <VoiceConversationActionButton
                     onClick={voiceConversation.start}
@@ -717,12 +730,15 @@ export function ThreadView({
               </div>
             </div>
           </div>
-          <div className="composer-meta">
-            <span>{isChatsProject(project) ? <Icons.compose size={12} /> : <Icons.branch size={12} />}{projectName(project)}</span>
-            <span>{thread.providerSessionID ? `Session ${thread.providerSessionID.slice(0, 12)}` : "This computer"}</span>
+          <div className="mx-auto flex min-h-4 w-full max-w-3xl items-center gap-3 whitespace-nowrap px-3 text-xs text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-1">
+              {isChatsProject(project) ? <Icons.compose size={12} /> : <Icons.branch size={12} />}
+              <span className="truncate">{projectName(project)}</span>
+            </span>
+            <span className="shrink-0">{thread.providerSessionID ? `Session ${thread.providerSessionID.slice(0, 12)}` : "This computer"}</span>
             {contextUsed ? (
               <span
-                className="composer-context"
+                className="ms-auto shrink-0"
                 title={
                   usage?.contextWindow
                     ? `${contextUsed.toLocaleString()} of ${usage.contextWindow.toLocaleString()} tokens`
@@ -830,7 +846,7 @@ export function ThreadTimeline({
 
   return (
     <StickToBottom
-      className={`timeline-viewport${ready ? " is-ready" : ""}`}
+      className={cn("relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", !ready && "invisible")}
       initial="instant"
       resize={resizeMode}
       role="log"
@@ -846,30 +862,31 @@ export function ThreadTimeline({
       }}
     >
       <RevealTimeline whenReady={markReady} />
-      <StickToBottom.Content className="timeline">
+      <StickToBottom.Content className="mx-auto flex h-max min-h-full w-full max-w-3xl flex-col gap-3 overflow-x-hidden px-6 pb-6 pt-2">
         {rows.map((row) => {
           if (row.kind === "user") {
             const anchored = sideThreadsByMessage?.get(row.messageID) ?? [];
             return (
-              <div key={row.key} className="user-message-row">
+              <Message key={row.key} align="end" className="flex flex-col items-end gap-1.5">
+                <MessageContent className="items-end gap-1.5">
                 {row.attachments.length > 0 && (
-                  <div className="user-image-grid">
+                  <div className="flex w-fit max-w-[min(82%,35rem)] flex-wrap justify-end gap-1.5">
                     {row.attachments.map((attachment) => (
-                      <MessageMedia
-                        key={attachment.id}
-                        media={{ kind: "image", destination: `attachment:${attachment.id}`, altText: attachment.displayName }}
-                        projectID={projectID}
-                        threadID={threadID}
-                        hostID={hostID}
-                      />
+                      <div key={attachment.id} className="w-28 shrink-0 [&_figure]:w-full [&_img]:h-22 [&_img]:w-full [&_img]:object-cover">
+                        <MessageMedia media={{ kind: "image", destination: `attachment:${attachment.id}`, altText: attachment.displayName }} projectID={projectID} threadID={threadID} hostID={hostID} />
+                      </div>
                     ))}
                   </div>
                 )}
                 <TextSelectionPill selections={row.textSelections} />
                 <BrowserAnnotationPills annotations={row.annotations} readonly />
-                {row.text && <div className="user-bubble"><MentionText text={row.text} agents={mentionAgents} /></div>}
+                {row.text && (
+                  <Bubble variant="muted" align="end">
+                    <BubbleContent className="whitespace-pre-wrap text-foreground select-text"><MentionText text={row.text} agents={mentionAgents} /></BubbleContent>
+                  </Bubble>
+                )}
                 {anchored.length > 0 && onOpenSideThread && (
-                  <div className="reply-chip-row">
+                  <div className="flex justify-end gap-1.5">
                     {anchored.map((side) => (
                       <SideThreadChip
                         key={side.id}
@@ -882,35 +899,25 @@ export function ThreadTimeline({
                     ))}
                   </div>
                 )}
-              </div>
+                </MessageContent>
+              </Message>
             );
           }
           if (row.kind === "system") {
             return (
-              <div key={row.key} className="handoff-row">
-                <Icons.arrowUp size={11} />
-                <span>{row.text}</span>
-              </div>
+              <Marker key={row.key} variant="separator" className="justify-center py-1 text-xs"><MarkerContent className="flex items-center gap-1.5"><Icons.arrowUp aria-hidden="true" />{row.text}</MarkerContent></Marker>
             );
           }
           if (row.kind === "assistant") {
             return (
-              <div key={row.key} className="assistant-block">
-                <Markdown
-                  text={row.text}
-                  isAnimating={false}
-                  projectID={projectID}
-                  threadID={threadID}
-                  hostID={hostID}
-                />
-              </div>
+              <Message key={row.key} align="start"><MessageContent><Bubble variant="ghost" align="start"><BubbleContent className="w-full p-0 leading-relaxed text-foreground"><Markdown text={row.text} isAnimating={false} projectID={projectID} threadID={threadID} hostID={hostID} /></BubbleContent></Bubble></MessageContent></Message>
             );
           }
           if (row.kind === "terminalArchive") {
             return (
-              <details key={row.key} className="terminal-archive-row">
-                <summary><Icons.terminal size={13} />Terminal session</summary>
-                <pre>{row.text}</pre>
+              <details key={row.key} className="overflow-hidden rounded-lg border border-border bg-muted/50">
+                <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 px-3 text-sm text-muted-foreground marker:hidden [&::-webkit-details-marker]:hidden"><Icons.terminal aria-hidden="true" />Terminal session</summary>
+                <pre className="max-h-[26.25rem] overflow-auto border-t border-border p-3 font-mono text-xs leading-snug text-foreground select-text">{row.text}</pre>
               </details>
             );
           }
@@ -921,25 +928,17 @@ export function ThreadTimeline({
           switch (item.type) {
             case "assistantText":
               return (
-                <div key={row.key} className="assistant-block">
-                  <Markdown
-                    text={item.text}
-                    isAnimating={activeTurnID === item.turnID}
-                    projectID={projectID}
-                    threadID={threadID}
-                    hostID={hostID}
-                  />
-                </div>
+                <Message key={row.key} align="start"><MessageContent><Bubble variant="ghost" align="start"><BubbleContent className="w-full p-0 leading-relaxed text-foreground"><Markdown text={item.text} isAnimating={activeTurnID === item.turnID} projectID={projectID} threadID={threadID} hostID={hostID} /></BubbleContent></Bubble></MessageContent></Message>
               );
             case "reasoning":
               return (
-                <details key={row.key} className="reasoning-block">
-                  <summary>Thought briefly</summary>
-                  <Markdown text={item.text} isAnimating={activeTurnID === item.turnID} />
+                <details key={row.key} className="px-2 text-xs text-muted-foreground">
+                  <summary className="cursor-pointer list-none marker:hidden [&::-webkit-details-marker]:hidden">Thought briefly</summary>
+                  <div className="pt-2 leading-relaxed"><Markdown text={item.text} isAnimating={activeTurnID === item.turnID} /></div>
                 </details>
               );
             case "status":
-              return <div key={row.key} className="status-line">{item.text}</div>;
+              return <div key={row.key} className="px-2 text-xs text-muted-foreground">{item.text}</div>;
             case "interaction":
               return (
                 <InteractionCard
@@ -952,7 +951,7 @@ export function ThreadTimeline({
                 />
               );
             case "terminal":
-              return <div key={row.key} className={`terminal-line terminal-${item.state}`}>Turn {item.state}</div>;
+              return <Badge key={row.key} variant={item.state === "failed" ? "destructive" : "secondary"} className="mx-2 w-fit">Turn {item.state}</Badge>;
             case "card":
               return <ActivityCard key={row.key} event={item.event} threadID={threadID} />;
             default:
@@ -963,7 +962,7 @@ export function ThreadTimeline({
           const bylineTime = turnTimes?.get(item.turnID);
           return (
             <Fragment key={`byline-${row.key}`}>
-              <div className="agent-byline">
+              <div className="mt-2 flex items-center gap-2 text-xs font-medium text-muted-foreground first:mt-0">
                 <AgentAvatar
                   name={byline.name}
                   colorHex={byline.colorHex}
@@ -971,16 +970,16 @@ export function ThreadTimeline({
                   imagePath={byline.imagePath}
                   size={18}
                 />
-                <span className="agent-byline-name">{byline.name}</span>
+                <span>{byline.name}</span>
                 {bylineTime !== undefined && (
-                  <span className="agent-byline-time">{relativeTime(bylineTime)}</span>
+                  <span className="text-xs font-normal tabular-nums text-muted-foreground">{relativeTime(bylineTime)}</span>
                 )}
               </div>
               {rendered}
             </Fragment>
           );
         })}
-        {rows.length === 0 && <p className="timeline-empty">Send a message to begin.</p>}
+        {rows.length === 0 && <p className="m-auto text-center text-sm text-muted-foreground">Send a message to begin.</p>}
       </StickToBottom.Content>
       <ScrollToBottomButton />
     </StickToBottom>
@@ -1019,7 +1018,7 @@ function MentionToken({ text, agent }: { text: string; agent: AgentDefinition })
   return (
     <span
       ref={spanRef}
-      className="mention-token"
+      className="cursor-default font-medium text-primary"
       onMouseEnter={() => {
         timerRef.current = window.setTimeout(() => {
           timerRef.current = null;
@@ -1067,13 +1066,15 @@ function SideThreadChip({
   const replies = side.messages.filter((message) => message.role === "assistant").length;
 
   return (
-    <button
+    <Button
       type="button"
-      className={`reply-chip ${active ? "active" : ""}`}
+      variant={active ? "secondary" : "outline"}
+      size="sm"
+      className="h-7 gap-1.5 rounded-full pe-2 ps-1 text-xs"
       title={side.title}
       onClick={onOpen}
     >
-      <span className="reply-chip-avatars">
+      <span className="inline-flex items-center">
         {participants.slice(0, 3).map((agent) => (
           <AgentAvatar
             key={agent.id}
@@ -1081,20 +1082,19 @@ function SideThreadChip({
             colorHex={agent.colorHex}
             emoji={agent.emoji}
             imagePath={agent.imagePath}
-            size={16}
           />
         ))}
-        {participants.length === 0 && <Icons.bubble size={13} />}
+        {participants.length === 0 && <Icons.bubble aria-hidden="true" />}
       </span>
-      <span className="reply-chip-label">
+      <span className="font-medium">
         {busy ? "Replying…" : replies === 1 ? "1 reply" : `${replies} replies`}
       </span>
       {busy ? (
-        <span className="mini-spinner reply-chip-spinner" />
+        <Spinner className="size-3" />
       ) : (
-        <span className="reply-chip-time">{relativeTime(side.updatedAt)}</span>
+        <span className="text-xs tabular-nums text-muted-foreground">{relativeTime(side.updatedAt)}</span>
       )}
-    </button>
+    </Button>
   );
 }
 
@@ -1131,9 +1131,9 @@ function ScrollToBottomButton() {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
   if (isAtBottom) return null;
   return (
-    <button className="scroll-to-bottom" title="Scroll to bottom" onClick={() => void scrollToBottom()}>
-      <Icons.arrowDown size={14} />
-    </button>
+    <IconButton label="Scroll to bottom" tooltip="Scroll to bottom" className="absolute bottom-3 start-1/2 -translate-x-1/2 rounded-full border border-border bg-card shadow-lg" onClick={() => void scrollToBottom()}>
+      <Icons.arrowDown />
+    </IconButton>
   );
 }
 
@@ -1260,21 +1260,21 @@ function NewAgentView({
   };
 
   return (
-    <main className="new-agent-stage">
+    <main className="relative flex min-w-0 flex-1 flex-col bg-background">
       <header
-        className={`new-agent-titlebar ${sidebarOpen ? "" : "sidebar-closed"}`}
+        className={cn("h-10 shrink-0 border-b border-border [-webkit-app-region:drag]", !sidebarOpen && "ps-12")}
         onMouseDown={beginWindowDrag}
       >
         {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
       </header>
-      <div className="new-agent-center">
-          <h1 className="new-agent-heading">
+      <div className="m-auto w-[min(45rem,calc(100%-3rem))] -translate-y-[3vh]">
+          <h1 data-slot="new-thread-heading" className="mb-4 text-center text-xl font-semibold tracking-tight text-foreground">
             {selectedProject
-              ? <>What should we work on in <span>{projectName(selectedProject.project)}</span>?</>
+              ? <>What should we work on in <span className="border-b border-dotted border-muted-foreground">{projectName(selectedProject.project)}</span>?</>
               : "What should we work on?"}
           </h1>
           {surface === "gui" && <DictationStatus dictation={dictation} />}
-          <div className="new-agent-composer-shell">
+          <div className="rounded-2xl bg-card/80 shadow-xl">
             <NewThreadContextBar
               projects={hosted}
               remoteHosts={remotes.map((session) => session.host)}
@@ -1292,10 +1292,12 @@ function NewAgentView({
               onAddLocalProject={() => void addLocalProject()}
               onAddRemoteProject={setAddingOnHost}
             />
-            <div className="new-agent-composer">
+            <div className="flex flex-col gap-1 rounded-xl border border-border bg-card p-2.5">
             {surface === "gui" && <PendingImageStrip paths={images.paths} onRemove={images.remove} />}
-            <textarea
+            <Textarea
               ref={textRef}
+              variant="composer"
+              className="min-h-6 max-h-45 resize-none px-0.5 pt-0.5 pb-1.5"
               value={draft}
               aria-label="New agent prompt"
               placeholder="Plan, build, or ask anything"
@@ -1312,8 +1314,8 @@ function NewAgentView({
                 }
               }}
             />
-            <div className="composer-toolbar">
-              <div className="composer-leading-actions">
+            <div className="flex min-h-7 items-end justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1">
                 {surface === "gui" && <AttachImagesButton disabled={sending} onChoose={() => void images.choose()} />}
                 <RuntimePicker
                   provider={runtime.provider}
@@ -1329,15 +1331,16 @@ function NewAgentView({
                   hostId={selectedContextHostID}
                   workingDirectory={selectedProject?.project.folderPath}
                   placement="bottom"
+                  triggerVariant="ghost"
                   onChange={setRuntime}
                 />
               </div>
-              <div className="composer-actions">
+              <div className="flex items-center gap-2">
                 {terminalModeEnabled && selectedProject && (
-                  <button
-                    className={`icon-button new-chat-terminal-toggle${surface === "terminal" ? " is-active" : ""}`}
-                    title={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
-                    aria-label={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
+                  <IconButton
+                    className={cn("rounded-full", surface === "terminal" && "bg-muted text-foreground")}
+                    label={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
+                    tooltip={surface === "terminal" ? "Use GUI chat" : "Start in terminal mode"}
                     aria-pressed={surface === "terminal"}
                     disabled={sending}
                     onClick={() => {
@@ -1350,8 +1353,8 @@ function NewAgentView({
                       requestAnimationFrame(() => textRef.current?.focus());
                     }}
                   >
-                    <Icons.terminal size={15} />
-                  </button>
+                    <Icons.terminal />
+                  </IconButton>
                 )}
                 {surface === "gui" && (
                   <DictationButton
@@ -1372,15 +1375,15 @@ function NewAgentView({
                         : "Create a chat and start a voice conversation"}
                   />
                 ) : (
-                  <button className="send-button" title={surface === "terminal" ? "Start terminal chat" : "Start agent"} disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
-                    {sending ? <span className="mini-spinner" /> : <Icons.arrowUp size={16} />}
-                  </button>
+                  <IconButton className="rounded-full" label={surface === "terminal" ? "Start terminal chat" : "Start agent"} tooltip={surface === "terminal" ? "Start terminal chat" : "Start agent"} variant="default" size="icon-sm" disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
+                    {sending ? <Spinner /> : <Icons.arrowUp />}
+                  </IconButton>
                 )}
               </div>
             </div>
             </div>
           </div>
-          {error && <div className="error-banner">{error}</div>}
+          {error && <Alert variant="destructive" className="mt-2 py-1.5"><AlertDescription className="text-xs">{error}</AlertDescription></Alert>}
         </div>
       {addingOnHost && (
         <HostFolderPicker

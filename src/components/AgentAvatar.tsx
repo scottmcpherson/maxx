@@ -1,17 +1,23 @@
 import { CSSProperties, useState } from "react";
 import { mediaURL } from "../ipc";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
-/** Palette for freshly created agents; the editor can shuffle through it. */
+/** Purple-free palette available to freshly created agents and the avatar editor. */
 export const AGENT_COLORS = [
-  "#7657ee",
-  "#5b8def",
-  "#4fb0a5",
-  "#6fc58b",
-  "#d7ae5c",
+  "#75a7e8",
+  "#3974d9",
+  "#6fc8c8",
+  "#2f8f83",
+  "#43a86b",
+  "#87b94e",
+  "#f2c94c",
   "#e08d5a",
+  "#c84f4f",
   "#e47370",
-  "#d76fa8",
-  "#9d6fd7",
+  "#e28aa1",
+  "#a97b5b",
+  "#d7c5a9",
+  "#b8b8b8",
   "#8a93a5",
 ];
 
@@ -51,26 +57,24 @@ export function AgentAvatar({
   const [failedPath, setFailedPath] = useState<string | null>(null);
   const showImage = !!imagePath && imagePath !== failedPath;
   const base = colorHex || agentColorForName(name);
-  const style: CSSProperties = {
-    width: size,
-    height: size,
+  const style = { "--avatar-size": `${size}px` } as CSSProperties;
+  const fallbackStyle: CSSProperties = {
     fontSize: emoji ? size * 0.58 : size * 0.42,
-    background: showImage || emoji
-      ? "var(--bg-active)"
+    background: emoji
+      ? "var(--accent)"
       : `linear-gradient(135deg, color-mix(in oklab, ${base} 88%, white), color-mix(in oklab, ${base} 72%, black))`,
   };
   return (
-    <span className="agent-avatar" style={style} role="img" aria-label={`${name} avatar`}>
-      {showImage ? (
-        <img
+    <Avatar className="size-[var(--avatar-size)]" style={style} aria-label={`${name} avatar`}>
+      {showImage && (
+        <AvatarImage
           src={mediaURL(imagePath)}
-          alt=""
+          alt={`${name} avatar`}
           draggable={false}
           onError={() => setFailedPath(imagePath)}
         />
-      ) : (
-        emoji || agentInitials(name)
       )}
-    </span>
+      <AvatarFallback style={fallbackStyle}>{emoji || agentInitials(name)}</AvatarFallback>
+    </Avatar>
   );
 }

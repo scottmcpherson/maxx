@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { ipc } from "../ipc";
 import { hostErrorMessage, isHostConnectionError } from "../host/errors";
 import type { FolderEntry } from "../host/types";
 import { isLocalHost } from "../host/session";
 import { Icons } from "./Icons";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { IconButton } from "@/components/ui/icon-button";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 
 export interface FolderBreadcrumb {
   label: string;
@@ -177,7 +184,7 @@ export function HostFolderPicker({
   }, [choose, creating, creatingFolder, loading, onCancel, path]);
 
   const moveFolderFocus = (current: HTMLButtonElement, direction: -1 | 1) => {
-    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>(".host-folder-row") ?? []);
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-folder-row]") ?? []);
     const index = rows.indexOf(current);
     rows[index + direction]?.focus();
   };
@@ -190,122 +197,105 @@ export function HostFolderPicker({
   const local = isLocalHost(hostId);
   const disconnected = !local && error?.startsWith(`${hostName} is disconnected`);
 
-  return createPortal(
-    <div
-      className="host-folder-overlay"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !creatingFolder) onCancel();
-      }}
-    >
-      <div
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !creatingFolder) onCancel(); }}>
+      <DialogContent
         ref={dialogRef}
-        className="host-folder-picker"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="host-folder-picker-title"
+        className="flex h-[min(720px,calc(100vh-2rem))] max-w-3xl flex-col gap-0 overflow-hidden p-0"
         aria-busy={loading || creatingFolder}
-        tabIndex={-1}
+        showCloseButton={false}
       >
-        <header className="host-folder-picker-header">
-          <h2 id="host-folder-picker-title">Choose a project folder</h2>
-          <div className="host-folder-host">
-            <Icons.computer size={13} />
+        <DialogHeader className="border-b px-5 py-4">
+          <DialogTitle>Choose a project folder</DialogTitle>
+          <DialogDescription className="flex items-center gap-2">
+            <Icons.computer aria-hidden="true" />
             <span>{local ? "This computer" : hostName}</span>
             {!local && <>
-              <i className={disconnected ? "is-disconnected" : undefined} aria-hidden="true" />
+              <span className={disconnected ? "text-destructive" : "text-primary"} aria-hidden="true">●</span>
               <span>{disconnected ? "Disconnected" : "Connected"}</span>
             </>}
-          </div>
-        </header>
-        <div className="host-folder-toolbar">
-          <button
-            type="button"
-            className="icon-button host-folder-tooltip host-folder-up"
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-2 border-b px-5 py-2">
+          <IconButton
+            label="Go to parent folder"
             disabled={loading || !path || parent === path}
             onClick={() => void load(parent)}
-            aria-label="Go to parent folder"
           >
-            <Icons.chevronUp size={15} />
-            <span className="host-folder-tooltip-label" aria-hidden="true">Parent folder</span>
-          </button>
-          <nav className="host-folder-breadcrumbs" aria-label="Current folder" title={path}>
-            {breadcrumbs.length === 0 && <span>Loading…</span>}
+            <Icons.chevronUp />
+          </IconButton>
+          <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto text-sm" aria-label="Current folder" title={path}>
+            {breadcrumbs.length === 0 && <span className="text-muted-foreground">Loading…</span>}
             {breadcrumbs.map((breadcrumb, index) => (
-              <span key={breadcrumb.path}>
-                {index > 0 && <Icons.chevronRight size={12} />}
-                <button
+              <span className="flex shrink-0 items-center gap-1" key={breadcrumb.path}>
+                {index > 0 && <Icons.chevronRight aria-hidden="true" />}
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="xs"
                   disabled={loading || breadcrumb.path === path}
                   onClick={() => void load(breadcrumb.path)}
                 >
                   {breadcrumb.label}
-                </button>
+                </Button>
               </span>
             ))}
           </nav>
-          <button
-            type="button"
-            className="icon-button host-folder-tooltip host-folder-new"
+          <IconButton
+            label="New folder"
+            tooltip="New folder · ⇧⌘N"
             disabled={loading || creating || creatingFolder || !path}
             onClick={() => setCreating(true)}
-            aria-label="New folder"
           >
-            <Icons.folderPlus size={17} />
-            <span className="host-folder-tooltip-label" aria-hidden="true">New folder&nbsp; ⇧⌘N</span>
-          </button>
+            <Icons.folderPlus />
+          </IconButton>
         </div>
-        <div className="host-folder-browser">
+        <div className="flex min-h-0 flex-1 flex-col">
           {error && (
-            <div className="host-folder-error" role="alert">
-              <span>{error}</span>
-              <button type="button" onClick={retry} disabled={loading}>Retry</button>
-            </div>
+            <Alert variant="destructive" className="m-4">
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <span>{error}</span>
+                <Button type="button" variant="outline" size="sm" onClick={retry} disabled={loading}>Retry</Button>
+              </AlertDescription>
+            </Alert>
           )}
-          <ul className="host-folder-list" ref={listRef} aria-label="Folders">
+          <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-4 py-2" ref={listRef} aria-label="Folders">
             {creating && (
-              <li className="host-folder-create">
-                <Icons.folder size={16} />
-                <input
-                  ref={newFolderInputRef}
-                  value={newName}
-                  placeholder="Folder name"
-                  aria-label="New folder name"
-                  disabled={creatingFolder}
-                  onChange={(event) => setNewName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void create();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={() => void create()}
-                  disabled={!newName.trim() || creatingFolder}
-                  aria-label="Create folder"
-                  title="Create folder"
-                >
-                  {creatingFolder ? <span className="mini-spinner" /> : <Icons.check size={14} />}
-                </button>
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={() => { setCreating(false); setNewName(""); }}
-                  disabled={creatingFolder}
-                  aria-label="Cancel new folder"
-                  title="Cancel"
-                >
-                  <Icons.close size={14} />
-                </button>
+              <li className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2">
+                <Icons.folder aria-hidden="true" />
+                <Field className="min-w-0 flex-1">
+                  <FieldLabel htmlFor="new-folder-name" className="sr-only">New folder name</FieldLabel>
+                  <Input
+                    ref={newFolderInputRef}
+                    id="new-folder-name"
+                    value={newName}
+                    placeholder="Folder name"
+                    aria-label="New folder name"
+                    disabled={creatingFolder}
+                    onChange={(event) => setNewName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void create();
+                      }
+                    }}
+                  />
+                </Field>
+                <IconButton label="Create folder" disabled={!newName.trim() || creatingFolder} onClick={() => void create()}>
+                  {creatingFolder ? <Spinner /> : <Icons.check />}
+                </IconButton>
+                <IconButton label="Cancel new folder" disabled={creatingFolder} onClick={() => { setCreating(false); setNewName(""); }}>
+                  <Icons.close />
+                </IconButton>
               </li>
             )}
             {entries.map((entry) => (
               <li key={entry.path}>
-                <button
+                <Button
                   type="button"
-                  className="host-folder-row"
+                  variant="ghost"
+                  className="group h-auto w-full justify-start gap-3 px-3 py-2 text-left"
+                  data-folder-row
                   disabled={loading || creatingFolder}
                   onClick={() => void load(entry.path)}
                   onKeyDown={(event) => {
@@ -321,44 +311,46 @@ export function HostFolderPicker({
                     }
                   }}
                 >
-                  <Icons.folder size={16} />
-                  <span>{entry.name}</span>
-                  <Icons.chevronRight className="host-folder-row-chevron" size={13} />
-                </button>
+                  <Icons.folder aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                  <Icons.chevronRight className="text-muted-foreground" aria-hidden="true" />
+                </Button>
               </li>
             ))}
             {!loading && entries.length === 0 && !creating && (
-              <li className="host-folder-empty">
-                <Icons.folderOpen size={24} />
-                <strong>No subfolders</strong>
-                <span>You can still add this folder as a project.</span>
+              <li className="flex flex-1 items-center justify-center">
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon"><Icons.folderOpen /></EmptyMedia>
+                    <EmptyTitle>No subfolders</EmptyTitle>
+                    <EmptyDescription>You can still add this folder as a project.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               </li>
             )}
           </ul>
           {loading && (
-            <div className="host-folder-loading" role="status">
-              <span className="mini-spinner" />
+            <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground" role="status">
+              <Spinner />
               <span>Loading folder…</span>
             </div>
           )}
         </div>
-        <footer className="host-folder-actions">
-          <div className="host-folder-current" title={path}>
-            <span>Current folder</span>
-            <strong>{path || "Loading…"}</strong>
+        <DialogFooter className="flex-row items-center justify-between gap-3 border-t px-5 py-3">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5" title={path}>
+            <span className="text-xs text-muted-foreground">Current folder</span>
+            <strong className="truncate text-sm">{path || "Loading…"}</strong>
           </div>
-          <button type="button" className="secondary" onClick={onCancel} disabled={creatingFolder}>Cancel</button>
-          <button
+          <Button type="button" variant="outline" onClick={onCancel} disabled={creatingFolder}>Cancel</Button>
+          <Button
             type="button"
-            className="primary"
             onClick={choose}
             disabled={!path || !known.includes(path) || loading || creatingFolder}
           >
             Add project
-          </button>
-        </footer>
-      </div>
-    </div>,
-    document.body,
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

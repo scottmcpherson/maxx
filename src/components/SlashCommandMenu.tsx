@@ -19,6 +19,15 @@ import {
   type SlashToken,
 } from "../slashCommands";
 import { Icons } from "./Icons";
+import {
+  Command,
+  CommandGroup,
+  CommandItem,
+  CommandList,
+} from "./ui/command";
+import { Button } from "./ui/button";
+import { Spinner } from "./ui/spinner";
+import { cn } from "../lib/utils";
 
 export interface SlashCommandMenuState {
   open: boolean;
@@ -201,54 +210,74 @@ function OpenSlashCommandMenu({ menu }: { menu: SlashCommandMenuState }) {
     selected?.scrollIntoView({ block: "nearest" });
   }, [menu.activeIndex]);
   return (
-    <div
+    <Command
       ref={listRef}
       id="composer-slash-menu"
-      className="slash-command-menu"
+      className="absolute inset-x-2 bottom-[calc(100%+0.4375rem)] z-40 max-h-80 overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
       role="listbox"
       aria-label={`${providerDisplayName(menu.provider)} commands and skills`}
     >
-      <div className="slash-command-menu-header">
+      <div className="sticky top-0 z-10 flex h-8 items-center justify-between bg-popover px-2 text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground">
         <span>Commands &amp; skills</span>
         <span>{providerDisplayName(menu.provider)}</span>
       </div>
-      {menu.loading && menu.candidates.length === 0 && (
-        <div className="slash-command-menu-state"><span className="mini-spinner" />Loading catalog…</div>
-      )}
-      {menu.error && menu.candidates.length === 0 && (
-        <button type="button" className="slash-command-menu-state error" onMouseDown={(event) => event.preventDefault()} onClick={menu.retry}>
-          <Icons.reload size={14} />
-          <span><strong>Catalog unavailable</strong><small>{menu.error}</small></span>
-        </button>
-      )}
-      {!menu.loading && !menu.error && menu.candidates.length === 0 && (
-        <div className="slash-command-menu-state">No matching commands or skills</div>
-      )}
-      {menu.candidates.map((item, index) => (
-        <button
+      <CommandList className="max-h-72 overflow-y-auto">
+        {menu.loading && menu.candidates.length === 0 && (
+          <div className="flex min-h-12 w-full items-center gap-2 rounded-lg px-2 text-sm text-muted-foreground">
+            <Spinner />Loading catalog…
+          </div>
+        )}
+        {menu.error && menu.candidates.length === 0 && (
+          <Button
+            type="button"
+            variant="ghost"
+            className="min-h-12 w-full justify-start gap-2 rounded-lg px-2 text-left text-sm text-destructive hover:bg-muted"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={menu.retry}
+          >
+            <Icons.reload aria-hidden="true" />
+            <span className="min-w-0 flex flex-col gap-0.5">
+              <strong className="text-foreground">Catalog unavailable</strong>
+              <small className="truncate text-muted-foreground">{menu.error}</small>
+            </span>
+          </Button>
+        )}
+        {!menu.loading && !menu.error && menu.candidates.length === 0 && (
+          <div className="flex min-h-12 items-center px-2 text-sm text-muted-foreground">No matching commands or skills</div>
+        )}
+        <CommandGroup>
+        {menu.candidates.map((item, index) => (
+        <CommandItem
           key={item.id}
-          type="button"
           role="option"
           aria-selected={index === menu.activeIndex}
-          className={`slash-command-menu-row ${index === menu.activeIndex ? "active" : ""}`}
+          className={cn(
+            "grid min-h-12 cursor-pointer grid-cols-[1.625rem_minmax(0,1fr)_auto] gap-2 rounded-lg px-2 py-1 text-sm",
+            index === menu.activeIndex && "bg-muted text-foreground",
+          )}
           onMouseEnter={() => menu.activate(index)}
           onMouseDown={(event) => {
             event.preventDefault();
             menu.complete(item);
           }}
         >
-          <span className={`slash-command-menu-icon ${item.kind}`}>
-            {item.kind === "skill" ? <Icons.sparkles size={15} /> : <Icons.terminal size={14} />}
+          <span className={cn(
+            "flex size-6 items-center justify-center rounded-md bg-muted text-muted-foreground",
+            item.kind === "skill" && "bg-primary/15 text-primary",
+          )}>
+            {item.kind === "skill" ? <Icons.sparkles aria-hidden="true" /> : <Icons.terminal aria-hidden="true" />}
           </span>
-          <span className="slash-command-menu-copy">
-            <strong>{item.displayName || item.invocation}</strong>
-            <small>{item.description || item.argumentHint || item.source}</small>
+          <span className="min-w-0 flex flex-col gap-0.5">
+            <strong className="truncate font-medium">{item.displayName || item.invocation}</strong>
+            <small className="truncate text-xs text-muted-foreground">{item.description || item.argumentHint || item.source}</small>
           </span>
-          <span className="slash-command-menu-meta">
+          <span className="max-w-28 truncate text-xs capitalize text-muted-foreground">
             {item.scope || (item.kind === "skill" ? "Skill" : item.kind === "prompt" ? "Prompt" : "Command")}
           </span>
-        </button>
-      ))}
-    </div>
+        </CommandItem>
+        ))}
+        </CommandGroup>
+      </CommandList>
+    </Command>
   );
 }

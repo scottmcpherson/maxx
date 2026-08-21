@@ -1,5 +1,17 @@
-import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { createPortal } from "react-dom";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Kbd } from "@/components/ui/kbd";
+import { Textarea } from "@/components/ui/textarea";
 import type { GitRepositoryStatus } from "../git";
 import { Icons } from "./Icons";
 
@@ -34,43 +46,6 @@ export function GitCommitDialog({
   onPush,
   onClose,
 }: GitCommitDialogProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const messageRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    messageRef.current?.focus();
-    return () => previouslyFocused?.focus();
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(
-        dialogRef.current?.querySelectorAll<HTMLElement>(
-          "button:not(:disabled), textarea:not(:disabled), input:not(:disabled)",
-        ) ?? [],
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
-
   const submitFromTextarea = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.metaKey && event.key === "Enter" && canCommit && !busy) {
       event.preventDefault();
@@ -78,41 +53,24 @@ export function GitCommitDialog({
     }
   };
 
-  return createPortal(
-    <div
-      className="git-commit-dialog-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose();
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !busy) onClose();
       }}
     >
-      <div
-        ref={dialogRef}
-        className="git-commit-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="git-commit-dialog-title"
-        aria-busy={busy}
-      >
-        <header className="git-commit-dialog-header">
-          <div id="git-commit-dialog-title" title={status.upstream ?? status.branch}>
-            <Icons.branch size={16} />
+      <DialogContent data-smoke="git-commit-dialog" showCloseButton={!busy}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2" title={status.upstream ?? status.branch}>
+            <Icons.branch data-icon="inline-start" />
             <span>{status.branch}</span>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="Close commit dialog"
-            title="Close"
-            disabled={busy}
-            onClick={onClose}
-          >
-            <Icons.close size={14} />
-          </button>
-        </header>
+          </DialogTitle>
+          <DialogDescription className="sr-only">Create a commit from the current Git changes.</DialogDescription>
+        </DialogHeader>
 
-        <label className="sr-only" htmlFor="git-commit-message">Commit message</label>
-        <textarea
-          ref={messageRef}
+        <Textarea
+          autoFocus
           id="git-commit-message"
           rows={4}
           value={message}
@@ -122,38 +80,55 @@ export function GitCommitDialog({
           onChange={(event) => onMessageChange(event.target.value)}
         />
 
-        <label className="git-include-changes-row">
-          <input
-            type="checkbox"
+        <Field orientation="horizontal" className="min-w-0" data-disabled={busy || status.files.length === 0}>
+          <Checkbox
+            id="git-include-changes"
             checked={includeUnstagedChanges}
             disabled={busy || status.files.length === 0}
-            onChange={(event) => onIncludeUnstagedChangesChange(event.target.checked)}
+            onCheckedChange={(checked) => onIncludeUnstagedChangesChange(checked === true)}
           />
-          <span>Include unstaged changes</span>
-          <span className="git-change-counts" aria-label={`${status.additions} additions, ${status.deletions} deletions`}>
-            <b>+{status.additions}</b><i>-{status.deletions}</i>
+          <FieldLabel htmlFor="git-include-changes" className="min-w-0">Include unstaged changes</FieldLabel>
+          <span className="ms-auto flex shrink-0 items-center gap-1 font-mono text-xs" aria-label={`${status.additions} additions, ${status.deletions} deletions`}>
+            <b className="font-medium text-success">+{status.additions}</b><i className="not-italic text-destructive">-{status.deletions}</i>
           </span>
-        </label>
+        </Field>
 
-        <div className="git-commit-dialog-actions">
-          <button type="button" disabled={busy || !canCommit} onClick={() => onCommit(false)}>
-            <Icons.commit size={16} />
+        <DialogFooter className="flex-col sm:flex-col">
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full"
+            disabled={busy || !canCommit}
+            onClick={() => onCommit(false)}
+          >
+            <Icons.commit data-icon="inline-start" />
             <span>{busy ? (message.trim() ? "Committing…" : "Generating and committing…") : "Commit"}</span>
-            {!busy && <kbd>⌘↩</kbd>}
-          </button>
-          <button type="button" disabled={busy || !canCommitAndPush} onClick={() => onCommit(true)}>
-            <Icons.arrowUp size={16} />
+            {!busy && <Kbd>⌘↩</Kbd>}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full"
+            disabled={busy || !canCommitAndPush}
+            onClick={() => onCommit(true)}
+          >
+            <Icons.arrowUp data-icon="inline-start" />
             <span>Commit and push</span>
-          </button>
-          <button type="button" disabled={busy || !canPush} onClick={onPush}>
-            <Icons.arrowUp size={16} />
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full"
+            disabled={busy || !canPush}
+            onClick={onPush}
+          >
+            <Icons.arrowUp data-icon="inline-start" />
             <span>Push</span>
-          </button>
-        </div>
+          </Button>
+        </DialogFooter>
 
-        {error && <p className="git-action-error" role="alert">{error}</p>}
-      </div>
-    </div>,
-    document.body,
+        {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+      </DialogContent>
+    </Dialog>
   );
 }

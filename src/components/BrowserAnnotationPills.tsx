@@ -1,21 +1,19 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowserAnnotation } from "../browser";
-import { annotationKind, annotationLabel, annotationPopoverPosition } from "../browserAnnotations";
-import { Icons } from "./Icons";
+import { annotationKind, annotationLabel } from "../browserAnnotations";
+import { IconButton } from "./ui/icon-button";
+import { Button } from "./ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { BubblesIcon, XIcon } from "lucide-react";
+import { cn } from "../lib/utils";
 
 function AnnotationPreview({ annotation }: { annotation: BrowserAnnotation }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [annotation.previewDataUrl]);
   if (annotation.previewDataUrl && !failed) {
-    return <img src={annotation.previewDataUrl} alt="" onError={() => setFailed(true)} />;
+    return <img className="size-full object-cover" src={annotation.previewDataUrl} alt="" onError={() => setFailed(true)} />;
   }
-  return <span className="browser-annotation-preview-fallback"><Icons.annotation size={15} /></span>;
-}
-
-interface PopoverPosition {
-  left: number;
-  top: number;
+  return <span className="grid size-full place-items-center bg-muted text-muted-foreground"><BubblesIcon /></span>;
 }
 
 export function BrowserAnnotationPills({
@@ -27,12 +25,8 @@ export function BrowserAnnotationPills({
   onClear?: () => void;
   readonly?: boolean;
 }) {
-  const popoverID = useId();
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<number | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const [popoverPosition, setPopoverPosition] = useState<PopoverPosition | null>(null);
 
   const cancelScheduledClose = useCallback(() => {
     if (closeTimerRef.current === null) return;
@@ -49,71 +43,27 @@ export function BrowserAnnotationPills({
     cancelScheduledClose();
     closeTimerRef.current = window.setTimeout(() => {
       setPopoverOpen(false);
-      setPopoverPosition(null);
       closeTimerRef.current = null;
     }, 160);
   }, [cancelScheduledClose]);
 
-  const updatePopoverPosition = useCallback(() => {
-    const trigger = triggerRef.current?.getBoundingClientRect();
-    const popover = popoverRef.current?.getBoundingClientRect();
-    if (!trigger || !popover) return;
-    setPopoverPosition(annotationPopoverPosition({
-      trigger,
-      popover,
-      viewport: { width: window.innerWidth, height: window.innerHeight },
-      alignRight: readonly,
-    }));
-  }, [readonly]);
-
-  useLayoutEffect(() => {
-    if (!popoverOpen) return;
-    updatePopoverPosition();
-  }, [annotations, popoverOpen, updatePopoverPosition]);
-
-  useEffect(() => {
-    if (!popoverOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      cancelScheduledClose();
-      setPopoverOpen(false);
-      setPopoverPosition(null);
-    };
-    window.addEventListener("resize", updatePopoverPosition);
-    window.addEventListener("scroll", updatePopoverPosition, true);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("resize", updatePopoverPosition);
-      window.removeEventListener("scroll", updatePopoverPosition, true);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [cancelScheduledClose, popoverOpen, updatePopoverPosition]);
-
   useEffect(() => () => cancelScheduledClose(), [cancelScheduledClose]);
-
   useEffect(() => {
     if (annotations.length > 0) return;
     cancelScheduledClose();
     setPopoverOpen(false);
-    setPopoverPosition(null);
   }, [annotations.length, cancelScheduledClose]);
 
   if (annotations.length === 0) return null;
   const noun = annotations.length === 1 ? "annotation" : "annotations";
 
   return (
-    <div className={`browser-annotation-attachment${readonly ? " is-readonly" : ""}`}>
-      {readonly && (
-        <div className="browser-annotation-preview-strip" aria-hidden="true">
-          {annotations.map((annotation) => (
-            <span key={annotation.id} className="browser-annotation-preview-tile">
-              <AnnotationPreview annotation={annotation} />
-            </span>
-          ))}
-        </div>
-      )}
+    <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
       <div
-        className="browser-annotation-summary"
+        className={cn(
+          "relative flex w-full max-w-full flex-col items-start gap-1.5 px-px pb-1",
+          readonly && "max-w-[42.5rem] items-end self-end pb-0",
+        )}
         onMouseEnter={openPopover}
         onMouseLeave={schedulePopoverClose}
         onFocusCapture={openPopover}
@@ -121,51 +71,54 @@ export function BrowserAnnotationPills({
           if (!event.currentTarget.contains(event.relatedTarget)) schedulePopoverClose();
         }}
       >
-        <div className="browser-annotation-summary-pill">
-          <button
-            ref={triggerRef}
-            type="button"
-            className="browser-annotation-summary-trigger"
-            aria-describedby={popoverOpen ? popoverID : undefined}
-            aria-expanded={popoverOpen}
-          >
-            <Icons.bubble size={13} />
+        {readonly && (
+          <div className="flex items-center justify-end gap-2" aria-hidden="true">
+            {annotations.map((annotation) => (
+              <span key={annotation.id} className="size-14 overflow-hidden rounded-lg border border-border bg-muted shadow-sm">
+                <AnnotationPreview annotation={annotation} />
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex max-w-full items-center overflow-hidden rounded-full border border-border bg-secondary text-secondary-foreground">
+          <PopoverTrigger render={<Button variant="secondary" size="sm" className="min-w-0 rounded-none border-0 bg-transparent" aria-expanded={popoverOpen} />}>
+            <BubblesIcon data-icon="inline-start" />
             <span>{annotations.length} {noun}</span>
-          </button>
+          </PopoverTrigger>
           {!readonly && onClear && (
-            <button type="button" className="browser-annotation-summary-clear" aria-label={`Remove all ${noun}`} onClick={onClear}>
-              <Icons.close size={10} />
-            </button>
+            <IconButton
+              label={`Remove all ${noun}`}
+              tooltip={`Remove all ${noun}`}
+              size="icon-xs"
+              className="me-1"
+              onClick={onClear}
+            >
+              <XIcon />
+            </IconButton>
           )}
         </div>
-      </div>
-      {popoverOpen && createPortal(
-        <div
-          ref={popoverRef}
-          id={popoverID}
-          className={`browser-annotation-popover${popoverPosition ? " is-positioned" : ""}`}
-          role="tooltip"
-          style={popoverPosition ?? undefined}
+        <PopoverContent
+          align={readonly ? "end" : "start"}
+          className="w-[min(24.375rem,calc(100vw-1.5rem))] max-h-[calc(100vh-1.5rem)] overflow-y-auto p-0"
           onMouseEnter={cancelScheduledClose}
           onMouseLeave={schedulePopoverClose}
         >
           {annotations.map((annotation) => (
-            <div key={annotation.id} className="browser-annotation-popover-row">
-              <span className="browser-annotation-popover-preview" aria-hidden="true">
+            <div key={annotation.id} className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)] gap-2.5 border-b border-border p-3 last:border-b-0">
+              <span className="mt-px size-14 overflow-hidden rounded-lg border border-border bg-muted">
                 <AnnotationPreview annotation={annotation} />
               </span>
-              <span className="browser-annotation-popover-copy">
-                <span className="browser-annotation-popover-target">
-                  <span className="browser-annotation-kind">{annotationKind(annotation)}</span>
-                  <span className="browser-annotation-label">{annotationLabel(annotation)}</span>
+              <span className="min-w-0 flex flex-col gap-1.5">
+                <span className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
+                  <span className="shrink-0 rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem]">{annotationKind(annotation)}</span>
+                  <span className="truncate">{annotationLabel(annotation)}</span>
                 </span>
-                <span className="browser-annotation-instruction">{annotation.instruction}</span>
+                <span className="text-sm leading-snug text-foreground select-text">{annotation.instruction}</span>
               </span>
             </div>
           ))}
-        </div>,
-        document.body,
-      )}
-    </div>
+        </PopoverContent>
+      </div>
+    </Popover>
   );
 }

@@ -1,6 +1,14 @@
 import { useCallback, useState } from "react";
 import { ipc, mediaURL } from "../ipc";
-import { Icons } from "./Icons";
+import { IconButton } from "./ui/icon-button";
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentGroup,
+  AttachmentMedia,
+} from "./ui/attachment";
+import { PlusIcon, XIcon } from "lucide-react";
 
 export function useImageAttachments() {
   const [paths, setPaths] = useState<string[]>([]);
@@ -28,34 +36,52 @@ export function AttachImagesButton({
   onChoose: () => void;
 }) {
   return (
-    <button
-      type="button"
-      className="attach-images-button"
-      title="Attach images"
-      aria-label="Attach images"
+    <IconButton
+      label="Attach images"
+      tooltip="Attach images"
+      size="icon-sm"
+      className="text-muted-foreground"
       disabled={disabled}
       onClick={onChoose}
     >
-      <Icons.plus size={16} />
-    </button>
+      <PlusIcon />
+    </IconButton>
   );
 }
 
 export function PendingImageStrip({ paths, onRemove }: { paths: string[]; onRemove: (path: string) => void }) {
   if (paths.length === 0) return null;
   return (
-    <div className="pending-image-strip" aria-label={`${paths.length} attached ${paths.length === 1 ? "image" : "images"}`}>
+    <AttachmentGroup
+      className="gap-2 overflow-x-auto px-px pb-1"
+      aria-label={`${paths.length} attached ${paths.length === 1 ? "image" : "images"}`}
+    >
       {paths.map((path) => {
         const name = path.split(/[\\/]/).pop() || "Image";
         return (
-          <div className="pending-image" key={path} title={name}>
-            <img src={mediaURL(path)} alt={name} />
-            <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(path)}>
-              <Icons.close size={12} />
-            </button>
-          </div>
+          <Attachment
+            key={path}
+            state="done"
+            size="sm"
+            orientation="vertical"
+            className="relative h-[4.5rem] w-[5.5rem] overflow-visible rounded-xl"
+            title={name}
+          >
+            <AttachmentMedia variant="image" className="size-full rounded-xl p-0">
+              <img src={mediaURL(path)} alt={name} />
+            </AttachmentMedia>
+            <AttachmentActions>
+              <AttachmentAction
+                aria-label={`Remove ${name}`}
+                title={`Remove ${name}`}
+                onClick={() => onRemove(path)}
+              >
+                <XIcon />
+              </AttachmentAction>
+            </AttachmentActions>
+          </Attachment>
         );
       })}
-    </div>
+    </AttachmentGroup>
   );
 }

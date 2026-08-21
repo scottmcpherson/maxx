@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { createPortal } from "react-dom";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ipc } from "../ipc";
 import { CHATS_PROJECT_ID, isChatsProject, projectName } from "../contract/types";
 import type { ChatThread } from "../contract/types";
@@ -30,23 +38,15 @@ import { threadActivity } from "../store/threadActivity";
 import { beginWindowDrag } from "../windowDrag";
 import { relativeTime } from "../relativeTime";
 import { Icons } from "./Icons";
+import { IconButton } from "./ui/icon-button";
 import { SidebarUpdateButton } from "./SidebarUpdateButton";
 import { ProjectFolderIcon } from "./ProjectFolderIcon";
+import { SettingsNavigation } from "./SettingsNavigation";
 import { DEFAULT_VOICE_SETTINGS } from "../voice/types";
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = "maxx.sidebar.collapsed-projects";
 const PROJECTS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.projects-section-collapsed";
 const CHATS_SECTION_COLLAPSED_STORAGE_KEY = "maxx.sidebar.chats-section-collapsed";
-
-interface ThreadMenuTarget {
-  hostID: string;
-  projectID: string;
-  threadID: string;
-  title: string;
-  pinned: boolean;
-  x: number;
-  y: number;
-}
 
 function loadCollapsedProjectIDs(): Set<string> {
   try {
@@ -77,7 +77,13 @@ function loadChatsSectionCollapsed(): boolean {
   }
 }
 
-export function Sidebar() {
+export function Sidebar({
+  settingsQuery,
+  onSettingsQueryChange,
+}: {
+  settingsQuery: string;
+  onSettingsQueryChange: (query: string) => void;
+}) {
   const workspace = useAppStore((state) => state.workspace);
   const remoteSessions = useAppStore((state) => state.remoteSessions);
   const hostStatus = useAppStore((state) => state.hostStatus);
@@ -104,8 +110,6 @@ export function Sidebar() {
   const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(loadProjectsSectionCollapsed);
   const [chatsSectionCollapsed, setChatsSectionCollapsed] = useState(loadChatsSectionCollapsed);
   const [pinnedThreadIDs, setPinnedThreadIDs] = useState(loadPinnedThreadIDs);
-  const [openProjectMenuID, setOpenProjectMenuID] = useState<string | null>(null);
-  const [threadMenu, setThreadMenu] = useState<ThreadMenuTarget | null>(null);
   const [addingOnHost, setAddingOnHost] = useState<{ id: string; name: string } | null>(null);
   const [hostPickerOpen, setHostPickerOpen] = useState(false);
   /** Attention row being read: stays listed until selection moves on. */
@@ -140,8 +144,6 @@ export function Sidebar() {
     ],
     [chatsProject, visibleProjects],
   );
-  const projectMenuRef = useRef<HTMLDivElement>(null);
-  const threadMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setPinnedThreadIDs((current) => {
@@ -194,41 +196,32 @@ export function Sidebar() {
   }, [chatsSectionCollapsed]);
 
   useEffect(() => {
-    if (!openProjectMenuID) return;
-    const close = (event: PointerEvent) => {
-      if (!projectMenuRef.current?.contains(event.target as Node)) {
-        setOpenProjectMenuID(null);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void ipc.onContextMenuAction((payload) => {
+      if (payload.kind === "thread" && payload.threadID && payload.hostID) {
+        if (payload.action === "pin") {
+          setPinnedThreadIDs((current) => {
+            const next = setThreadPinned(current, payload.threadID!, !payload.pinned);
+            if (next !== current) persistPinnedThreadIDs(next);
+            return next;
+          });
+        }
+        if (payload.action === "rename") openRenameDialog(payload.hostID, payload.projectID, payload.threadID);
+        if (payload.action === "delete") void removeThread(payload.projectID, payload.threadID);
       }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenProjectMenuID(null);
-    };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKeyDown);
+      if (payload.kind === "project" && payload.action === "remove_project" && payload.hostID) {
+        void removeProject(payload.projectID, payload.hostID);
+      }
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
     return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", onKeyDown);
+      disposed = true;
+      unlisten?.();
     };
-  }, [openProjectMenuID]);
-
-  useEffect(() => {
-    if (!threadMenu) return;
-    const close = (event: PointerEvent) => {
-      if (!threadMenuRef.current?.contains(event.target as Node)) setThreadMenu(null);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setThreadMenu(null);
-    };
-    const closeOnViewportChange = () => setThreadMenu(null);
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", closeOnViewportChange);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", closeOnViewportChange);
-    };
-  }, [threadMenu]);
+  }, [removeProject, removeThread]);
 
   const hosts = [
     { id: LOCAL_HOST_ID, name: hostStatus?.name ?? "This computer" },
@@ -263,7 +256,6 @@ export function Sidebar() {
   };
 
   const toggleProjectsSection = () => {
-    if (!projectsSectionCollapsed) setOpenProjectMenuID(null);
     setProjectsSectionCollapsed((current) => !current);
   };
 
@@ -283,30 +275,31 @@ export function Sidebar() {
     pinned: boolean,
   ) => {
     event.preventDefault();
-    setOpenProjectMenuID(null);
-    const surface = document.querySelector<HTMLElement>(".zoom-surface");
-    const bounds = surface?.getBoundingClientRect();
-    const scale = surface && bounds && surface.clientWidth > 0
-      ? bounds.width / surface.clientWidth
-      : 1;
-    const x = (event.clientX - (bounds?.left ?? 0)) / scale;
-    const y = (event.clientY - (bounds?.top ?? 0)) / scale;
-    const availableWidth = surface?.clientWidth ?? window.innerWidth;
-    const availableHeight = surface?.clientHeight ?? window.innerHeight;
-    setThreadMenu({
+    void ipc.openContextMenu({
+      kind: "thread",
+      x: event.clientX,
+      y: event.clientY,
       hostID,
       projectID,
       threadID: thread.id,
-      title: thread.title,
       pinned,
-      x: Math.max(8, Math.min(x, availableWidth - 172)),
-      y: Math.max(8, Math.min(y, availableHeight - 112)),
     });
   };
 
   const openRenameDialog = (hostID: string, projectID: string, threadID: string) => {
-    setThreadMenu(null);
     setRenamingThread({ hostID, projectID, threadID });
+  };
+
+  const openProjectMenu = (event: ReactMouseEvent, hostID: string, projectID: string) => {
+    event.stopPropagation();
+    const triggerBounds = event.currentTarget.getBoundingClientRect();
+    void ipc.openContextMenu({
+      kind: "project",
+      x: triggerBounds.right,
+      y: triggerBounds.bottom,
+      hostID,
+      projectID,
+    });
   };
 
   const attentionItems = useMemo(
@@ -351,50 +344,59 @@ export function Sidebar() {
         <span className="window-sidebar-toggle-cutout" aria-hidden="true" />
       </div>
 
+      {settingsOpen ? (
+        <SettingsNavigation
+          query={settingsQuery}
+          onQueryChange={onSettingsQueryChange}
+          onBack={() => setSettingsOpen(false)}
+        />
+      ) : (
+        <>
+
       <div className="sidebar-heading-row" onMouseDown={beginWindowDrag}>
         <span className="sidebar-app-title">Maxx</span>
-        <button
-          type="button"
-          className={`icon-button sidebar-search-button ${searchOpen ? "active" : ""}`}
-          title="Search (⌘K)"
-          aria-label="Search"
+        <IconButton
+          className={`sidebar-search-button ${searchOpen ? "active" : ""}`}
+          label="Search"
+          tooltip="Search (⌘K)"
           onClick={() => setSearchOpen(true)}
         >
-          <Icons.search size={15} />
-        </button>
-        <button
-          type="button"
-          className={`icon-button attention-bell ${attentionFilterOpen ? "active" : ""} ${attentionItems.length > 0 ? "has-attention" : ""}`}
-          title={attentionFilterOpen ? "Show all chats (⌥⌘U)" : "Show unread and waiting (⌥⌘U)"}
-          aria-label={attentionFilterOpen ? "Show all chats" : "Show unread and waiting chats"}
+          <Icons.search />
+        </IconButton>
+        <IconButton
+          className={`attention-bell ${attentionFilterOpen ? "active" : ""} ${attentionItems.length > 0 ? "has-attention" : ""}`}
+          label={attentionFilterOpen ? "Show all chats" : "Show unread and waiting chats"}
+          tooltip={attentionFilterOpen ? "Show all chats (⌥⌘U)" : "Show unread and waiting (⌥⌘U)"}
           aria-pressed={attentionFilterOpen}
           onClick={toggleAttentionFilter}
         >
-          <Icons.bell size={15} />
+          <Icons.bell />
           <span className="bell-dot" aria-hidden="true" />
-        </button>
+        </IconButton>
       </div>
 
       <nav className="sidebar-nav" aria-label="Main navigation">
-        <button className="nav-row" onClick={() => startNewThread(null, LOCAL_HOST_ID)}>
-          <Icons.compose size={15} />
+        <Button variant="ghost" className="nav-row justify-start" onClick={() => startNewThread(null, LOCAL_HOST_ID)}>
+          <Icons.compose data-icon="inline-start" />
           <span>New chat</span>
           <kbd>⌘N</kbd>
-        </button>
-        <button
-          className={`nav-row ${agentsOpen ? "active" : ""}`}
+        </Button>
+        <Button
+          variant="ghost"
+          className={`nav-row justify-start ${agentsOpen ? "active" : ""}`}
           onClick={() => setAgentsOpen(true)}
         >
-          <Icons.robot size={15} />
+          <Icons.robot data-icon="inline-start" />
           <span>Agents</span>
-        </button>
-        <button
-          className={`nav-row ${automationsOpen ? "active" : ""}`}
+        </Button>
+        <Button
+          variant="ghost"
+          className={`nav-row justify-start ${automationsOpen ? "active" : ""}`}
           onClick={() => setAutomationsOpen(true)}
         >
-          <Icons.clock size={15} />
+          <Icons.clock data-icon="inline-start" />
           <span>Automations</span>
-        </button>
+        </Button>
       </nav>
 
       <section
@@ -441,9 +443,10 @@ export function Sidebar() {
           )}
 
           <header className="repositories-header">
-            <button
+            <Button
               type="button"
-              className="repositories-disclosure"
+              variant="ghost"
+              className="repositories-disclosure w-full justify-start"
               aria-expanded={projectsExpanded}
               aria-controls="sidebar-projects"
               title={attentionFilterOpen ? "Projects are expanded while filtering" : undefined}
@@ -455,31 +458,36 @@ export function Sidebar() {
                 size={11}
                 className={`repositories-chevron ${projectsExpanded ? "is-expanded" : ""}`}
               />
-            </button>
-            <button
-              type="button"
-              className="icon-button repositories-add"
-              title="Open project folder"
-              aria-label="Open project folder"
-              onClick={() => void pickFolder()}
-            >
-              <Icons.plus size={15} />
-            </button>
-            {hostPickerOpen && (
-              <div className="host-choice-menu" role="menu" aria-label="Add project on host">
-                {hosts.map((host) => (
-                  <button
-                    key={host.id}
-                    type="button"
-                    className="host-choice-item"
-                    role="menuitem"
-                    onClick={() => void pickFolderOnHost(host.id, host.name)}
-                  >
-                    <Icons.computer size={15} />
-                    <span>{isLocalHost(host.id) ? `${host.name} (this computer)` : host.name}</span>
-                  </button>
-                ))}
-              </div>
+            </Button>
+            {remoteSessions.length === 0 ? (
+              <IconButton
+                className="repositories-add"
+                label="Open project folder"
+                tooltip="Open project folder"
+                onClick={() => void pickFolder()}
+              >
+                <Icons.plus />
+              </IconButton>
+            ) : (
+              <DropdownMenu open={hostPickerOpen} onOpenChange={setHostPickerOpen}>
+                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="repositories-add" />}>
+                  <Icons.plus />
+                  <span className="sr-only">Open project folder</span>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" aria-label="Add project on host">
+                  <DropdownMenuGroup>
+                    {hosts.map((host) => (
+                      <DropdownMenuItem
+                        key={host.id}
+                        onClick={() => void pickFolderOnHost(host.id, host.name)}
+                      >
+                        <Icons.computer />
+                        <span>{isLocalHost(host.id) ? `${host.name} (this computer)` : host.name}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
           </header>
 
@@ -492,10 +500,10 @@ export function Sidebar() {
             <div className="projects-reveal-inner">
               <div className="projects-list">
                 {visibleProjects.length === 0 && !attentionFilterOpen && (
-                  <button className="empty-project-cta" onClick={() => void pickFolder()}>
-                    <Icons.folder size={15} />
+                  <Button variant="ghost" className="empty-project-cta" onClick={() => void pickFolder()}>
+                    <Icons.folder data-icon="inline-start" />
                     <span>Open a project folder</span>
-                  </button>
+                  </Button>
                 )}
 
                 <div
@@ -526,10 +534,11 @@ export function Sidebar() {
                       aria-hidden={!projectVisible}
                     >
                       <div className="sidebar-filter-block-inner" inert={!projectVisible}>
-                        <header className={`project-header${openProjectMenuID === project.id ? " is-actions-open" : ""}`}>
-                          <button
+                        <header className="project-header">
+                          <Button
                             type="button"
-                            className="project-disclosure"
+                            variant="ghost"
+                            className="project-disclosure justify-start hover:bg-transparent!"
                             aria-label={remoteProject
                               ? `${projectName(project)} — Remote project on ${hostName}${remoteOffline ? ", offline" : ""}`
                               : undefined}
@@ -548,7 +557,7 @@ export function Sidebar() {
                               hostName={hostName}
                             />
                             <span className="project-name" title={project.folderPath}>{projectName(project)}</span>
-                          </button>
+                          </Button>
                           {remoteProject && (
                             <span
                               className={`project-host-label is-remote${remoteOffline ? " is-offline" : ""}`}
@@ -564,48 +573,24 @@ export function Sidebar() {
                               <span className="project-host-label-text">{hostName}</span>
                             </span>
                           )}
-                          <span
-                            className={`project-header-actions ${openProjectMenuID === project.id ? "is-open" : ""}`}
-                          >
-                            <div className="project-menu" ref={openProjectMenuID === project.id ? projectMenuRef : undefined}>
-                              <button
-                                type="button"
-                                className="icon-button"
-                                title="Project actions"
-                                aria-haspopup="menu"
-                                aria-expanded={openProjectMenuID === project.id}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setOpenProjectMenuID((current) => (current === project.id ? null : project.id));
-                                }}
-                              >
-                                <Icons.more size={15} />
-                              </button>
-                              {openProjectMenuID === project.id && (
-                                <div className="project-menu-popover" role="menu" aria-label="Project actions">
-                                  <button
-                                    type="button"
-                                    className="project-menu-item danger"
-                                    role="menuitem"
-                                    onClick={() => {
-                                      setOpenProjectMenuID(null);
-                                      void removeProject(project.id, hostId);
-                                    }}
-                                  >
-                                    Remove project
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              title="New chat in this project"
-                              aria-label={`New chat in ${projectName(project)}`}
+                          <span className="project-header-actions">
+                            <IconButton
+                              className="project-menu"
+                              size="icon-xs"
+                              label="Project actions"
+                              tooltip="Project actions"
+                              onClick={(event) => openProjectMenu(event, hostId, project.id)}
+                            >
+                              <Icons.more />
+                            </IconButton>
+                            <IconButton
+                              size="icon-xs"
+                              label={`New chat in ${projectName(project)}`}
+                              tooltip="New chat in this project"
                               onClick={() => startNewThread(project.id, hostId)}
                             >
-                              <Icons.compose size={15} />
-                            </button>
+                              <Icons.compose />
+                            </IconButton>
                           </span>
                         </header>
 
@@ -682,9 +667,10 @@ export function Sidebar() {
             >
               <div className="sidebar-filter-block-inner" inert={!chatsVisible}>
                 <header className="repositories-header chats-header">
-                  <button
+                  <Button
                     type="button"
-                    className="repositories-disclosure"
+                    variant="ghost"
+                    className="repositories-disclosure w-full justify-start"
                     aria-expanded={chatsExpanded}
                     aria-controls="sidebar-chats"
                     title={attentionFilterOpen ? "Chats are expanded while filtering" : undefined}
@@ -696,7 +682,7 @@ export function Sidebar() {
                       size={11}
                       className={`repositories-chevron ${chatsExpanded ? "is-expanded" : ""}`}
                     />
-                  </button>
+                  </Button>
                 </header>
                 <div
                   className={`projects-reveal ${chatsExpanded ? "is-expanded" : ""}`}
@@ -757,61 +743,18 @@ export function Sidebar() {
 
       <nav className="sidebar-footer" aria-label="Settings">
         <SidebarUpdateButton />
-        <button
+        <Button
+          variant="ghost"
           className={`nav-row ${settingsOpen ? "active" : ""}`}
           onClick={() => setSettingsOpen(true)}
         >
-          <Icons.settings size={15} />
+          <Icons.settings data-icon="inline-start" />
           <span>Settings</span>
           <kbd>⌘,</kbd>
-        </button>
+        </Button>
       </nav>
-
-      {threadMenu && createPortal((
-        <div
-          ref={threadMenuRef}
-          className="thread-context-menu"
-          role="menu"
-          aria-label={`Actions for ${threadMenu.title}`}
-          style={{ left: threadMenu.x, top: threadMenu.y }}
-        >
-          <button
-            type="button"
-            className="thread-context-menu-item"
-            role="menuitem"
-            onClick={() => {
-              updateThreadPin(threadMenu.threadID, !threadMenu.pinned);
-              setThreadMenu(null);
-            }}
-          >
-            {threadMenu.pinned ? "Unpin chat" : "Pin chat"}
-          </button>
-          <button
-            type="button"
-            className="thread-context-menu-item"
-            role="menuitem"
-            onClick={() => openRenameDialog(
-              threadMenu.hostID,
-              threadMenu.projectID,
-              threadMenu.threadID,
-            )}
-          >
-            Rename chat
-          </button>
-          <div className="thread-context-menu-separator" role="separator" />
-          <button
-            type="button"
-            className="thread-context-menu-item danger"
-            role="menuitem"
-            onClick={() => {
-              void removeThread(threadMenu.projectID, threadMenu.threadID);
-              setThreadMenu(null);
-            }}
-          >
-            Delete chat
-          </button>
-        </div>
-      ), document.querySelector(".zoom-surface") ?? document.body)}
+        </>
+      )}
     </aside>
   );
 }
@@ -854,9 +797,10 @@ function ThreadRow({
       className={`thread-row ${selected ? "selected" : ""}`}
       onContextMenu={onContextMenu}
     >
-      <button
+      <Button
         type="button"
-        className="thread-row-select"
+        variant="ghost"
+        className="thread-row-select pr-0! hover:bg-transparent!"
         onClick={onSelect}
         onDoubleClick={onRename}
         aria-busy={busy || undefined}
@@ -866,27 +810,27 @@ function ThreadRow({
         <ThreadStateMark activity={activity} unseen={unseen} />
         <span className="thread-title" title={thread.title}>{thread.title}</span>
         <span className="thread-time">{relativeTime(thread.updatedAt)}</span>
-      </button>
+      </Button>
       <span className="thread-actions">
-        <button
-          type="button"
-          className="icon-button thread-pin"
-          aria-label={`${pinned ? "Unpin" : "Pin"} ${thread.title}`}
-          title={pinned ? "Unpin thread" : "Pin thread"}
+        <IconButton
+          className="thread-pin"
+          size="icon-xs"
+          label={`${pinned ? "Unpin" : "Pin"} ${thread.title}`}
+          tooltip={pinned ? "Unpin thread" : "Pin thread"}
           aria-pressed={pinned}
           onClick={onTogglePin}
         >
-          {pinned ? <Icons.pinFilled size={15} /> : <Icons.pin size={15} />}
-        </button>
-        <button
-          type="button"
-          className="icon-button thread-delete"
-          aria-label={`Delete ${thread.title}`}
-          title="Delete thread"
+          {pinned ? <Icons.pinFilled /> : <Icons.pin />}
+        </IconButton>
+        <IconButton
+          className="thread-delete"
+          size="icon-xs"
+          label={`Delete ${thread.title}`}
+          tooltip="Delete thread"
           onClick={onDelete}
         >
-          <Icons.trash size={15} />
-        </button>
+          <Icons.trash />
+        </IconButton>
       </span>
     </div>
   );
@@ -903,7 +847,7 @@ function ThreadStateMark({
   if (activity.status === "running") {
     return (
       <span className="thread-state running" title="Running" aria-hidden="true">
-        <span className="mini-spinner thread-activity-spinner" />
+        <Spinner className="size-3" />
       </span>
     );
   }

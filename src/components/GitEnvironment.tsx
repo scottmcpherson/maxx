@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Spinner } from "@/components/ui/spinner";
 import {
   gitCanPush,
   gitFileStatusLabel,
@@ -169,58 +172,55 @@ export function GitEnvironment({
   };
 
   return (
-    <section className="context-section git-environment-section" aria-label="Git environment">
-      <h3>Environment</h3>
+    <section data-slot="git-environment" className="py-2.5 [-webkit-app-region:no-drag]" aria-label="Git environment">
+      <h3 className="mb-1.5 text-[0.6875rem] font-medium text-muted-foreground">Environment</h3>
 
-      <button
-        type="button"
-        className="git-environment-row"
-        aria-expanded={filesOpen}
-        onClick={() => setFilesOpen((current) => !current)}
-      >
-        <Icons.files size={14} />
-        <span>Changes</span>
-        <span className="git-change-counts" aria-label={`${status.additions} additions, ${status.deletions} deletions`}>
-          <b>+{status.additions}</b><i>-{status.deletions}</i>
-        </span>
-        <Icons.chevronDown size={11} className={filesOpen ? "is-expanded" : ""} />
-      </button>
-      {filesOpen && (
-        <div className="git-file-list" aria-label="Changed files">
+      <Collapsible open={filesOpen} onOpenChange={setFilesOpen}>
+        <CollapsibleTrigger render={<Button variant="ghost" size="sm" className="grid h-7 w-full grid-cols-[1rem_minmax(0,1fr)_auto_auto] justify-start gap-2 px-0.5! text-left text-xs text-muted-foreground" />}>
+          <Icons.files data-icon="inline-start" />
+          <span>Changes</span>
+          <span data-slot="git-change-counts" className="flex items-center gap-1 font-mono text-[0.65rem]" aria-label={`${status.additions} additions, ${status.deletions} deletions`}>
+            <b className="font-medium text-success">+{status.additions}</b><i className="not-italic text-destructive">-{status.deletions}</i>
+          </span>
+          <Icons.chevronDown data-icon="inline-end" className={filesOpen ? "rotate-180" : ""} />
+        </CollapsibleTrigger>
+        <CollapsibleContent className="mb-1 max-h-45 overflow-y-auto rounded-lg bg-black/15 p-1" aria-label="Changed files">
           {status.files.length === 0 ? (
-            <span className="git-file-empty">No uncommitted changes</span>
+            <span className="block p-2 text-xs text-muted-foreground">No uncommitted changes</span>
           ) : status.files.map((file) => (
-            <div className="git-file-row" key={file.path} title={file.path}>
-              <span>{file.path}</span>
-              <small>{gitFileStatusLabel(file)}</small>
+            <div className="flex min-h-7 min-w-0 items-center gap-2 rounded-md px-1.5 font-mono text-xs" key={file.path} title={file.path}>
+              <span className="min-w-0 flex-1 truncate">{file.path}</span>
+              <small className="shrink-0 text-muted-foreground">{gitFileStatusLabel(file)}</small>
             </div>
           ))}
-        </div>
-      )}
+        </CollapsibleContent>
+      </Collapsible>
 
-      <div className="git-environment-row static">
+      <div className="grid min-h-7 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 px-0.5 text-xs text-muted-foreground">
         <Icons.computer size={14} />
         <span>{remoteLabel}</span>
       </div>
-      <div className="git-environment-row static">
+      <div className="grid min-h-7 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 px-0.5 text-xs text-muted-foreground">
         <Icons.branch size={14} />
-        <span className="git-branch-name" title={status.upstream ?? status.branch}>{status.branch}</span>
-        {branchDetail && <small className="git-branch-detail">{branchDetail}</small>}
+        <span className="truncate" title={status.upstream ?? status.branch}>{status.branch}</span>
+        {branchDetail && <small className="font-mono text-[0.65rem] text-muted-foreground">{branchDetail}</small>}
       </div>
 
-      <button
+      <Button
         type="button"
-        className="git-environment-row git-primary-row"
+        variant="ghost"
+        size="sm"
+        className="h-7 w-full justify-start gap-2 px-0.5! text-xs text-muted-foreground"
         disabled={busy}
         onClick={openActions}
       >
-        <Icons.commit size={14} />
+        <Icons.commit data-icon="inline-start" />
         <span>Commit or push</span>
-        {busy && <span className="mini-spinner" />}
-      </button>
+        {busy && <Spinner data-icon="inline-end" />}
+      </Button>
 
-      {notice && <p className="git-action-notice" role="status">{notice}</p>}
-      {!actionOpen && error && <p className="git-action-error" role="alert">{error}</p>}
+      {notice && <p className="mt-2 text-xs text-success select-text" role="status">{notice}</p>}
+      {!actionOpen && error && <p className="mt-2 text-xs text-destructive select-text" role="alert">{error}</p>}
       {actionOpen && (
         <GitCommitDialog
           status={status}

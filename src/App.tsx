@@ -20,6 +20,8 @@ import { UpdateToast } from "./components/UpdateToast";
 import { HostConnectionMonitor } from "./components/HostConnectionMonitor";
 import { ipc } from "./ipc";
 import { useAppStore } from "./store/appStore";
+import { Tabs } from "@/components/ui/tabs";
+import type { SettingsSection } from "./components/SettingsNavigation";
 
 /** Cmd+= / Cmd++ / Cmd+- / Cmd+0 (and Ctrl on non-mac layouts). */
 function isZoomModifier(event: KeyboardEvent): boolean {
@@ -51,6 +53,8 @@ export default function App() {
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const browserOpen = useAppStore((s) => s.browserOpen);
   const selectedThreadID = useAppStore((s) => s.selectedThreadID);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("providers");
+  const [settingsQuery, setSettingsQuery] = useState("");
   // Keep the React surface mounted through its slide transition. Chromium tabs
   // themselves live in the Rust broker and survive this component unmounting.
   const [browserPresent, setBrowserPresent] = useState(browserOpen);
@@ -86,6 +90,18 @@ export default function App() {
   });
   const browserExpandedActive = browserExpanded && browserOpen && browserUnobscured;
   const browserVisible = browserPresent && browserUnobscured;
+
+  const selectSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+    setSettingsQuery("");
+  }, []);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      setSettingsSection("providers");
+      setSettingsQuery("");
+    }
+  }, [settingsOpen]);
   // The summary rail is the last claim on the row, so it is measured here where
   // both pane widths are already known. `browserPresent`, not `browserVisible`:
   // an obscured or closing pane still holds its slot in the layout.
@@ -298,7 +314,12 @@ export default function App() {
         the whole shell — including the right context rail — still fits the window.
       */}
       <div className="zoom-surface">
-        <div className={`app-shell${browserExpandedActive ? " is-browser-expanded" : ""}`}>
+        <Tabs
+          value={settingsSection}
+          orientation="vertical"
+          onValueChange={(value) => selectSettingsSection(value as SettingsSection)}
+          className={`app-shell gap-0${browserExpandedActive ? " is-browser-expanded" : ""}`}
+        >
           {/* Outside every pane: it has to stay put while the sidebar slides.
               Each underlying titlebar owns a matching no-drag cutout so native
               hit testing reaches this stationary control. */}
@@ -310,7 +331,10 @@ export default function App() {
             aria-hidden={!sidebarOpen}
             inert={!sidebarOpen}
           >
-            <Sidebar />
+            <Sidebar
+              settingsQuery={settingsQuery}
+              onSettingsQueryChange={setSettingsQuery}
+            />
           </div>
           <SidebarResizer
             width={sidebarWidth}
@@ -318,7 +342,9 @@ export default function App() {
             commitWidth={commitWidth}
             hidden={!sidebarOpen}
           />
-          {automationsOpen ? (
+          {settingsOpen ? (
+            <SettingsPanel section={settingsSection} query={settingsQuery} />
+          ) : automationsOpen ? (
             <AutomationsView />
           ) : agentsOpen ? (
             <AgentsView />
@@ -356,10 +382,9 @@ export default function App() {
               />
             )}
           </div>
-          {settingsOpen && <SettingsPanel />}
           {searchOpen && <SearchPalette />}
           {renameOpen && <RenameThreadDialog />}
-        </div>
+        </Tabs>
       </div>
       {/* HUD stays outside the scaled surface so fixed positioning tracks the real window. */}
       <ZoomControls onReady={onZoomReady} />

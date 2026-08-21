@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { Toaster } from "@/components/ui/toast";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { installBrowserPreviewBridge } from "./previewBridge";
 import "streamdown/styles.css";
 import "./streamdown.css";
@@ -31,6 +33,10 @@ document.addEventListener(
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <TooltipProvider delay={400}>
+      <Toaster>
+        <App />
+      </Toaster>
+    </TooltipProvider>
   </React.StrictMode>,
 );

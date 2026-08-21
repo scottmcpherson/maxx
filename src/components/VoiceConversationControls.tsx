@@ -1,5 +1,10 @@
 import type { VoiceConversation } from "../voice/useVoiceConversation";
-import { Icons } from "./Icons";
+import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
+import { Alert, AlertDescription } from "./ui/alert";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import { MicOffIcon, MicIcon, SquareIcon, AudioLinesIcon } from "lucide-react";
+import { cn } from "../lib/utils";
 
 export type ComposerPrimaryAction = "conversation" | "send" | "stop-conversation";
 
@@ -30,16 +35,14 @@ export function VoiceConversationActionButton({
 }) {
   const label = active ? "Stop conversation" : "Start conversation";
   return (
-    <button
-      type="button"
-      className={`send-button voice-conversation-action${active ? " stop" : ""}`}
-      onClick={onClick}
-      disabled={disabled}
-      title={title ?? label}
-      aria-label={label}
-    >
-      {active ? <Icons.stop size={14} /> : <Icons.waveform size={16} />}
-    </button>
+    <div className="shrink-0" aria-label={label} title={title ?? label}>
+      <Tooltip>
+        <TooltipTrigger render={<Button variant={active ? "destructive" : "default"} size="icon-sm" className="rounded-full" aria-label={label} disabled={disabled} onClick={onClick} />}>
+          {active ? <SquareIcon /> : <AudioLinesIcon />}
+        </TooltipTrigger>
+        <TooltipContent>{title ?? label}</TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -59,40 +62,38 @@ export function VoiceConversationControls({
   const canFinish = manual && snapshot.state === "transcribing";
   const canRetry = snapshot.state === "error" || snapshot.state === "reconnecting";
   return (
-    <div className="voice-conversation-controls" aria-label="Voice conversation controls">
-      <span
-        className={`voice-conversation-status state-${snapshot.state}`}
-        role="status"
-        aria-live="polite"
-      >
-        <span className="voice-conversation-dot" aria-hidden="true" />
+    <div className="flex flex-wrap items-center gap-2" aria-label="Voice conversation controls">
+      <Badge variant={snapshot.error ? "destructive" : "secondary"} role="status" aria-live="polite" className="gap-1.5">
+        <span className={cn("size-1.5 rounded-full bg-primary", snapshot.error && "bg-destructive")} aria-hidden="true" />
         {conversation.status}
-        {snapshot.muted && <span className="voice-conversation-muted">Muted</span>}
-      </span>
-      <button
+        {snapshot.muted && <span>Muted</span>}
+      </Badge>
+      <Button
         type="button"
-        className={`voice-conversation-button${snapshot.muted ? " is-active" : ""}`}
+        variant={snapshot.muted ? "secondary" : "outline"}
+        size="sm"
         onClick={snapshot.muted ? conversation.unmute : conversation.mute}
         aria-pressed={snapshot.muted}
       >
+        {snapshot.muted ? <MicIcon data-icon="inline-start" /> : <MicOffIcon data-icon="inline-start" />}
         {snapshot.muted ? "Unmute" : "Mute"}
-      </button>
+      </Button>
       {canFinish && (
-        <button type="button" className="voice-conversation-button" onClick={conversation.finishUtterance}>
+        <Button type="button" variant="outline" size="sm" onClick={conversation.finishUtterance}>
           Finish utterance
-        </button>
+        </Button>
       )}
       {canInterrupt && (
-        <button type="button" className="voice-conversation-button interrupt" onClick={conversation.interrupt}>
+        <Button type="button" variant="destructive" size="sm" onClick={conversation.interrupt}>
           Interrupt
-        </button>
+        </Button>
       )}
       {canRetry && (
-        <button type="button" className="voice-conversation-button" onClick={conversation.retry}>
+        <Button type="button" variant="outline" size="sm" onClick={conversation.retry}>
           Retry
-        </button>
+        </Button>
       )}
-      {snapshot.error && <span className="voice-conversation-error">{snapshot.error}</span>}
+      {snapshot.error && <Alert variant="destructive" className="px-2 py-1"><AlertDescription className="text-xs">{snapshot.error}</AlertDescription></Alert>}
     </div>
   );
 }

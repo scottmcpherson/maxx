@@ -13,6 +13,9 @@ import { ipc } from "../ipc";
 import { decodeBase64Chunks, writeTerminalBatch } from "../terminalStream";
 import { createTerminalEmulator, encodeTerminalInput, terminalArchive } from "../terminalEmulator";
 import { Icons } from "./Icons";
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 
 export interface TerminalViewHandle {
   archiveText: () => string;
@@ -139,11 +142,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, {
 
   const waitingForFirstTurn = !thread.providerSessionID || initialTurnRunning;
   return (
-    <section className="terminal-chat" aria-label={`${thread.provider} terminal chat`}>
+    <section className="relative mx-3 mb-3 min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-background" aria-label={`${thread.provider} terminal chat`}>
       <div ref={containerRef} className="terminal-emulator" />
       {(waitingForFirstTurn || starting) && (
-        <div className="terminal-state-card" role="status">
-          <span className="loading-orb" />
+        <div className="absolute top-1/2 left-1/2 flex min-w-[min(21.875rem,calc(100%-2.75rem))] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 rounded-xl border border-border bg-card/95 p-4.5 text-center text-sm text-muted-foreground shadow-xl" role="status">
+          <Spinner />
           <strong>{waitingForFirstTurn ? "Preparing terminal session" : "Opening terminal"}</strong>
           <span>
             {waitingForFirstTurn
@@ -153,24 +156,24 @@ export const TerminalView = forwardRef<TerminalViewHandle, {
         </div>
       )}
       {!waitingForFirstTurn && !starting && status?.state === "exited" && (
-        <div className="terminal-ended-bar" role="status">
+        <div className="absolute bottom-3.5 left-1/2 z-3 flex max-w-[calc(100%-1.75rem)] flex-wrap items-center justify-center gap-2.5 rounded-xl border border-border bg-card/95 p-2.5 text-sm text-muted-foreground shadow-xl" role="status">
           <Icons.terminal size={17} />
-          <div className="terminal-ended-copy">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-center sm:text-left">
             <strong>Terminal session ended</strong>
             <span>{error || `The ${thread.provider} CLI exited.`}</span>
           </div>
-          <button onClick={() => void openTerminal(true)}>Restart terminal</button>
-          <button className="secondary" onClick={onReturnToGUI}>Return to GUI</button>
+          <Button size="sm" onClick={() => void openTerminal(true)}>Restart terminal</Button>
+          <Button size="sm" variant="secondary" onClick={onReturnToGUI}>Return to GUI</Button>
         </div>
       )}
       {error && status?.state !== "exited" && (
-        <div className="terminal-error" role="alert">
-          <span>{error}</span>
-          {!waitingForFirstTurn && <button onClick={() => { setError(null); void openTerminal(); }}>Try again</button>}
-        </div>
+        <Alert className="absolute right-3 bottom-3 left-3 z-3" variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+          {!waitingForFirstTurn && <AlertAction><Button size="sm" variant="outline" onClick={() => { setError(null); void openTerminal(); }}>Try again</Button></AlertAction>}
+        </Alert>
       )}
       {status && !status.browserAvailable && (
-        <div className="terminal-capability-note">Maxx Browser is unavailable in this provider’s terminal mode.</div>
+        <div className="pointer-events-none absolute right-2.5 bottom-2 z-2 rounded-md bg-background/90 px-2 py-1 text-xs text-muted-foreground">Maxx Browser is unavailable in this provider’s terminal mode.</div>
       )}
     </section>
   );

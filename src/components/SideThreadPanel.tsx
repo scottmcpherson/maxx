@@ -11,6 +11,8 @@ import { MentionMenu, useMentionMenu } from "./MentionMenu";
 import { MentionTextarea } from "./MentionTextarea";
 import { QueuedMessages } from "./QueuedMessages";
 import { ThreadTimeline, buildRows } from "./ThreadView";
+import { IconButton } from "@/components/ui/icon-button";
+import { Spinner } from "@/components/ui/spinner";
 
 /**
  * Slack-style reply panel for one side thread: agents answer here, and
@@ -127,15 +129,15 @@ export function SideThreadPanel({
   };
 
   return (
-    <aside className="side-thread-panel" aria-label="Side thread">
-      <header className="side-thread-header" onMouseDown={beginWindowDrag}>
-        <div className="side-thread-heading">
+    <aside className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background" aria-label="Side thread">
+      <header className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border px-3.5 text-xs font-semibold text-muted-foreground" onMouseDown={beginWindowDrag}>
+        <div className="flex shrink-0 items-center gap-1.5">
           <Icons.bubble size={14} />
           <span>Thread</span>
         </div>
-        <div className="side-thread-participants" aria-label="Participating agents">
+        <div className="flex min-w-0 flex-1 items-center" aria-label="Participating agents">
           {participants.map((agent) => (
-            <span key={agent.id} className="side-thread-participant" title={agent.name}>
+            <span key={agent.id} className="-me-1 inline-flex shrink-0 rounded-full ring-2 ring-background" title={agent.name}>
               <AgentAvatar
                 name={agent.name}
                 colorHex={agent.colorHex}
@@ -146,9 +148,9 @@ export function SideThreadPanel({
             </span>
           ))}
         </div>
-        <button className="icon-button" title="Close thread" onClick={onClose}>
-          <Icons.close size={14} />
-        </button>
+        <IconButton label="Close thread" onClick={onClose}>
+          <Icons.close />
+        </IconButton>
       </header>
 
       <ThreadTimeline
@@ -166,7 +168,7 @@ export function SideThreadPanel({
         turnTimes={turnTimes}
       />
 
-      <footer className="side-thread-composer">
+      <footer className="flex shrink-0 flex-col gap-2 px-3 pt-2 pb-8">
         <QueuedMessages
           messages={queuedMessages}
           isRunning={isRunning}
@@ -176,7 +178,7 @@ export function SideThreadPanel({
           onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
           onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
         />
-        <div className="composer">
+        <div className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
           <MentionMenu menu={mentionMenu} />
           <PendingImageStrip paths={images.paths} onRemove={images.remove} />
           <MentionTextarea
@@ -202,38 +204,44 @@ export function SideThreadPanel({
               }
             }}
           />
-          <div className="composer-toolbar">
+          <div className="flex min-h-7 items-end justify-between gap-2">
             {/* No single "replying to" addressee: any mix of agents can be
                 mentioned in one reply, and the composer already shows them as
                 pills. Unmentioned replies go to whoever spoke last. */}
             <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
             {isRunning ? (
-              <div className="composer-actions">
-                <button
-                  className="send-button stop"
-                  title="Stop generation"
+              <div className="flex items-center gap-2.5">
+                <IconButton
+                  label="Stop generation"
+                  variant="destructive"
+                  size="icon-sm"
+                  className="rounded-full"
                   onClick={() => void cancelActiveTurn(thread.id)}
                 >
-                  <Icons.stop size={14} />
-                </button>
-                <button
-                  className="send-button"
-                  title={submitting ? "Queueing reply" : "Queue reply"}
+                  <Icons.stop />
+                </IconButton>
+                <IconButton
+                  label={submitting ? "Queueing reply" : "Queue reply"}
+                  variant="default"
+                  size="icon-sm"
+                  className="rounded-full"
                   disabled={submitting || (!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
                   onClick={() => void submit()}
                 >
-                  <Icons.arrowUp size={16} />
-                </button>
+                  {submitting ? <Spinner /> : <Icons.arrowUp />}
+                </IconButton>
               </div>
             ) : (
-              <button
-                className="send-button"
-                title="Send reply"
+              <IconButton
+                label="Send reply"
+                variant="default"
+                size="icon-sm"
+                className="rounded-full"
                 disabled={(!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
                 onClick={() => void submit()}
               >
-                <Icons.arrowUp size={16} />
-              </button>
+                <Icons.arrowUp />
+              </IconButton>
             )}
           </div>
         </div>

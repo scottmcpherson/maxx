@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import type {
   ProviderHealth,
   ProviderModelOption,
@@ -12,6 +12,13 @@ import {
 } from "../providerSettings";
 import { Icons } from "./Icons";
 import { ProviderIcon } from "./ProviderIcon";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 
 interface ProviderSettingsRowProps {
   profile: ProviderProfile;
@@ -44,6 +51,7 @@ export function ProviderSettingsRow({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [modelQuery, setModelQuery] = useState("");
+  const detailsId = useId();
 
   useEffect(() => {
     setExecutablePath(profile.executablePath ?? "");
@@ -92,168 +100,191 @@ export function ProviderSettingsRow({
   };
 
   return (
-    <div className={`provider-settings-row ${expanded ? "is-expanded" : ""}`}>
-      <div className="provider-settings-summary">
-        <ProviderIcon provider={profile.provider} size={20} />
-        <span className="provider-settings-name">
-          <strong>{profile.displayName}</strong>
-          <small>{pending ? "Checking installation…" : subtitle}</small>
-        </span>
-        <span className={`health-badge health-${status}`}>{status}</span>
-        <button
+    <div className={cn("flex flex-col text-card-foreground", expanded && "bg-muted/10")}>
+      <div
+        className="pointer-events-none relative flex min-h-11 flex-wrap items-center gap-3 px-3 py-2"
+      >
+        <Button
           type="button"
-          className="provider-disclosure"
+          variant="ghost"
+          className="pointer-events-auto absolute inset-0 z-0 h-full w-full rounded-none p-0 hover:bg-muted/30 focus-visible:bg-muted/30"
           aria-label={`${expanded ? "Collapse" : "Expand"} ${profile.displayName} details`}
           aria-expanded={expanded}
+          aria-controls={detailsId}
           onClick={onToggleExpanded}
+        />
+        <span className="relative z-10 flex size-6 shrink-0 items-center justify-center text-muted-foreground" aria-hidden="true">
+          {expanded ? <Icons.chevronDown /> : <Icons.chevronRight />}
+        </span>
+        <span className="relative z-10 flex shrink-0" aria-hidden="true">
+          <ProviderIcon provider={profile.provider} size={20} />
+        </span>
+        <div className="relative z-10 flex min-w-0 flex-1 flex-col gap-0.5">
+          <strong className="truncate text-sm">{profile.displayName}</strong>
+          <span className="truncate text-xs text-muted-foreground">{pending ? "Checking installation…" : subtitle}</span>
+        </div>
+        <Badge
+          variant={status === "missing" ? "destructive" : "secondary"}
+          className={cn("relative z-10", status === "ready" && "bg-success/10 text-success")}
         >
-          {expanded ? <Icons.chevronDown size={14} /> : <Icons.chevronRight size={14} />}
-        </button>
-        <label className="switch">
-          <input
-            type="checkbox"
+          {status}
+        </Badge>
+        <div
+          className="pointer-events-auto relative z-10 flex shrink-0 items-center"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <Switch
             checked={profile.isEnabled}
             disabled={pending}
             aria-label={`Enable ${profile.displayName}`}
-            onChange={(event) => onToggleEnabled(event.target.checked)}
+            onCheckedChange={onToggleEnabled}
           />
-          <span />
-        </label>
+        </div>
       </div>
 
       {expanded && (
-        <div className="provider-settings-details">
+        <div id={detailsId} className="flex flex-col gap-5 border-t border-border/50 p-4">
           {health?.state === "missing" && (
-            <div className="provider-install-callout" role="status">
-              <span>
-                <strong>{profile.displayName} is not available.</strong>
-                <small>Install the CLI or point Maxx at an existing executable, then recheck.</small>
-              </span>
-              <a
-                className="provider-install-button"
-                href={guide.url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Install {profile.displayName}
-              </a>
-            </div>
+            <Alert>
+              <AlertTitle>{profile.displayName} is not available.</AlertTitle>
+              <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+                <span>Install the CLI or point Maxx at an existing executable, then recheck.</span>
+                <Button
+                  size="sm"
+                  render={<a
+                    href={guide.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  />}
+                  nativeButton={false}
+                >
+                  Install {profile.displayName}
+                </Button>
+              </AlertDescription>
+            </Alert>
           )}
 
-          <div className="provider-detail-section">
-            <div className="provider-detail-heading">
-              <span>
-                <strong>Executable</strong>
-                <small>
+          <section className="flex flex-col gap-3">
+            <div className="grid grid-cols-1 items-start gap-2 @2xl:grid-cols-[minmax(0,1fr)_auto] @2xl:gap-3">
+              <div className="flex flex-col gap-1">
+                <strong className="text-sm">Executable</strong>
+                <FieldDescription>
                   {health?.executablePath
                     ? `Detected at ${health.executablePath}`
                     : `Auto-detects ${guide.executable} in common install locations and PATH.`}
-                </small>
-              </span>
-              <button
+                </FieldDescription>
+              </div>
+              <Button
                 type="button"
-                className="settings-secondary-button"
+                variant="outline"
+                size="sm"
                 disabled={pending}
                 onClick={() => void Promise.all([onRecheck(), loadModels()])}
               >
                 Recheck
-              </button>
+              </Button>
             </div>
-            <div className="provider-path-editor">
-              <input
-                value={executablePath}
-                aria-label={`${profile.displayName} executable path`}
-                placeholder={`Auto-detect ${guide.executable}`}
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                onChange={(event) => setExecutablePath(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && pathChanged) void savePath();
-                }}
-              />
-              <button
-                type="button"
-                className="settings-secondary-button"
-                disabled={!pathChanged || pending}
-                onClick={() => void savePath()}
-              >
-                Save path
-              </button>
-            </div>
-            {health?.message && <p className="provider-health-message">{health.message}</p>}
-          </div>
-
-          <div className="provider-detail-section provider-model-settings">
-            <div className="provider-detail-heading">
-              <span>
-                <strong>Models</strong>
-                <small>Turn off models you do not want shown in the composer model picker.</small>
-              </span>
-              {!modelsLoading && models.length > 0 && (
-                <small>{hasModelQuery ? `${filteredModels.length} of ${models.length}` : `${models.length} available`}</small>
-              )}
-            </div>
-            {modelsLoading && <p className="provider-model-state">Loading models…</p>}
-            {!modelsLoading && modelsError && (
-              <div className="provider-model-state error" role="status">
-                <span>{modelsError}</span>
-                <button type="button" className="settings-secondary-button" onClick={() => void loadModels()}>
-                  Retry
-                </button>
-              </div>
-            )}
-            {!modelsLoading && !modelsError && models.length === 0 && (
-              <p className="provider-model-state">No models were reported by this provider.</p>
-            )}
-            {!modelsLoading && models.length > 0 && (
-              <label className="provider-model-search">
-                <Icons.search size={13} />
-                <input
-                  type="search"
-                  value={modelQuery}
-                  aria-label={`Search ${profile.displayName} models`}
-                  placeholder={`Search ${profile.displayName} models`}
+            <Field>
+              <FieldLabel htmlFor={`${profile.id}-executable`} className="sr-only">Executable path</FieldLabel>
+              <div className="grid grid-cols-1 gap-2 @2xl:grid-cols-[minmax(0,1fr)_auto]">
+                <Input
+                  id={`${profile.id}-executable`}
+                  value={executablePath}
+                  aria-label={`${profile.displayName} executable path`}
+                  placeholder={`Auto-detect ${guide.executable}`}
                   spellCheck={false}
-                  autoComplete="off"
                   autoCapitalize="off"
                   autoCorrect="off"
-                  onChange={(event) => setModelQuery(event.target.value)}
+                  onChange={(event) => setExecutablePath(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && pathChanged) void savePath();
+                  }}
                 />
-              </label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!pathChanged || pending}
+                  onClick={() => void savePath()}
+                >
+                  Save path
+                </Button>
+              </div>
+            </Field>
+            {health?.message && <p className="text-sm text-muted-foreground">{health.message}</p>}
+          </section>
+
+          <section className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex flex-col gap-1">
+                <strong className="text-sm">Models</strong>
+                <FieldDescription>Turn off models you do not want shown in the composer model picker.</FieldDescription>
+              </div>
+              {!modelsLoading && models.length > 0 && (
+                <span className="text-xs text-muted-foreground">{hasModelQuery ? `${filteredModels.length} of ${models.length}` : `${models.length} available`}</span>
+              )}
+            </div>
+            {modelsLoading && <p className="text-sm text-muted-foreground" role="status">Loading models…</p>}
+            {!modelsLoading && modelsError && (
+              <Alert variant="destructive">
+                <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+                  <span>{modelsError}</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void loadModels()}>Retry</Button>
+                </AlertDescription>
+              </Alert>
+            )}
+            {!modelsLoading && !modelsError && models.length === 0 && (
+              <p className="text-sm text-muted-foreground">No models were reported by this provider.</p>
+            )}
+            {!modelsLoading && models.length > 0 && (
+              <Field>
+                <FieldLabel htmlFor={`${profile.id}-model-search`} className="sr-only">Search models</FieldLabel>
+                <div className="relative">
+                  <Icons.search className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                  <Input
+                    id={`${profile.id}-model-search`}
+                    className="pl-8"
+                    type="search"
+                    value={modelQuery}
+                    aria-label={`Search ${profile.displayName} models`}
+                    placeholder={`Search ${profile.displayName} models`}
+                    spellCheck={false}
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    onChange={(event) => setModelQuery(event.target.value)}
+                  />
+                </div>
+              </Field>
             )}
             {!modelsLoading && models.length > 0 && filteredModels.length === 0 && (
-              <p className="provider-model-state">No models match “{modelQuery.trim()}”.</p>
+              <p className="text-sm text-muted-foreground">No models match “{modelQuery.trim()}”.</p>
             )}
             {!modelsLoading && filteredModels.length > 0 && (
-              <div className="provider-model-list" role="group" aria-label={`${profile.displayName} model visibility`}>
+              <div
+                className="flex max-h-60 flex-col divide-y overflow-y-auto overscroll-contain rounded-lg border"
+                role="group"
+                aria-label={`${profile.displayName} model visibility`}
+              >
                 {filteredModels.map((model) => {
                   const visible = !(profile.hiddenModels ?? []).includes(model.model);
                   return (
-                    <div className="provider-model-row" key={model.model}>
-                      <span>
-                        <strong>{model.displayName}</strong>
-                        {model.description && <small>{model.description}</small>}
-                      </span>
-                      <label className="switch">
-                        <input
-                          type="checkbox"
-                          checked={visible}
-                          aria-label={`Show ${model.displayName} in model picker`}
-                          onChange={(event) => void onSaveProfile(setModelVisibility(
-                            profile,
-                            model.model,
-                            event.target.checked,
-                          ))}
-                        />
-                        <span />
-                      </label>
+                    <div className="flex items-center gap-3 p-3" key={model.model}>
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <strong className="truncate text-sm">{model.displayName}</strong>
+                        {model.description && <span className="text-xs text-muted-foreground">{model.description}</span>}
+                      </div>
+                      <Switch
+                        checked={visible}
+                        aria-label={`Show ${model.displayName} in model picker`}
+                        onCheckedChange={(checked) => void onSaveProfile(setModelVisibility(profile, model.model, checked))}
+                      />
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
+          </section>
         </div>
       )}
     </div>

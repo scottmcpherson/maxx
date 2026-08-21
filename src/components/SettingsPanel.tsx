@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../ipc";
 import { providerDisplayName } from "../contract/types";
 import type { ProviderHealth, ProviderProfile } from "../contract/types";
@@ -39,10 +39,32 @@ import { beginWindowDrag } from "../windowDrag";
 import { Icons } from "./Icons";
 import { ProviderSettingsRow } from "./ProviderSettingsRow";
 import { RuntimePicker } from "./RuntimePicker";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription } from "@/components/ui/card";
+import { Field, FieldContent, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
+import type { SettingsSection } from "./SettingsNavigation";
 
-type SettingsSection = "providers" | "voice" | "keyboardShortcuts" | "connections" | "experimental";
+// Settings rows are a two-column form on desktop and a single-column form on
+// narrow windows. The control column has a bounded width so labels retain
+// readable space and inputs never force the copy into a sliver.
+const settingsRowClass = "grid grid-cols-1 gap-3 border-b border-border/50 p-3 last:border-b-0 @2xl:grid-cols-[minmax(0,1fr)_minmax(12rem,16rem)] @2xl:items-center @2xl:gap-5";
+const settingsCompactControlRowClass = "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border/50 p-3 last:border-b-0";
+const settingsPickerRowClass = "grid grid-cols-1 items-center gap-3 border-b border-border/50 p-3 last:border-b-0 @2xl:grid-cols-[minmax(0,1fr)_auto] @2xl:gap-5";
+const settingsCardClass = "block shrink-0 py-0";
+const settingsInlineAlertClass = "rounded-none border-0";
+const settingsRowCopyClass = "flex min-w-0 flex-1 flex-col gap-1 [&_strong]:font-medium [&_small]:text-xs [&_small]:leading-relaxed [&_small]:text-muted-foreground [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5";
+const settingsPageTitleClass = "text-xl font-semibold tracking-tight";
+const settingsPageDescriptionClass = "max-w-2xl text-sm leading-relaxed text-muted-foreground";
+const settingsPageHeaderClass = "flex items-start justify-between gap-4";
 
-export function SettingsPanel() {
+export function SettingsPanel({ section, query }: { section: SettingsSection; query: string }) {
+  const scrollContainerRef = useRef<HTMLElement>(null);
   const workspace = useAppStore((state) => state.workspace);
   const saveProfiles = useAppStore((state) => state.saveProfiles);
   const saveTitleGenerationRuntime = useAppStore((state) => state.saveTitleGenerationRuntime);
@@ -54,10 +76,8 @@ export function SettingsPanel() {
   const setShowProviderDiagnostics = useAppStore((state) => state.setShowProviderDiagnostics);
   const defaultRuntime = useAppStore((state) => state.defaultRuntime);
   const setDefaultRuntime = useAppStore((state) => state.setDefaultRuntime);
-  const [section, setSection] = useState<SettingsSection>("providers");
   const [drafts, setDrafts] = useState<ProviderProfile[]>([]);
   const [health, setHealth] = useState<Record<string, ProviderHealth>>({});
-  const [query, setQuery] = useState("");
   const [expandedProfileID, setExpandedProfileID] = useState<string | null>(null);
   const [pendingProfileIDs, setPendingProfileIDs] = useState<Set<string>>(() => new Set());
   const providerHealthContext = useMemo(() => JSON.stringify(
@@ -81,11 +101,6 @@ export function SettingsPanel() {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [setSettingsOpen]);
-
-  const selectSection = (nextSection: SettingsSection) => {
-    setSection(nextSection);
-    setQuery("");
-  };
 
   const probe = async (id: string): Promise<ProviderHealth> => {
     try {
@@ -186,71 +201,74 @@ export function SettingsPanel() {
   const titleGenerationRuntime = workspace?.titleGenerationRuntime ?? null;
   const titleRuntimePickerValue = titleGenerationRuntime ?? defaultRuntime;
 
+  useLayoutEffect(() => {
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+  }, [section]);
+
   const sectionBody = () => {
     switch (section) {
       case "providers":
         return (
           <>
-            <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+            <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
               <div>
-                <h1>Providers</h1>
-                <p>Choose the command-line agents Maxx can run in a thread. Changes apply immediately.</p>
+                <h1 className={settingsPageTitleClass}>Providers</h1>
+                <p className={settingsPageDescriptionClass}>Choose the command-line agents Maxx can run in a thread. Changes apply immediately.</p>
               </div>
             </header>
 
-            <section
-              className="settings-card default-runtime-settings"
-              aria-label="Default model"
-            >
-              <div className="settings-row">
-                <span className="settings-row-copy">
-                  <strong>Default model</strong>
-                  <small>
+            <Card className={cn(settingsCardClass, "overflow-visible")} aria-label="Default model">
+              <CardContent className="px-0">
+                <div className={settingsPickerRowClass}>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <strong>Default model</strong>
+                    <CardDescription>
                     Choose the provider, model, and effort used when you start a new chat.
                     You can still change it in the composer before sending.
-                  </small>
-                </span>
-                <div className="runtime-picker-field settings-runtime-picker">
-                  <RuntimePicker
-                    provider={defaultRuntime.provider}
-                    model={defaultRuntime.model}
-                    effort={defaultRuntime.effort}
-                    speed={defaultRuntime.speed}
-                    profiles={workspace?.providerProfiles ?? []}
-                    placement="bottom"
-                    triggerShowsProvider
-                    onChange={setDefaultRuntime}
-                  />
+                    </CardDescription>
+                  </div>
+                  <div className="min-w-0 @2xl:min-w-44 @2xl:justify-self-end">
+                    <RuntimePicker
+                      provider={defaultRuntime.provider}
+                      model={defaultRuntime.model}
+                      effort={defaultRuntime.effort}
+                      speed={defaultRuntime.speed}
+                      profiles={workspace?.providerProfiles ?? []}
+                      placement="bottom"
+                      triggerShowsProvider
+                      onChange={setDefaultRuntime}
+                    />
+                  </div>
                 </div>
-              </div>
-              <div className="settings-row">
-                <span className="settings-row-copy">
-                  <strong>Title generation</strong>
-                  <small>
-                    Choose a global harness for short chat titles. If it is unset or unavailable,
-                    Maxx uses the harness and model selected for the chat.
-                  </small>
-                </span>
-                <div className="runtime-picker-field settings-runtime-picker">
-                  <RuntimePicker
-                    provider={titleRuntimePickerValue.provider}
-                    model={titleRuntimePickerValue.model}
-                    effort={titleRuntimePickerValue.effort}
-                    speed={titleRuntimePickerValue.speed}
-                    profiles={workspace?.providerProfiles ?? []}
-                    placement="bottom"
-                    triggerShowsProvider
-                    inherited={!titleGenerationRuntime}
-                    inheritLabel="Use chat harness"
-                    inheritDescription="Use the provider and model selected for each chat."
-                    onUseInherited={() => void saveTitleGenerationRuntime(null)}
-                    onChange={(next) => void saveTitleGenerationRuntime(next)}
-                  />
+                <div className={settingsPickerRowClass}>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <strong>Title generation</strong>
+                    <CardDescription>
+                    Choose a global harness for short chat titles; if it is unavailable, Maxx uses
+                    the harness and model selected for the chat.
+                    </CardDescription>
+                  </div>
+                  <div className="min-w-0 @2xl:min-w-44 @2xl:justify-self-end">
+                    <RuntimePicker
+                      provider={titleRuntimePickerValue.provider}
+                      model={titleRuntimePickerValue.model}
+                      effort={titleRuntimePickerValue.effort}
+                      speed={titleRuntimePickerValue.speed}
+                      profiles={workspace?.providerProfiles ?? []}
+                      placement="bottom"
+                      triggerShowsProvider
+                      inherited={!titleGenerationRuntime}
+                      inheritLabel="Use chat harness"
+                      inheritDescription="Use the provider and model selected for each chat."
+                      onUseInherited={() => void saveTitleGenerationRuntime(null)}
+                      onChange={(next) => void saveTitleGenerationRuntime(next)}
+                    />
+                  </div>
                 </div>
-              </div>
-            </section>
+              </CardContent>
+            </Card>
 
-            <section className="provider-settings-list" aria-label="Provider settings">
+            <Card className={cn(settingsCardClass, "divide-y divide-border/50")} aria-label="Provider settings">
               {visibleProfiles.map((profile) => {
                 const result = health[profile.id];
                 return (
@@ -273,29 +291,23 @@ export function SettingsPanel() {
                   />
                 );
               })}
-              {visibleProfiles.length === 0 && <p className="settings-empty">No providers match “{query}”.</p>}
-            </section>
+              {visibleProfiles.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">No providers match “{query}”.</p>}
+            </Card>
 
-            <section className="settings-card provider-diagnostics-settings" aria-label="Provider diagnostics settings">
-              <div className="settings-row">
-                <span className="settings-row-copy">
-                  <strong>Show provider diagnostics</strong>
-                  <small>
-                    Show non-fatal notices reported by provider command-line runtimes in chat.
+            <Card className={settingsCardClass} aria-label="Provider diagnostics settings">
+              <CardContent className="p-3">
+                <Field orientation="horizontal" className="items-center">
+                  <FieldContent>
+                    <FieldLabel htmlFor="show-provider-diagnostics">Show provider diagnostics</FieldLabel>
+                    <FieldDescription>
+                    Show non-fatal notices reported by provider command-line harnesses in chat.
                     Errors and warnings that require action remain visible.
-                  </small>
-                </span>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={showProviderDiagnostics}
-                    aria-label="Show provider diagnostics"
-                    onChange={(event) => setShowProviderDiagnostics(event.target.checked)}
-                  />
-                  <span />
-                </label>
-              </div>
-            </section>
+                    </FieldDescription>
+                  </FieldContent>
+                  <Switch id="show-provider-diagnostics" checked={showProviderDiagnostics} aria-label="Show provider diagnostics" onCheckedChange={setShowProviderDiagnostics} />
+                </Field>
+              </CardContent>
+            </Card>
           </>
         );
       case "voice":
@@ -307,14 +319,14 @@ export function SettingsPanel() {
       case "keyboardShortcuts":
         return (
           <>
-            <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+            <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
               <div>
-                <h1>Keyboard Shortcuts</h1>
-                <p>Customize how you move around Maxx.</p>
+                <h1 className={settingsPageTitleClass}>Keyboard Shortcuts</h1>
+                <p className={settingsPageDescriptionClass}>Customize how you move around Maxx.</p>
               </div>
             </header>
 
-            <section className="keyboard-shortcut-list" aria-label="Keyboard shortcuts">
+            <section className="flex flex-col" aria-label="Keyboard shortcuts">
               {visibleShortcuts.map((shortcut) => (
                 <KeyboardShortcutRow
                   key={shortcut.id}
@@ -327,81 +339,23 @@ export function SettingsPanel() {
                   onReset={() => resetKeyboardShortcut(shortcut.id)}
                 />
               ))}
-              {visibleShortcuts.length === 0 && <p className="settings-empty">No shortcuts match “{query}”.</p>}
+              {visibleShortcuts.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">No shortcuts match “{query}”.</p>}
             </section>
-            <p className="keyboard-shortcut-note">Click a shortcut, then press a new key combination. Changes save automatically.</p>
+            <p className="text-sm text-muted-foreground">Click a shortcut, then press a new key combination. Changes save automatically.</p>
           </>
         );
     }
   };
 
   return (
-    <div className="settings-screen">
-      <aside className="settings-sidebar">
-        <div className="settings-titlebar" onMouseDown={beginWindowDrag}>
-          <span className="traffic-light-spacer" aria-hidden="true" />
-        </div>
-        <button type="button" className="settings-back" onClick={() => setSettingsOpen(false)}>
-          <Icons.chevronRight size={13} className="back-chevron" />
-          Back
-        </button>
-        <label className="settings-search">
-          <Icons.search size={13} />
-          <input
-            value={query}
-            aria-label="Search settings"
-            placeholder="Search Settings"
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <nav className="settings-nav" aria-label="Settings sections">
-          <button
-            type="button"
-            className={section === "providers" ? "selected" : ""}
-            aria-current={section === "providers" ? "page" : undefined}
-            onClick={() => selectSection("providers")}
-          >
-            <Icons.activity size={15} />Providers
-          </button>
-          <button
-            type="button"
-            className={section === "voice" ? "selected" : ""}
-            aria-current={section === "voice" ? "page" : undefined}
-            onClick={() => selectSection("voice")}
-          >
-            <Icons.microphone size={15} />Voice
-          </button>
-          <button
-            type="button"
-            className={section === "connections" ? "selected" : ""}
-            aria-current={section === "connections" ? "page" : undefined}
-            onClick={() => selectSection("connections")}
-          >
-            <Icons.computer size={15} />Connections
-          </button>
-          <button
-            type="button"
-            className={section === "keyboardShortcuts" ? "selected" : ""}
-            aria-current={section === "keyboardShortcuts" ? "page" : undefined}
-            onClick={() => selectSection("keyboardShortcuts")}
-          >
-            <Icons.keyboard size={15} />Keyboard Shortcuts
-          </button>
-          <button
-            type="button"
-            className={section === "experimental" ? "selected" : ""}
-            aria-current={section === "experimental" ? "page" : undefined}
-            onClick={() => selectSection("experimental")}
-          >
-            <Icons.flask size={15} />Experimental
-          </button>
-        </nav>
-      </aside>
-
-      <main className="settings-content">
+    <main
+      ref={scrollContainerRef}
+      className="@container flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain bg-background p-6 [overflow-anchor:none] *:shrink-0"
+    >
+      <div className="mx-auto flex w-full max-w-[var(--content-max-width)] shrink-0 flex-col gap-6">
         {sectionBody()}
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }
 
@@ -411,33 +365,27 @@ function ExperimentalSettingsSection() {
 
   return (
     <>
-      <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+      <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
         <div>
-          <h1>Experimental</h1>
-          <p>Try features that are still being refined. They may change in future builds.</p>
+          <h1 className={settingsPageTitleClass}>Experimental</h1>
+          <p className={settingsPageDescriptionClass}>Try features that are still being refined. They may change in future builds.</p>
         </div>
       </header>
 
-      <section className="settings-card experimental-settings" aria-label="Experimental settings">
-        <div className="settings-row">
-          <span className="settings-row-copy">
-            <strong>Terminal mode</strong>
-            <small>
+      <Card className={settingsCardClass} aria-label="Experimental settings">
+        <CardContent className="p-3">
+          <Field orientation="horizontal" className="items-center">
+            <FieldContent>
+              <FieldLabel htmlFor="terminal-mode">Terminal mode</FieldLabel>
+              <FieldDescription>
               Show controls for starting chats in a provider’s native terminal interface
               and switching existing chats between terminal and GUI modes.
-            </small>
-          </span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={terminalModeEnabled}
-              aria-label="Enable terminal mode"
-              onChange={(event) => setTerminalModeEnabled(event.target.checked)}
-            />
-            <span />
-          </label>
-        </div>
-      </section>
+              </FieldDescription>
+            </FieldContent>
+            <Switch id="terminal-mode" checked={terminalModeEnabled} aria-label="Enable terminal mode" onCheckedChange={setTerminalModeEnabled} />
+          </Field>
+        </CardContent>
+      </Card>
     </>
   );
 }
@@ -531,44 +479,38 @@ function ConnectionsSettingsSection() {
 
   return (
     <>
-      <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+      <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
         <div>
-          <h1>Connections</h1>
-          <p>
+          <h1 className={settingsPageTitleClass}>Connections</h1>
+          <p className={settingsPageDescriptionClass}>
             This computer keeps its own projects and chats. Another Maxx can connect over Tailscale
             and work in this workspace without merging the two.
           </p>
         </div>
       </header>
 
-      <section className="settings-card" aria-label="Allow connections">
-        <div className="settings-row host-listening-row">
-          <span className="settings-row-copy">
+      <Card className={settingsCardClass} aria-label="Allow connections">
+        <div className={cn(settingsCompactControlRowClass, !listening && "border-b-0")}>
+          <span className={settingsRowCopyClass}>
             <strong>Allow connections</strong>
             <small>
               Other Maxx apps can pair with {hostStatus?.name ?? "this computer"}. Leave this on
               while you want to be reachable.
             </small>
           </span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={listening}
-              disabled={busy}
-              aria-label="Allow connections from other Maxx apps"
-              onChange={(event) => void toggleListening(event.target.checked)}
-            />
-            <span />
-          </label>
+          <Switch checked={listening} disabled={busy} aria-label="Allow connections from other Maxx apps" onCheckedChange={(enabled) => void toggleListening(enabled)} />
         </div>
         <div
-          className={`host-listening-details${listening ? " is-open" : ""}`}
+          className={cn(
+            "grid transition-[grid-template-rows,opacity] duration-150 motion-reduce:transition-none",
+            listening ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+          )}
           aria-hidden={!listening}
           inert={!listening}
         >
-          <div className="host-listening-details-inner">
-            <div className="settings-row host-action-row">
-              <span className="settings-row-copy">
+          <div className="min-h-0 overflow-hidden">
+            <div className={cn(settingsRowClass, "items-center")}>
+              <span className={settingsRowCopyClass}>
                 <strong>Address</strong>
                 <small>
                   {shareAddress
@@ -579,48 +521,47 @@ function ConnectionsSettingsSection() {
               {shareAddress ? (
                 <CopyableValue value={shareAddress} label="This computer’s address" />
               ) : (
-                <span className="host-muted-value">port 7422</span>
+                <span className="self-center text-sm text-muted-foreground">port 7422</span>
               )}
             </div>
-            <div className="settings-row host-pairing-row">
-              <span className="settings-row-copy">
+            <div className={cn(settingsRowClass, "items-center")}>
+              <span className={settingsRowCopyClass}>
                 <strong>Pairing code</strong>
                 <small>
                   Generate a one-time code when the other computer is ready. It expires after five minutes.
                 </small>
               </span>
               {hostStatus?.pairing ? (
-                <div className="host-pairing-controls">
+                <div className="flex min-w-0 flex-col items-stretch gap-2 @sm:flex-row @sm:items-center @sm:justify-end">
                   <CopyableValue value={hostStatus.pairing.code} label="Pairing code" />
-                  <button type="button" className="host-disconnect-button" onClick={() => void cancelPairing()}>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void cancelPairing()}>
                     Cancel
-                  </button>
+                  </Button>
                 </div>
               ) : (
-                <div className="host-pairing-controls">
-                  <select
-                    className="host-access-select"
+                <div className="flex min-w-0 flex-col items-stretch gap-2 @sm:flex-row @sm:items-center @sm:justify-end">
+                  <NativeSelect
+                    className="w-full"
                     value={preset}
                     aria-label="Pairing access"
                     onChange={(event) => setPreset(event.target.value as AccessPreset)}
                   >
-                    <option value="voice">Voice processing only</option>
-                    <option value="standard">Standard access</option>
-                    <option value="full">Full access</option>
-                  </select>
-                  <button
+                    <NativeSelectOption value="voice">Voice processing only</NativeSelectOption>
+                    <NativeSelectOption value="standard">Standard access</NativeSelectOption>
+                    <NativeSelectOption value="full">Full access</NativeSelectOption>
+                  </NativeSelect>
+                  <Button
                     type="button"
-                    className="host-connect-button"
                     disabled={busy}
                     onClick={() => void createPairing()}
                   >
                     Generate code
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
             {hostStatus?.pairing && (
-              <div className="host-access-summary">
+              <div className="px-3.5 pb-3 text-xs leading-relaxed text-muted-foreground">
                 Expires {new Date(hostStatus.pairing.expiresAt * 1000).toLocaleTimeString([], {
                   hour: "numeric",
                   minute: "2-digit",
@@ -629,43 +570,43 @@ function ConnectionsSettingsSection() {
             )}
           </div>
         </div>
-      </section>
+      </Card>
 
-      <section className="settings-card host-connect-card" aria-label="Connect to another Maxx">
-        <div className={`settings-row host-connect-intro-row${discovery?.peers.length ? " has-discovery" : ""}`}>
-          <span className="settings-row-copy">
+      <Card className={settingsCardClass} aria-label="Connect to another Maxx">
+        <div className={cn(settingsRowClass, discovery?.peers.length && "border-b-0")}>
+          <span className={settingsRowCopyClass}>
             <strong>Connect to another Maxx</strong>
             <small>Use the address and one-time pairing code shown on that computer.</small>
           </span>
         </div>
         {discovery?.peers.length ? (
-          <div className="host-discovery-list" aria-label="Tailscale devices">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2 px-3.5 py-3" aria-label="Tailscale devices">
             {discovery.peers.map((peer) => {
               const peerAddress = peer.dnsName || peer.addresses[0] || "";
               return (
-                <button
+                <Button
                   key={peer.dnsName || peer.name}
                   type="button"
-                  className={`host-discovery-device${address.trim() === peerAddress ? " is-selected" : ""}`}
+                  variant={address.trim() === peerAddress ? "secondary" : "outline"}
+                  className="h-auto min-w-0 flex-col items-start gap-1 overflow-hidden p-3"
                   aria-pressed={address.trim() === peerAddress}
                   disabled={!peer.online || !peerAddress}
                   onClick={() => setAddress(peerAddress)}
                 >
-                  <span>{peer.name}</span>
-                  <small>{peer.online ? peerAddress : "Offline"}</small>
-                </button>
+                  <span className="max-w-full truncate">{peer.name}</span>
+                  <small className="max-w-full truncate">{peer.online ? peerAddress : "Offline"}</small>
+                </Button>
               );
             })}
           </div>
         ) : discovery && !discovery.running ? (
-          <div className="host-access-summary">{discovery.error}</div>
+          <div className="px-3.5 pb-3 text-xs leading-relaxed text-muted-foreground">{discovery.error}</div>
         ) : null}
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Address</strong>
           </span>
-          <input
-            className="host-text-input"
+          <Input
             value={address}
             aria-label="Remote host address"
             placeholder="other-computer.tailnet.ts.net"
@@ -674,12 +615,11 @@ function ConnectionsSettingsSection() {
             onChange={(event) => setAddress(event.target.value)}
           />
         </div>
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Pairing code</strong>
           </span>
-          <input
-            className="host-text-input"
+          <Input
             value={code}
             aria-label="Pairing code"
             placeholder="ABCD-1234"
@@ -688,72 +628,70 @@ function ConnectionsSettingsSection() {
             onChange={(event) => setCode(event.target.value)}
           />
         </div>
-        <div className="settings-row host-connect-row">
-          <span className="settings-row-copy">
+        <div className={settingsCompactControlRowClass}>
+          <span className={settingsRowCopyClass}>
             <small>Your local projects stay on this computer after you connect.</small>
           </span>
-          <button
+          <Button
             type="button"
-            className="host-connect-button"
             disabled={!canConnect}
             onClick={() => void connect()}
           >
             {busy ? "Connecting…" : "Connect"}
-          </button>
+          </Button>
         </div>
         {hostStatus?.remotes.map((remote) => (
-          <div key={remote.id} className="settings-row host-action-row">
-            <span className="settings-row-copy">
+          <div key={remote.id} className={settingsCompactControlRowClass}>
+            <span className={settingsRowCopyClass}>
               <strong>{remote.name}</strong>
               <small>
                 {remote.address} · {remote.connected ? "Connected" : remote.error || "Reconnecting…"}
               </small>
             </span>
-            <button
+            <Button
               type="button"
-              className="host-disconnect-button"
+              variant="outline"
+              size="sm"
               onClick={() => void disconnectHost(remote.id)}
             >
               Forget
-            </button>
+            </Button>
           </div>
         ))}
         {(actionError || error) && (
-          <div className="voice-credential-status is-missing" role="status">
-            <Icons.close size={13} />
-            <span>{actionError || error}</span>
-          </div>
+          <Alert className={settingsInlineAlertClass} variant="destructive"><AlertDescription className="flex items-center gap-2"><Icons.close aria-hidden="true" /><span>{actionError || error}</span></AlertDescription></Alert>
         )}
-      </section>
+      </Card>
 
-      <section className="settings-card host-connect-card" aria-label="Paired devices">
-        <div className="settings-row">
-          <span className="settings-row-copy">
+      <Card className={settingsCardClass} aria-label="Paired devices">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Paired devices</strong>
             <small>Devices allowed to reconnect to this computer. Revoking takes effect immediately.</small>
           </span>
         </div>
         {hostStatus?.pairedDevices.length ? hostStatus.pairedDevices.map((device) => (
-          <div key={device.id} className="settings-row host-action-row">
-            <span className="settings-row-copy">
+          <div key={device.id} className={settingsCompactControlRowClass}>
+            <span className={settingsRowCopyClass}>
               <strong>{device.name}</strong>
               <small>{device.capabilities.join(", ")}</small>
             </span>
-            <button
+            <Button
               type="button"
-              className="host-disconnect-button"
+              variant="outline"
+              size="sm"
               disabled={busy}
               onClick={() => void revokeDevice(device.id)}
             >
               Revoke
-            </button>
+            </Button>
           </div>
         )) : (
-          <div className="host-access-summary host-empty-state">
+          <div className="px-3.5 py-3 text-xs leading-relaxed text-muted-foreground">
             No devices are paired with this computer.
           </div>
         )}
-      </section>
+      </Card>
     </>
   );
 }
@@ -772,19 +710,18 @@ function CopyableValue({ value, label }: { value: string; label: string }) {
   };
 
   return (
-    <div className="host-copy-field">
-      <code aria-label={label}>{value}</code>
-      <button
+    <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-2 py-1">
+      <code className="min-w-0 truncate text-xs" aria-label={label}>{value}</code>
+      <Button
         type="button"
-        className={copied ? "is-copied" : undefined}
+        variant="ghost"
+        size="sm"
         onClick={() => void copy()}
         aria-label={`${copied ? "Copied" : "Copy"} ${label}`}
       >
-        <span key={copied ? "copied" : "copy"} className="host-copy-icon" aria-hidden="true">
-          {copied ? <Icons.check size={13} /> : <Icons.copy size={13} />}
-        </span>
+        {copied ? <Icons.check data-icon="inline-start" /> : <Icons.copy data-icon="inline-start" />}
         <span>{copied ? "Copied" : "Copy"}</span>
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1018,10 +955,10 @@ function VoiceSettingsSection() {
 
   return (
     <>
-      <header className="settings-content-header" onMouseDown={beginWindowDrag}>
+      <header className={settingsPageHeaderClass} onMouseDown={beginWindowDrag}>
         <div>
-          <h1>Voice</h1>
-          <p>
+          <h1 className={settingsPageTitleClass}>Voice</h1>
+          <p className={settingsPageDescriptionClass}>
             Keep capture and playback on this computer while speech processing runs on the selected
             provider and host. Dictation and hands-free Conversation are both available from every
             GUI composer when their services are configured.
@@ -1030,59 +967,51 @@ function VoiceSettingsSection() {
 
       </header>
 
-      <div className="voice-settings-stack" aria-label="Voice settings">
-        <div className="voice-settings-group">
-          <header className="voice-settings-group-header">
-            <h2>Basics</h2>
-            <p>Make dictation and hands-free conversation available in the composer.</p>
+      <div className="flex w-full flex-col gap-6" aria-label="Voice settings">
+        <div className="flex flex-col gap-2">
+          <header className="flex flex-col gap-1 px-0.5">
+            <h2 className="text-sm font-semibold">Basics</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">Make dictation and hands-free conversation available in the composer.</p>
           </header>
-          <section className="settings-card voice-settings" aria-label="Voice basics">
-            <div className="settings-row">
-          <span className="settings-row-copy">
+          <Card className={settingsCardClass} aria-label="Voice basics">
+            <div className={settingsCompactControlRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Voice input</strong>
             <small>Show dictation and conversation controls in GUI composers.</small>
           </span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={settings.isEnabled}
-              aria-label="Enable voice input"
-              onChange={(event) => update({ isEnabled: event.target.checked })}
-            />
-            <span />
-          </label>
+          <Switch checked={settings.isEnabled} aria-label="Enable voice input" onCheckedChange={(enabled) => update({ isEnabled: enabled })} />
             </div>
 
-          </section>
+          </Card>
         </div>
 
-        <div className="voice-settings-group">
-          <header className="voice-settings-group-header">
-            <h2>Transcription</h2>
-            <p>Configure the service that turns speech into text.</p>
+        <div className="flex flex-col gap-2">
+          <header className="flex flex-col gap-1 px-0.5">
+            <h2 className="text-sm font-semibold">Transcription</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">Configure the service that turns speech into text.</p>
           </header>
-          <section className="settings-card voice-settings" aria-label="Transcription settings">
-            <div className="settings-row">
-          <span className="settings-row-copy">
+          <Card className={settingsCardClass} aria-label="Transcription settings">
+            <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Speech-to-text provider</strong>
             <small>Choose xAI realtime transcription or a standard OpenAI-compatible audio API.</small>
           </span>
-          <select
-            aria-label="Speech-to-text provider"
+          <NativeSelect
+            className="w-full"
             value={settings.sttProvider}
             onChange={(event) => update({ sttProvider: event.target.value as VoiceSettings["sttProvider"] })}
           >
-            <option value="xai">xAI</option>
-            <option value="openai-compatible">OpenAI-compatible</option>
-          </select>
+            <NativeSelectOption value="xai">xAI</NativeSelectOption>
+            <NativeSelectOption value="openai-compatible">OpenAI-compatible</NativeSelectOption>
+          </NativeSelect>
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>STT endpoint</strong>
             <small>API root used by the selected speech host.</small>
           </span>
-          <input
+          <Input
             aria-label="Speech-to-text endpoint"
             type="url"
             defaultValue={settings.sttApiBase}
@@ -1091,8 +1020,8 @@ function VoiceSettingsSection() {
           />
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>STT model</strong>
             <small>{settings.sttProvider === "xai"
               ? "Optional; leave blank to use the provider default."
@@ -1100,7 +1029,7 @@ function VoiceSettingsSection() {
                 ? `${sttModels.length} model${sttModels.length === 1 ? "" : "s"} discovered. Choose one or enter an exact ID.`
                 : "Required for OpenAI-compatible services.")}</small>
           </span>
-          <input
+          <Input
             aria-label="Speech-to-text model"
             type="text"
             list={settings.sttProvider === "openai-compatible" ? "voice-stt-models" : undefined}
@@ -1113,8 +1042,8 @@ function VoiceSettingsSection() {
           </datalist>
         </div>
 
-        {settings.sttProvider === "xai" && <div className="settings-row">
-          <span className="settings-row-copy">
+        {settings.sttProvider === "xai" && <div className={settingsCompactControlRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Use my Grok sign-in</strong>
             <small>
               Transcription runs on the same xAI account the Grok CLI is signed in to, so
@@ -1123,173 +1052,155 @@ function VoiceSettingsSection() {
               stores it. Leave this off to use <code>XAI_API_KEY</code> instead.
             </small>
           </span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={settings.useGrokSignIn}
-              aria-label="Use my Grok sign-in for transcription"
-              onChange={(event) => update({ useGrokSignIn: event.target.checked })}
-            />
-            <span />
-          </label>
+          <Switch checked={settings.useGrokSignIn} aria-label="Use my Grok sign-in for transcription" onCheckedChange={(enabled) => update({ useGrokSignIn: enabled })} />
         </div>}
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Language</strong>
             <small>What the transcriber should expect to hear.</small>
           </span>
-          <select
-            aria-label="Dictation language"
+          <NativeSelect
+            className="w-full"
             value={settings.language}
             onChange={(event) => update({ language: event.target.value })}
           >
             {VOICE_LANGUAGES.map((language) => (
-              <option key={language.code} value={language.code}>{language.label}</option>
+              <NativeSelectOption key={language.code} value={language.code}>{language.label}</NativeSelectOption>
             ))}
-          </select>
+          </NativeSelect>
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsCompactControlRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Test transcription</strong>
             <small>{testResult?.message ?? (settings.sttProvider === "xai"
               ? "Open and close the selected provider's realtime connection."
               : "Upload a short silent WAV to verify the standard transcription route.")}</small>
           </span>
-          <button className="secondary-button" type="button" disabled={testing} onClick={testConnection}>
+          <Button variant="secondary" type="button" disabled={testing} onClick={testConnection}>
             {testing ? "Testing…" : "Test connection"}
-          </button>
+          </Button>
         </div>
 
         {status && (
-          <div className={`voice-credential-status ${status.available ? "is-ready" : "is-missing"}`}>
-            {status.available ? <Icons.check size={13} /> : <Icons.close size={13} />}
-            <span>{status.detail}</span>
-          </div>
+          <Alert className={settingsInlineAlertClass} variant={status.available ? "default" : "destructive"}><AlertDescription className="flex items-center gap-2">{status.available ? <Icons.check aria-hidden="true" /> : <Icons.close aria-hidden="true" />}<span>{status.detail}</span></AlertDescription></Alert>
         )}
-          </section>
+          </Card>
         </div>
 
-        <div className="voice-settings-group">
-          <header className="voice-settings-group-header">
-            <h2>Audio &amp; routing</h2>
-            <p>Choose where speech is processed while capture and playback remain on this computer.</p>
+        <div className="flex flex-col gap-2">
+          <header className="flex flex-col gap-1 px-0.5">
+            <h2 className="text-sm font-semibold">Audio &amp; routing</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">Choose where speech is processed while capture and playback remain on this computer.</p>
           </header>
-          <section className="settings-card voice-settings" aria-label="Audio and routing settings">
+          <Card className={settingsCardClass} aria-label="Audio and routing settings">
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Processing host</strong>
             <small>Only speech processing is routed. Microphone capture stays on this computer.</small>
           </span>
-          <select
-            aria-label="Speech processing host"
+          <NativeSelect
+            className="w-full"
             value={settings.speechHostID}
             onChange={(event) => update({ speechHostID: event.target.value })}
           >
-            <option value="local">{hostStatus?.name ?? "This computer"} (local)</option>
+            <NativeSelectOption value="local">{hostStatus?.name ?? "This computer"} (local)</NativeSelectOption>
             {remoteHosts.map((remote) => (
-              <option key={remote.id} value={remote.id} disabled={!remote.connected}>
+              <NativeSelectOption key={remote.id} value={remote.id} disabled={!remote.connected}>
                 {remote.name}{remote.connected ? "" : " (offline)"}
-              </option>
+              </NativeSelectOption>
             ))}
-          </select>
+          </NativeSelect>
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Microphone</strong>
             <small>Capture is always performed locally in the renderer.</small>
           </span>
-          <select
-            aria-label="Voice input device"
+          <NativeSelect
+            className="w-full"
             value={settings.inputDeviceID ?? "default"}
             onChange={(event) => update({ inputDeviceID: event.target.value === "default" ? null : event.target.value })}
           >
-            <option value="default">Default microphone</option>
+            <NativeSelectOption value="default">Default microphone</NativeSelectOption>
             {devices.inputs.filter((device) => device.id !== "default").map((device) => (
-              <option key={device.id} value={device.id}>{device.label}</option>
+              <NativeSelectOption key={device.id} value={device.id}>{device.label}</NativeSelectOption>
             ))}
-          </select>
+          </NativeSelect>
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Output device</strong>
             <small>Playback stays local; device routing is applied when conversation audio is enabled.</small>
           </span>
-          <select
-            aria-label="Voice output device"
+          <NativeSelect
+            className="w-full"
             value={settings.outputDeviceID ?? "default"}
             onChange={(event) => update({ outputDeviceID: event.target.value === "default" ? null : event.target.value })}
           >
-            <option value="default">System Default</option>
+            <NativeSelectOption value="default">System Default</NativeSelectOption>
             {devices.outputs.filter((device) => device.id !== "default").map((device) => (
-              <option key={device.id} value={device.id}>{device.label}</option>
+              <NativeSelectOption key={device.id} value={device.id}>{device.label}</NativeSelectOption>
             ))}
-          </select>
+          </NativeSelect>
         </div>
 
-        {deviceError && <div className="voice-credential-status is-missing" role="status">{deviceError}</div>}
-          </section>
+        {deviceError && <Alert className={settingsInlineAlertClass} variant="destructive"><AlertDescription>{deviceError}</AlertDescription></Alert>}
+          </Card>
         </div>
 
-        <div className="voice-settings-group">
-          <header className="voice-settings-group-header">
-            <h2>Conversation behavior</h2>
-            <p>Control how Conversation mode ends turns and handles speech over a reply.</p>
+        <div className="flex flex-col gap-2">
+          <header className="flex flex-col gap-1 px-0.5">
+            <h2 className="text-sm font-semibold">Conversation behavior</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">Control how Conversation mode ends turns and handles speech over a reply.</p>
           </header>
-          <section className="settings-card voice-settings" aria-label="Conversation behavior settings">
+          <Card className={settingsCardClass} aria-label="Conversation behavior settings">
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Turn detection</strong>
             <small>Automatic ends an utterance after a quiet period. Manual mode waits for Finish utterance.</small>
           </span>
-          <select
+          <NativeSelect
+            className="w-full"
             aria-label="Voice turn detection"
             value={settings.turnDetection}
             onChange={(event) => update({ turnDetection: event.target.value as VoiceSettings["turnDetection"] })}
           >
-            <option value="automatic">Automatic</option>
-            <option value="manual">Manual</option>
-          </select>
+            <NativeSelectOption value="automatic">Automatic</NativeSelectOption>
+            <NativeSelectOption value="manual">Manual</NativeSelectOption>
+          </NativeSelect>
         </div>
 
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsCompactControlRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Allow interruption</strong>
             <small>When enabled, speech starts a new turn while the assistant is speaking and cancels unplayed audio.</small>
           </span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={settings.allowInterruption}
-              aria-label="Allow voice interruption"
-              onChange={(event) => update({ allowInterruption: event.target.checked })}
-            />
-            <span />
-          </label>
+          <Switch checked={settings.allowInterruption} aria-label="Allow voice interruption" onCheckedChange={(enabled) => update({ allowInterruption: enabled })} />
         </div>
-          </section>
+          </Card>
         </div>
 
-        <div className="voice-settings-group">
-          <header className="voice-settings-group-header">
-            <h2>Speech output</h2>
-            <p>Send synthesized replies from {speechHostLabel} to local playback.</p>
+        <div className="flex flex-col gap-2">
+          <header className="flex flex-col gap-1 px-0.5">
+            <h2 className="text-sm font-semibold">Speech output</h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">Send synthesized replies from {speechHostLabel} to local playback.</p>
           </header>
-          <section className="settings-card voice-settings" aria-label="Speech output settings">
-        <div className="settings-row">
-          <span className="settings-row-copy"><strong>TTS provider</strong><small>Uses the standard OpenAI-compatible speech endpoint and self-describing WAV audio.</small></span>
-          <select aria-label="Text-to-speech provider" value={settings.ttsProvider} disabled>
-            <option value="openai-compatible">OpenAI-compatible</option>
-          </select>
+          <Card className={settingsCardClass} aria-label="Speech output settings">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}><strong>TTS provider</strong><small>Uses the standard OpenAI-compatible speech endpoint and self-describing WAV audio.</small></span>
+          <NativeSelect className="w-full" aria-label="Text-to-speech provider" value={settings.ttsProvider} disabled>
+            <NativeSelectOption value="openai-compatible">OpenAI-compatible</NativeSelectOption>
+          </NativeSelect>
         </div>
-        <div className="settings-row">
-          <span className="settings-row-copy"><strong>TTS endpoint</strong><small>API root used by the selected speech host.</small></span>
-          <input
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}><strong>TTS endpoint</strong><small>API root used by the selected speech host.</small></span>
+          <Input
             aria-label="Text-to-speech endpoint"
             type="url"
             value={ttsEndpointDraft}
@@ -1298,9 +1209,9 @@ function VoiceSettingsSection() {
             onBlur={commitTtsSettings}
           />
         </div>
-        <div className="settings-row">
-          <span className="settings-row-copy"><strong>TTS model</strong><small>Selected automatically from the named voice catalog; edit only when your provider requires it.</small></span>
-          <input
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}><strong>TTS model</strong><small>Selected automatically from the named voice catalog; edit only when your provider requires it.</small></span>
+          <Input
             aria-label="Text-to-speech model"
             type="text"
             value={ttsModelDraft}
@@ -1309,12 +1220,12 @@ function VoiceSettingsSection() {
             onBlur={commitTtsSettings}
           />
         </div>
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Voice</strong>
             <small>Catalog from {speechHostLabel}. {voiceCatalogLoading ? "Loading voices…" : voiceCatalogError ?? "Choose a discovered voice or enter the provider's voice ID."}</small>
           </span>
-          <input
+          <Input
             aria-label="Text-to-speech voice"
             type="text"
             list="voice-tts-voices"
@@ -1331,13 +1242,14 @@ function VoiceSettingsSection() {
             ))}
           </datalist>
         </div>
-        <div className="settings-row">
-          <span className="settings-row-copy">
+        <div className={settingsRowClass}>
+          <span className={settingsRowCopyClass}>
             <strong>Test voice</strong>
             <small>Requests a short WAV phrase, validates its audio format, and plays it on this computer.</small>
           </span>
-          <div className="settings-voice-test-actions">
-            <input
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+            <Input
+              className="min-w-0"
               aria-label="Voice test text"
               type="text"
               value={ttsTestText}
@@ -1345,22 +1257,22 @@ function VoiceSettingsSection() {
               disabled={ttsTesting}
             />
             {ttsTesting ? (
-              <button className="secondary-button" type="button" onClick={stopVoiceTest}>Stop</button>
+              <Button variant="secondary" type="button" onClick={stopVoiceTest}>Stop</Button>
             ) : (
-              <button
-                className="secondary-button"
+              <Button
+                variant="secondary"
                 type="button"
                 disabled={!ttsEndpointDraft.trim() || !draftVoiceSelection.model || !voiceIsSelected}
                 onClick={testVoice}
               >
                 Test voice
-              </button>
+              </Button>
             )}
           </div>
         </div>
 
-        {ttsTestMessage && <div className={`voice-credential-status ${ttsTestMessage === "Voice test finished." ? "is-ready" : "is-missing"}`} role="status">{ttsTestMessage}</div>}
-          </section>
+        {ttsTestMessage && <Alert className={settingsInlineAlertClass} variant={ttsTestMessage === "Voice test finished." ? "default" : "destructive"}><AlertDescription>{ttsTestMessage}</AlertDescription></Alert>}
+          </Card>
         </div>
       </div>
     </>
@@ -1425,16 +1337,16 @@ function KeyboardShortcutRow({
   }, [allBindings, command, onChange, recording]);
 
   return (
-    <div className="keyboard-shortcut-row">
-      <div className="keyboard-shortcut-copy">
+    <div className="flex flex-wrap items-center justify-between gap-4 border-b py-3">
+      <div className="flex min-w-0 flex-col gap-1">
         <strong>{label}</strong>
-        <small id={helpID}>{description}</small>
-        {error && <span className="keyboard-shortcut-error" role="alert">{error}</span>}
+        <small className="text-muted-foreground" id={helpID}>{description}</small>
+        {error && <span className="text-sm text-destructive" role="alert">{error}</span>}
       </div>
-      <div className="keyboard-shortcut-actions">
-        <button
+      <div className="flex items-center gap-2">
+        <Button
           type="button"
-          className={`shortcut-recorder ${recording ? "is-recording" : ""}`}
+          variant={recording ? "secondary" : "outline"}
           aria-pressed={recording}
           aria-describedby={helpID}
           aria-label={recording
@@ -1446,10 +1358,10 @@ function KeyboardShortcutRow({
           }}
           onBlur={() => setRecording(false)}
         >
-          {recording ? <span>Press keys…</span> : <kbd aria-hidden="true">{formatKeyboardShortcut(binding)}</kbd>}
-        </button>
+          {recording ? <span>Press keys…</span> : <Kbd aria-hidden="true">{formatKeyboardShortcut(binding)}</Kbd>}
+        </Button>
         {!isDefault && (
-          <button type="button" className="shortcut-reset" onClick={onReset}>Reset</button>
+          <Button type="button" variant="ghost" size="sm" onClick={onReset}>Reset</Button>
         )}
       </div>
     </div>

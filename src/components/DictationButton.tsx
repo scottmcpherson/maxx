@@ -1,7 +1,13 @@
-import { Icons } from "./Icons";
 import { formatKeyboardShortcut } from "../keyboardShortcuts";
 import type { KeyboardShortcutBinding } from "../keyboardShortcuts";
 import type { Dictation } from "../voice/useDictation";
+import { IconButton } from "./ui/icon-button";
+import { Alert, AlertDescription } from "./ui/alert";
+import { Badge } from "./ui/badge";
+import { Spinner } from "./ui/spinner";
+import { Button } from "./ui/button";
+import { MicIcon, XIcon } from "lucide-react";
+import { cn } from "../lib/utils";
 
 /**
  * Microphone toggle for a composer. Hidden entirely when dictation is off in
@@ -29,17 +35,16 @@ export function DictationButton({
         : "Dictate a message";
 
   return (
-    <button
-      type="button"
-      className={`icon-button dictation-button state-${dictation.state}`}
-      title={`${label} (${formatKeyboardShortcut(shortcut)})`}
-      aria-label={label}
+    <IconButton
+      label={label}
+      tooltip={`${label} (${formatKeyboardShortcut(shortcut)})`}
+      className={cn("rounded-full", dictation.state === "listening" && "text-destructive aria-pressed:bg-destructive/10")}
       aria-pressed={dictation.isActive}
       disabled={disabled}
       onClick={dictation.toggle}
     >
-      <Icons.microphone size={15} />
-    </button>
+      <MicIcon />
+    </IconButton>
   );
 }
 
@@ -47,22 +52,22 @@ export function DictationButton({
 export function DictationStatus({ dictation }: { dictation: Dictation }) {
   if (dictation.error) {
     return (
-      <div className="dictation-status is-error" role="alert">
-        <span>{dictation.error}</span>
-        <button type="button" onClick={dictation.dismissError} aria-label="Dismiss">
-          <Icons.close size={11} />
-        </button>
-      </div>
+      <Alert variant="destructive" className="flex items-center justify-between gap-2 py-1.5" role="alert">
+        <AlertDescription className="text-xs text-destructive">{dictation.error}</AlertDescription>
+        <Button type="button" variant="ghost" size="icon-xs" onClick={dictation.dismissError} aria-label="Dismiss">
+          <XIcon />
+        </Button>
+      </Alert>
     );
   }
   if (dictation.state === "starting") {
-    return <div className="dictation-status">Starting dictation…</div>;
+    return <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status"><Spinner />Starting dictation…</div>;
   }
   if (dictation.state === "listening") {
     return (
-      <div className="dictation-status is-live">
-        <span className="dictation-dot" aria-hidden="true" />
-        Listening — press the microphone again to stop, Esc to discard.
+      <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+        <Badge variant="secondary" className="gap-1.5"><span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />Listening</Badge>
+        <span>Press the microphone again to stop, Esc to discard.</span>
       </div>
     );
   }
