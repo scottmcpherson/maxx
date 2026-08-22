@@ -1,7 +1,13 @@
 import type { ChatMessage, ChatThread, RuntimeEvent, RuntimeFileChange, RuntimeItemState } from "../types";
 import { isProviderDiagnostic } from "../../../../shared/providerDiagnostics";
 
-export type MobileTurnState = { active: boolean; text: string; error: string };
+export type MobileTurnState = {
+  active: boolean;
+  text: string;
+  error: string;
+  turnID: string | null;
+  sourceEventID: string | null;
+};
 
 const ACTIVITY_KINDS = new Set([
   "command",
@@ -166,15 +172,43 @@ function firstLine(text: string | undefined) {
 }
 
 export function latestTurn(events: ChatThread["runtimeEvents"]): MobileTurnState {
-  const latest = events[events.length - 1];
-  if (!latest) return { active: false, text: "", error: "" };
-  const turn = events.filter((event) => event.turnID === latest.turnID);
+  const ordered = orderedEvents(events);
+  const latest = ordered[ordered.length - 1];
+  if (!latest) return {
+    active: false,
+    text: "",
+    error: "",
+    turnID: null,
+    sourceEventID: null,
+  };
+  const turn = ordered.filter((event) => event.turnID === latest.turnID);
   const terminal = [...turn].reverse().find((event) => event.kind === "turn.terminal");
   const failure = [...turn].reverse().find((event) => event.kind === "error");
   const error = failure?.payload.error?.message || failure?.payload.title || failure?.payload.detail || "";
-  const text = turn
-    .filter((event) => (event.kind === "assistant.text" || event.kind === "assistant.text.delta") && typeof event.payload.text === "string")
+  const assistantTextEvents = turn
+    .filter((event) => (event.kind === "assistant.text" || event.kind === "assistant.text.delta") && typeof event.payload.text === "string");
+  const text = assistantTextEvents
     .map((event) => event.payload.text)
     .join("");
-  return { active: !terminal, text: cleanAssistantText(text), error };
+  return {
+    active: !terminal,
+    text: cleanAssistantText(text),
+    error,
+    turnID: latest.turnID,
+    sourceEventID: assistantTextEvents[0]?.id ?? null,
+  };
+}
+
+export function shouldRenderLiveTurn(
+  messages: ChatMessage[],
+  turn: MobileTurnState,
+  sending: boolean,
+  waitingForSubmittedMessage: boolean,
+): boolean {
+  if (waitingForSubmittedMessage) return false;
+  if (sending || turn.active || !!turn.error) return true;
+  if (!turn.text || !turn.sourceEventID) return false;
+  return !messages.some((message) => (
+    message.role === "assistant" && message.sourceEventID === turn.sourceEventID
+  ));
 }

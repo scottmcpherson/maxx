@@ -2,6 +2,7 @@ import { Buffer } from "buffer";
 import * as Crypto from "expo-crypto";
 import TcpSocket from "react-native-tcp-socket";
 import { MAXX_PROTOCOL_VERSION, parseEndpoint } from "./pairingPayload";
+import { Utf8StreamDecoder } from "./utf8Stream";
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const HANDSHAKE_TIMEOUT_MS = 12_000;
@@ -41,13 +42,14 @@ export class MaxxHostClient {
   private eventListeners = new Set<(event: HostEvent) => void>();
   private closeListeners = new Set<(error?: Error) => void>();
   private closed = false;
+  private readonly decoder: Utf8StreamDecoder;
 
-  private constructor(socket: SocketType) {
+  private constructor(socket: SocketType, decoder = new Utf8StreamDecoder()) {
     this.socket = socket;
-    socket.setEncoding("utf8");
+    this.decoder = decoder;
     socket.setNoDelay(true);
     socket.setKeepAlive(true);
-    socket.on("data", (data) => this.receive(String(data)));
+    socket.on("data", (data) => this.receive(this.decoder.decode(data)));
     socket.on("error", (error) => this.finish(error));
     socket.on("close", () => this.finish());
   }
@@ -107,7 +109,7 @@ export class MaxxHostClient {
           })}\n`);
         },
       );
-      socket.setEncoding("utf8");
+      const decoder = new Utf8StreamDecoder();
       let handshakeBuffer = "";
       const timeout = setTimeout(() => {
         if (settled) return;
@@ -126,7 +128,7 @@ export class MaxxHostClient {
       socket.once("error", onError);
       socket.on("data", function onHandshakeData(data) {
         if (settled) return;
-        handshakeBuffer += String(data);
+        handshakeBuffer += decoder.decode(data);
         const newline = handshakeBuffer.indexOf("\n");
         if (newline < 0) return;
         const first = handshakeBuffer.slice(0, newline).replace(/\r$/u, "");
@@ -155,7 +157,7 @@ export class MaxxHostClient {
         clearTimeout(timeout);
         socket.removeListener("error", onError);
         socket.removeListener("data", onHandshakeData);
-        const client = new MaxxHostClient(socket);
+        const client = new MaxxHostClient(socket, decoder);
         if (remainder) client.receive(remainder);
         resolve({
           client,

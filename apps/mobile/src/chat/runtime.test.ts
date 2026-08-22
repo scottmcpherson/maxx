@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeEvent } from "../types";
-import { activityPresentation, cleanAssistantText, latestTurn, mobileTimeline } from "./runtime";
+import {
+  activityPresentation,
+  cleanAssistantText,
+  latestTurn,
+  mobileTimeline,
+  shouldRenderLiveTurn,
+} from "./runtime";
 
 function event(kind: string, payload: RuntimeEvent["payload"], id = kind): RuntimeEvent {
   return { id, threadID: "thread", turnID: "turn", kind, occurredAt: 1, payload };
@@ -12,7 +18,13 @@ describe("latestTurn", () => {
       event("assistant.text.delta", { text: "Mobile " }, "1"),
       event("assistant.text.delta", { text: "verified" }, "2"),
     ];
-    expect(latestTurn(events)).toEqual({ active: true, text: "Mobile verified", error: "" });
+    expect(latestTurn(events)).toEqual({
+      active: true,
+      text: "Mobile verified",
+      error: "",
+      turnID: "turn",
+      sourceEventID: "1",
+    });
     expect(latestTurn([...events, event("turn.terminal", { terminalState: "completed" }, "3")]).active).toBe(false);
   });
 
@@ -22,7 +34,13 @@ describe("latestTurn", () => {
         error: { code: "auth", message: "Sign in again.", isRecoverable: true },
       }),
       event("turn.terminal", { terminalState: "failed" }, "terminal"),
-    ])).toEqual({ active: false, text: "", error: "Sign in again." });
+    ])).toEqual({
+      active: false,
+      text: "",
+      error: "Sign in again.",
+      turnID: "turn",
+      sourceEventID: null,
+    });
   });
 
   it("removes provider-introduced blank lines before streaming text", () => {
@@ -30,6 +48,62 @@ describe("latestTurn", () => {
       event("assistant.text.delta", { text: "\n\n" }, "1"),
       event("assistant.text.delta", { text: "Done" }, "2"),
     ]).text).toBe("Done");
+  });
+
+  it("uses runtime chronology instead of arrival order to identify the latest turn", () => {
+    const old = event("assistant.text.delta", { text: "Old" }, "old");
+    old.turnID = "old-turn";
+    old.occurredAt = 1;
+    const current = event("assistant.text.delta", { text: "Current" }, "current");
+    current.turnID = "current-turn";
+    current.occurredAt = 2;
+    expect(latestTurn([current, old])).toMatchObject({
+      turnID: "current-turn",
+      text: "Current",
+    });
+  });
+});
+
+describe("shouldRenderLiveTurn", () => {
+  const completed = {
+    active: false,
+    text: "Finished response",
+    error: "",
+    turnID: "turn",
+    sourceEventID: "assistant-event",
+  };
+
+  it("keeps completed streamed text visible until its persisted message arrives", () => {
+    expect(shouldRenderLiveTurn([], completed, false, false)).toBe(true);
+    expect(shouldRenderLiveTurn([{
+      id: "message",
+      role: "assistant",
+      content: "Finished response",
+      createdAt: 2,
+      sourceEventID: "assistant-event",
+    }], completed, false, false)).toBe(false);
+  });
+
+  it("does not let an unrelated assistant message end the live handoff", () => {
+    expect(shouldRenderLiveTurn([{
+      id: "older-message",
+      role: "assistant",
+      content: "Older response",
+      createdAt: 1,
+      sourceEventID: "older-event",
+    }], completed, false, false)).toBe(true);
+  });
+
+  it("waits for the submitted user message before showing working state", () => {
+    const active = {
+      active: true,
+      text: "",
+      error: "",
+      turnID: "turn",
+      sourceEventID: null,
+    };
+    expect(shouldRenderLiveTurn([], active, true, true)).toBe(false);
+    expect(shouldRenderLiveTurn([], active, true, false)).toBe(true);
   });
 });
 

@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { WorkspaceDocument } from "../types";
+import type { RuntimeEventEnvelope, TurnFinishedEnvelope, WorkspaceDocument } from "../types";
 import { MaxxHostClient } from "./MaxxHostClient";
 import type { MaxxMobilePairingPayload } from "./pairingPayload";
 import { MOBILE_REQUIRED_CAPABILITIES, parseEndpoint } from "./pairingPayload";
@@ -21,6 +21,7 @@ import {
   saveConnection,
   type SavedHostProfile,
 } from "./secureStore";
+import { applyRuntimeEvent, mergeLiveRuntimeEvents } from "./workspaceRuntimeEvents";
 
 export type ConnectionState =
   | { status: "loading" }
@@ -49,26 +50,61 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const clientRef = useRef<MaxxHostClient | null>(null);
   const reconnectingRef = useRef(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initializedLiveTurnsRef = useRef(new Set<string>());
 
   const installClient = useCallback(async (nextClient: MaxxHostClient, profile: SavedHostProfile) => {
     clientRef.current?.close();
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = null;
     clientRef.current = nextClient;
     setClient(nextClient);
     setState({ status: "connected", profile });
-    const refresh = async () => {
+    initializedLiveTurnsRef.current.clear();
+    const refresh = async (preserveLiveEvents = false) => {
       try {
         const next = await nextClient.request<WorkspaceDocument>("workspace_snapshot");
-        if (clientRef.current === nextClient) setWorkspace(next);
+        if (clientRef.current === nextClient) {
+          setWorkspace((current) => preserveLiveEvents ? mergeLiveRuntimeEvents(next, current) : next);
+        }
       } catch (error) {
         if (clientRef.current === nextClient) {
           setState({ status: "disconnected", profile, error: errorMessage(error) });
         }
       }
     };
+    const scheduleRefresh = (delay: number, preserveLiveEvents: boolean, replacePending = false) => {
+      if (refreshTimerRef.current) {
+        if (!replacePending) return;
+        clearTimeout(refreshTimerRef.current);
+      }
+      refreshTimerRef.current = setTimeout(() => {
+        refreshTimerRef.current = null;
+        void refresh(preserveLiveEvents);
+      }, delay);
+    };
     nextClient.onEvent((event) => {
       if (event.event === "voice://event") return;
-      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => void refresh(), 120);
+      if (event.event === "runtime://event") {
+        const envelope = event.payload as RuntimeEventEnvelope;
+        if (!envelope?.projectID || !envelope.threadID || !envelope.event?.id) return;
+        setWorkspace((current) => applyRuntimeEvent(current, envelope));
+        const turnKey = `${envelope.projectID}:${envelope.threadID}:${envelope.event.turnID}`;
+        const isNewTurn = !initializedLiveTurnsRef.current.has(turnKey);
+        if (isNewTurn) initializedLiveTurnsRef.current.add(turnKey);
+        const needsInteractionSnapshot = envelope.event.kind === "request.approval"
+          || envelope.event.kind === "request.user-input";
+        if (isNewTurn || needsInteractionSnapshot) scheduleRefresh(80, true);
+        return;
+      }
+      if (event.event === "turn://finished") {
+        const envelope = event.payload as TurnFinishedEnvelope;
+        if (envelope?.projectID && envelope.threadID && envelope.turnID) {
+          initializedLiveTurnsRef.current.delete(`${envelope.projectID}:${envelope.threadID}:${envelope.turnID}`);
+        }
+        scheduleRefresh(0, false, true);
+        return;
+      }
+      scheduleRefresh(120, true, true);
     });
     nextClient.onClose((error) => {
       if (clientRef.current !== nextClient) return;
@@ -215,7 +251,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     const current = clientRef.current;
     if (!current) throw new Error("Maxx is disconnected.");
     const next = await current.request<WorkspaceDocument>("workspace_snapshot");
-    setWorkspace(next);
+    setWorkspace((workspace) => mergeLiveRuntimeEvents(next, workspace));
   }, []);
 
   const value = useMemo<ConnectionContextValue>(() => ({

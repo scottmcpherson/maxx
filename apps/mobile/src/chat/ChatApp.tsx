@@ -21,6 +21,8 @@ import {
   View,
   useWindowDimensions,
   type KeyboardEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -47,7 +49,14 @@ import {
   type TurnFinishedEnvelope,
 } from "../types";
 import { choosePhoto, pickDocument, takePhoto, uploadAttachment } from "./attachments";
-import { activityPresentation, cleanAssistantText, latestTurn, mobileTimeline, type MobileActivity } from "./runtime";
+import {
+  activityPresentation,
+  cleanAssistantText,
+  latestTurn,
+  mobileTimeline,
+  shouldRenderLiveTurn,
+  type MobileActivity,
+} from "./runtime";
 import {
   attentionThreads,
   unseenTargetForFinishedTurn,
@@ -55,7 +64,12 @@ import {
   type AttentionReason,
   type StickyAttention,
 } from "./sidebarAttention";
-import { firstNewUserMessageIndex, turnAnchorSpacerHeight } from "./turnAnchor";
+import { isNearScrollBottom } from "./scrollFollow";
+import {
+  firstNewUserMessageIndex,
+  remainingTurnAnchorSpacer,
+  turnAnchorSpacerHeight,
+} from "./turnAnchor";
 import { useVoiceDictation } from "./useVoiceDictation";
 import {
   composerPrimaryAction,
@@ -72,6 +86,7 @@ type Selection = { projectID: string; threadID: string };
 
 const HEADER_FADE_HEIGHT = 34;
 const SIDEBAR_FOOTER_FADE_HEIGHT = 132;
+const COMPOSER_FOOTER_FADE_HEIGHT = 96;
 const ATTACHMENT_MENU_ACTIONS: MenuAction[] = [
   { id: "photos", title: "Photos", image: "photo.on.rectangle" },
   { id: "camera", title: "Camera", image: "camera.fill" },
@@ -457,11 +472,25 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
   const [runtimeUpdating, setRuntimeUpdating] = useState(false);
   const [composerHeight, setComposerHeight] = useState(insets.bottom + 66);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [anchoredMessageID, setAnchoredMessageID] = useState<string | null>(null);
+  const [anchorSpacerHeight, setAnchorSpacerHeight] = useState(0);
   const listRef = useRef<FlatList>(null);
   const initialScrollPendingRef = useRef(true);
   const pendingAnchorBaselineRef = useRef<Set<string> | null>(null);
   const pendingAnchorIndexRef = useRef<number | null>(null);
+  const activeAnchorRef = useRef<{
+    messageID: string;
+    index: number;
+    initialSpacerHeight: number;
+    currentSpacerHeight: number;
+    baseContentHeight: number | null;
+  } | null>(null);
+  const followBottomRef = useRef(true);
+  const scrollInteractionRef = useRef(false);
+  const programmaticScrollRef = useRef<"bottom" | "anchor" | null>(null);
+  const animatedScrollRef = useRef(false);
+  const scrollFrameRef = useRef<number | null>(null);
   const composerInputRef = useRef<TextInput>(null);
   const composerTranslate = useRef(new Animated.Value(0)).current;
   const dictatedBaseRef = useRef("");
@@ -480,6 +509,13 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     [messages, showProviderDiagnostics, thread.runtimeEvents],
   );
   const liveTurn = latestTurn(thread.runtimeEvents);
+  const waitingForSubmittedMessage = pendingAnchorBaselineRef.current !== null;
+  const showLiveTurn = shouldRenderLiveTurn(
+    messages,
+    liveTurn,
+    sending,
+    waitingForSubmittedMessage,
+  );
   const voice = useVoiceDictation(client, (text, final) => {
     if (conversationPhaseRef.current !== "idle") {
       if (final) conversationFinalRef.current(text);
@@ -495,10 +531,76 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     setConversationPhaseState(phase);
   }, []);
 
+  const scheduleScrollToBottom = useCallback((animated: boolean) => {
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    programmaticScrollRef.current = "bottom";
+    animatedScrollRef.current = animated;
+    scrollInteractionRef.current = false;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      listRef.current?.scrollToEnd({ animated });
+    });
+  }, []);
+
+  const scrollToBottom = useCallback((animated: boolean) => {
+    followBottomRef.current = true;
+    setShowScrollToBottom(false);
+    scheduleScrollToBottom(animated);
+  }, [scheduleScrollToBottom]);
+
+  const scrollToMessageTop = useCallback((index: number, animated: boolean) => {
+    programmaticScrollRef.current = "anchor";
+    animatedScrollRef.current = animated;
+    scrollInteractionRef.current = false;
+    listRef.current?.scrollToIndex({
+      index,
+      animated,
+      viewPosition: 0,
+      viewOffset: headerHeight + 16,
+    });
+  }, [headerHeight]);
+
+  const clearTurnAnchor = useCallback(() => {
+    pendingAnchorBaselineRef.current = null;
+    pendingAnchorIndexRef.current = null;
+    activeAnchorRef.current = null;
+    setAnchoredMessageID(null);
+    setAnchorSpacerHeight(0);
+  }, []);
+
+  const prepareTurnAnchor = useCallback(() => {
+    pendingAnchorBaselineRef.current = new Set(messages.map((item) => item.id));
+    pendingAnchorIndexRef.current = null;
+    activeAnchorRef.current = null;
+    setAnchoredMessageID(null);
+    setAnchorSpacerHeight(0);
+    followBottomRef.current = false;
+    scrollInteractionRef.current = false;
+    setShowScrollToBottom(false);
+  }, [messages]);
+
+  const updateScrollFollowState = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const atBottom = isNearScrollBottom({
+      contentHeight: event.nativeEvent.contentSize.height,
+      offsetY: event.nativeEvent.contentOffset.y,
+      viewportHeight: event.nativeEvent.layoutMeasurement.height,
+      reservedBottomHeight: activeAnchorRef.current?.currentSpacerHeight ?? 0,
+    });
+    followBottomRef.current = atBottom;
+    setShowScrollToBottom(!atBottom);
+  }, []);
+
   useEffect(() => {
     setDraft("");
     setAttachments([]);
-  }, [thread.id]);
+    clearTurnAnchor();
+    followBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, [clearTurnAnchor, thread.id]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+  }, []);
 
   useEffect(() => {
     const moveWithKeyboard = (event: KeyboardEvent) => {
@@ -531,20 +633,11 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
 
   useEffect(() => {
     if (keyboardOffset > 0) {
-      if (!anchoredMessageID && !pendingAnchorBaselineRef.current) {
-        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+      if (!anchoredMessageID && !pendingAnchorBaselineRef.current && followBottomRef.current) {
+        scrollToBottom(true);
       }
     }
-  }, [anchoredMessageID, keyboardOffset]);
-
-  const scrollToMessageTop = useCallback((index: number, animated: boolean) => {
-    listRef.current?.scrollToIndex({
-      index,
-      animated,
-      viewPosition: 0,
-      viewOffset: headerHeight + 16,
-    });
-  }, [headerHeight]);
+  }, [anchoredMessageID, keyboardOffset, scrollToBottom]);
 
   useEffect(() => {
     const baseline = pendingAnchorBaselineRef.current;
@@ -554,17 +647,31 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     const messageID = messages[messageIndex].id;
     const index = timelineItems.findIndex((item) => item.type === "message" && item.message.id === messageID);
     if (index < 0) return;
+    const spacerHeight = turnAnchorSpacerHeight(
+      windowHeight,
+      headerHeight,
+      composerHeight,
+      keyboardOffset,
+    );
     pendingAnchorBaselineRef.current = null;
     pendingAnchorIndexRef.current = index;
+    activeAnchorRef.current = {
+      messageID,
+      index,
+      initialSpacerHeight: spacerHeight,
+      currentSpacerHeight: spacerHeight,
+      baseContentHeight: null,
+    };
     setAnchoredMessageID(messageID);
+    setAnchorSpacerHeight(spacerHeight);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (pendingAnchorIndexRef.current !== index) return;
+        if (activeAnchorRef.current?.messageID !== messageID) return;
         pendingAnchorIndexRef.current = null;
         scrollToMessageTop(index, true);
       });
     });
-  }, [messages, scrollToMessageTop, timelineItems]);
+  }, [composerHeight, headerHeight, keyboardOffset, messages, scrollToMessageTop, timelineItems, windowHeight]);
 
   const addAttachment = async (kind: "file" | "camera" | "photos") => {
     if (!client) return;
@@ -585,9 +692,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     const prompt = draft.trim();
     const ids = attachments.map((item) => item.id);
     if (voice.recording) await voice.stop().catch(() => undefined);
-    pendingAnchorBaselineRef.current = new Set(messages.map((item) => item.id));
-    pendingAnchorIndexRef.current = null;
-    setAnchoredMessageID(null);
+    prepareTurnAnchor();
     composerInputRef.current?.blur();
     Keyboard.dismiss();
     dictatedBaseRef.current = "";
@@ -606,9 +711,8 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
       });
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch (cause) {
-      pendingAnchorBaselineRef.current = null;
-      pendingAnchorIndexRef.current = null;
-      setAnchoredMessageID(null);
+      clearTurnAnchor();
+      scrollToBottom(false);
       setDraft(prompt);
       Alert.alert("Message not sent", message(cause));
     } finally {
@@ -639,9 +743,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
       await endConversation();
       return;
     }
-    pendingAnchorBaselineRef.current = new Set(messages.map((item) => item.id));
-    pendingAnchorIndexRef.current = null;
-    setAnchoredMessageID(null);
+    prepareTurnAnchor();
     assistantBaselineRef.current = new Set(
       messages.filter((item) => item.role === "assistant").map((item) => item.id),
     );
@@ -661,10 +763,12 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
       }
     } catch (cause) {
       if (generation !== conversationGenerationRef.current) return;
+      clearTurnAnchor();
+      scrollToBottom(false);
       Alert.alert("Voice message not sent", message(cause));
       await endConversation();
     }
-  }, [client, endConversation, messages, project.id, setConversationPhase, thread.id]);
+  }, [clearTurnAnchor, client, endConversation, messages, prepareTurnAnchor, project.id, scrollToBottom, setConversationPhase, thread.id]);
 
   conversationFinalRef.current = (text) => { void submitConversationTranscript(text); };
 
@@ -785,10 +889,6 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     }
   };
 
-  const anchorSpacerHeight = anchoredMessageID
-    ? turnAnchorSpacerHeight(windowHeight, headerHeight, composerHeight, keyboardOffset)
-    : 0;
-
   return (
     <View style={styles.conversation}>
       <FlatList
@@ -798,24 +898,82 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
         style={styles.transcriptList}
         contentContainerStyle={[
           timelineItems.length ? styles.transcript : styles.emptyTranscript,
-          { paddingTop: headerHeight + 16, paddingBottom: composerHeight + keyboardOffset + 14 },
+          { paddingTop: headerHeight + 16 },
         ]}
         contentInsetAdjustmentBehavior="never"
         scrollIndicatorInsets={{ top: headerHeight, bottom: composerHeight + keyboardOffset }}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
-        onContentSizeChange={() => {
-          const pendingIndex = pendingAnchorIndexRef.current;
-          if (pendingIndex !== null) {
-            pendingAnchorIndexRef.current = null;
-            scrollToMessageTop(pendingIndex, true);
+        onContentSizeChange={(_, contentHeight) => {
+          const anchor = activeAnchorRef.current;
+          if (anchor) {
+            const contentWithoutSpacer = contentHeight - anchor.currentSpacerHeight;
+            if (anchor.baseContentHeight === null) {
+              anchor.baseContentHeight = contentWithoutSpacer;
+            } else {
+              const nextSpacerHeight = remainingTurnAnchorSpacer(
+                anchor.initialSpacerHeight,
+                anchor.baseContentHeight,
+                contentWithoutSpacer,
+              );
+              if (nextSpacerHeight !== anchor.currentSpacerHeight) {
+                anchor.currentSpacerHeight = nextSpacerHeight;
+                setAnchorSpacerHeight(nextSpacerHeight);
+              }
+              if (nextSpacerHeight === 0) {
+                activeAnchorRef.current = null;
+                setAnchoredMessageID(null);
+                followBottomRef.current = true;
+                setShowScrollToBottom(false);
+                scheduleScrollToBottom(false);
+              }
+            }
+            const pendingIndex = pendingAnchorIndexRef.current;
+            if (pendingIndex !== null) {
+              pendingAnchorIndexRef.current = null;
+              scrollToMessageTop(pendingIndex, true);
+            }
             return;
           }
-          if (!initialScrollPendingRef.current || pendingAnchorBaselineRef.current) return;
-          initialScrollPendingRef.current = false;
-          listRef.current?.scrollToEnd({ animated: false });
+          if (pendingAnchorBaselineRef.current) return;
+          if (initialScrollPendingRef.current) {
+            initialScrollPendingRef.current = false;
+            scrollToBottom(false);
+            return;
+          }
+          if (followBottomRef.current) scheduleScrollToBottom(false);
         }}
-        onScrollBeginDrag={() => setAnchoredMessageID(null)}
+        onScroll={(event) => {
+          if (scrollInteractionRef.current) updateScrollFollowState(event);
+        }}
+        onScrollBeginDrag={() => {
+          clearTurnAnchor();
+          programmaticScrollRef.current = null;
+          animatedScrollRef.current = false;
+          scrollInteractionRef.current = true;
+        }}
+        onScrollEndDrag={(event) => {
+          updateScrollFollowState(event);
+        }}
+        onMomentumScrollEnd={(event) => {
+          const programmaticScroll = programmaticScrollRef.current;
+          if (programmaticScroll !== null) {
+            const needsFinalSettle = animatedScrollRef.current;
+            programmaticScrollRef.current = null;
+            animatedScrollRef.current = false;
+            scrollInteractionRef.current = false;
+            setShowScrollToBottom(false);
+            if (programmaticScroll === "bottom") {
+              followBottomRef.current = true;
+              if (needsFinalSettle) scheduleScrollToBottom(false);
+            } else {
+              followBottomRef.current = false;
+            }
+            return;
+          }
+          if (scrollInteractionRef.current) updateScrollFollowState(event);
+          scrollInteractionRef.current = false;
+        }}
         onScrollToIndexFailed={({ index, averageItemLength }) => {
           listRef.current?.scrollToOffset({
             offset: Math.max(0, averageItemLength * index - headerHeight),
@@ -823,19 +981,45 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
           });
           requestAnimationFrame(() => scrollToMessageTop(index, true));
         }}
+        scrollEventThrottle={16}
         renderItem={({ item }) => item.type === "message"
           ? <MessageBubble message={item.message} />
           : <ActivityDisclosure activity={item.activity} />}
         ListEmptyComponent={<EmptyTranscript />}
-        ListFooterComponent={(sending || liveTurn.active || liveTurn.error || anchorSpacerHeight > 0) ? (
+        ListFooterComponent={(
           <View style={styles.transcriptFooter}>
-            {sending || liveTurn.active || liveTurn.error
+            {showLiveTurn
               ? <LiveBubble text={liveTurn.error || liveTurn.text || "Working…"} error={!!liveTurn.error} />
               : null}
+            <View style={{ height: composerHeight + keyboardOffset + 14 }} />
             {anchorSpacerHeight > 0 ? <View style={{ height: anchorSpacerHeight }} /> : null}
           </View>
-        ) : null}
+        )}
       />
+
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.composerFooterFade,
+          {
+            height: composerHeight + COMPOSER_FOOTER_FADE_HEIGHT,
+            transform: [{ translateY: composerTranslate }],
+          },
+        ]}
+      >
+        <FooterFade backgroundColor={colors.background} rgb="5,6,9" />
+      </Animated.View>
+
+      {showScrollToBottom && !anchoredMessageID ? (
+        <View style={[styles.scrollToBottom, { bottom: composerHeight + keyboardOffset + 12 }]}>
+          <GlassButton
+            label="Scroll to bottom"
+            symbol="arrow.down"
+            size={42}
+            onPress={() => scrollToBottom(true)}
+          />
+        </View>
+      ) : null}
 
       <Animated.View
         style={[
@@ -1810,6 +1994,8 @@ const styles = StyleSheet.create({
   transcriptList: { flex: 1 },
   transcript: { paddingHorizontal: 14, gap: 12 },
   transcriptFooter: { gap: 12 },
+  composerFooterFade: { position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 17 },
+  scrollToBottom: { position: "absolute", left: "50%", marginLeft: -21, zIndex: 18 },
   emptyTranscript: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 24 },
   messageWrap: { width: "100%", flexDirection: "row" },
   userWrap: { justifyContent: "flex-end" },
