@@ -48,7 +48,8 @@ import {
   type RuntimeEventEnvelope,
   type TurnFinishedEnvelope,
 } from "../types";
-import { choosePhoto, pickDocument, takePhoto, uploadAttachment } from "./attachments";
+import { choosePhotoOrVideo, pasteClipboardImage, pickDocument, takePhoto, uploadAttachment } from "./attachments";
+import { canPreviewAsNativeImage } from "./attachmentTypes";
 import {
   activityPresentation,
   cleanAssistantText,
@@ -88,10 +89,13 @@ const HEADER_FADE_HEIGHT = 34;
 const SIDEBAR_FOOTER_FADE_HEIGHT = 132;
 const COMPOSER_FOOTER_FADE_HEIGHT = 96;
 const ATTACHMENT_MENU_ACTIONS: MenuAction[] = [
-  { id: "photos", title: "Photos", image: "photo.on.rectangle" },
+  { id: "photos", title: "Photos & Videos", image: "photo.on.rectangle" },
   { id: "camera", title: "Camera", image: "camera.fill" },
   { id: "file", title: "Files", image: "doc.fill" },
+  { id: "paste", title: "Paste Image", image: "doc.on.clipboard" },
 ];
+
+type AttachmentChoice = "file" | "camera" | "photos" | "paste";
 
 function threadMenuActions(pinned: boolean): MenuAction[] {
   return [
@@ -478,6 +482,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
   const { height: windowHeight } = useWindowDimensions();
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const attachmentsRef = useRef<ChatAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [runtimeUpdating, setRuntimeUpdating] = useState(false);
@@ -541,6 +546,14 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     conversationPhaseRef.current = phase;
     setConversationPhaseState(phase);
   }, []);
+
+  useEffect(() => () => {
+    const pending = attachmentsRef.current;
+    attachmentsRef.current = [];
+    for (const attachment of pending) {
+      void client?.request("discard_media", { attachmentId: attachment.id }).catch(() => undefined);
+    }
+  }, [client]);
 
   const scheduleScrollToBottom = useCallback((animated: boolean) => {
     if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
@@ -684,13 +697,25 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     });
   }, [composerHeight, headerHeight, keyboardOffset, messages, scrollToMessageTop, timelineItems, windowHeight]);
 
-  const addAttachment = async (kind: "file" | "camera" | "photos") => {
+  const addAttachment = async (kind: AttachmentChoice) => {
     if (!client) return;
     setUploading(true);
     try {
-      const item = kind === "file" ? await pickDocument() : kind === "camera" ? await takePhoto() : await choosePhoto();
+      const item = kind === "file"
+        ? await pickDocument()
+        : kind === "camera"
+          ? await takePhoto()
+          : kind === "photos"
+            ? await choosePhotoOrVideo()
+            : await pasteClipboardImage();
       const uploaded = await uploadAttachment(client, item);
-      if (uploaded) setAttachments((items) => [...items, uploaded]);
+      if (uploaded) {
+        setAttachments((items) => {
+          const next = [...items, uploaded];
+          attachmentsRef.current = next;
+          return next;
+        });
+      }
     } catch (cause) {
       Alert.alert("Couldn’t attach item", message(cause));
     } finally {
@@ -698,17 +723,25 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
     }
   };
 
+  const removeAttachment = useCallback((attachment: ChatAttachment) => {
+    setAttachments((items) => {
+      const next = items.filter((candidate) => candidate.id !== attachment.id);
+      attachmentsRef.current = next;
+      return next;
+    });
+    void client?.request("discard_media", { attachmentId: attachment.id }).catch(() => undefined);
+  }, [client]);
+
   const send = async () => {
     if (!client || sending || (!draft.trim() && !attachments.length)) return;
     const prompt = draft.trim();
-    const ids = attachments.map((item) => item.id);
+    const ids = attachmentsRef.current.map((item) => item.id);
     if (voice.recording) await voice.stop().catch(() => undefined);
     prepareTurnAnchor();
     composerInputRef.current?.blur();
     Keyboard.dismiss();
     dictatedBaseRef.current = "";
     setDraft("");
-    setAttachments([]);
     setSending(true);
     try {
       await client.request("send_prompt", {
@@ -720,6 +753,8 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
         annotations: [],
         textSelections: [],
       });
+      attachmentsRef.current = [];
+      setAttachments([]);
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch (cause) {
       clearTurnAnchor();
@@ -1048,7 +1083,13 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
               <View key={item.id} style={styles.attachmentChip}>
                 <SymbolView name={item.mimeType.startsWith("image/") ? "photo" : "doc.fill"} size={15} tintColor={colors.accent} />
                 <Text numberOfLines={1} style={styles.attachmentName}>{item.displayName}</Text>
-                <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${item.displayName}`} onPress={() => setAttachments((items) => items.filter((candidate) => candidate.id !== item.id))}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove ${item.displayName}`}
+                  accessibilityState={{ disabled: sending }}
+                  disabled={sending}
+                  onPress={() => removeAttachment(item)}
+                >
                   <SymbolView name="xmark.circle.fill" size={17} tintColor={colors.tertiary} />
                 </Pressable>
               </View>
@@ -1079,7 +1120,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
             />
             <View style={styles.composerControls}>
               <AttachmentMenuButton
-                disabled={uploading || conversationActive}
+                disabled={uploading || sending || conversationActive}
                 uploading={uploading}
                 onChoose={(kind) => void addAttachment(kind)}
               />
@@ -1122,7 +1163,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
 function AttachmentMenuButton({ disabled, uploading, onChoose }: {
   disabled: boolean;
   uploading: boolean;
-  onChoose: (kind: "file" | "camera" | "photos") => void;
+  onChoose: (kind: AttachmentChoice) => void;
 }) {
   const trigger = (
     <View
@@ -1142,7 +1183,7 @@ function AttachmentMenuButton({ disabled, uploading, onChoose }: {
       actions={ATTACHMENT_MENU_ACTIONS}
       onPressAction={(event) => {
         const kind = event.nativeEvent.event;
-        if (kind === "file" || kind === "camera" || kind === "photos") onChoose(kind);
+        if (kind === "file" || kind === "camera" || kind === "photos" || kind === "paste") onChoose(kind);
       }}
     >
       {trigger}
@@ -1744,10 +1785,8 @@ const MessageBubble = memo(function MessageBubble({ message: item }: { message: 
   const displayContent = user ? item.content : cleanAssistantText(item.content);
   const content = (
     <>
-      {item.attachments?.map((attachment) => attachment.mimeType.startsWith("image/") ? (
-        <RemoteAttachmentImage key={attachment.id} attachment={attachment} />
-      ) : (
-        <View key={attachment.id} style={styles.fileCard}><SymbolView name="doc.fill" size={18} tintColor={colors.accent} /><Text numberOfLines={1} style={styles.fileName}>{attachment.displayName}</Text></View>
+      {item.attachments?.map((attachment) => (
+        <MessageAttachment key={attachment.id} attachment={attachment} />
       ))}
       {displayContent ? (
         user ? (
@@ -1764,6 +1803,20 @@ const MessageBubble = memo(function MessageBubble({ message: item }: { message: 
     </View>
   );
 });
+
+function MessageAttachment({ attachment }: { attachment: ChatAttachment }) {
+  return canPreviewAsNativeImage(attachment.mimeType)
+    ? <RemoteAttachmentImage attachment={attachment} />
+    : <View style={styles.fileCard}><SymbolView name={attachmentSymbol(attachment.mimeType)} size={18} tintColor={colors.accent} /><Text numberOfLines={1} style={styles.fileName}>{attachment.displayName}</Text></View>;
+}
+
+function attachmentSymbol(mimeType: string) {
+  if (mimeType.startsWith("image/")) return "photo.fill" as const;
+  if (mimeType.startsWith("audio/")) return "waveform" as const;
+  if (mimeType.startsWith("video/")) return "video.fill" as const;
+  if (mimeType.includes("zip")) return "archivebox.fill" as const;
+  return "doc.fill" as const;
+}
 
 function ActivityDisclosure({ activity }: { activity: MobileActivity }) {
   const [expanded, setExpanded] = useState(false);

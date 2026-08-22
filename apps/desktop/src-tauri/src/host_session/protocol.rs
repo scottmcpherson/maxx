@@ -85,6 +85,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "remove_thread"
         | "update_thread"
         | "upload_media"
+        | "discard_media"
         | "authorize_attachment_previews" => Some(Capability::WorkspaceWrite),
         "send_prompt"
         | "steer_prompt"
@@ -207,6 +208,10 @@ mod tests {
             Some(Capability::WorkspaceRead)
         );
         assert_eq!(required_capability("future_unreviewed_method"), None);
+        assert_eq!(
+            required_capability("discard_media"),
+            Some(Capability::WorkspaceWrite)
+        );
     }
 
     #[test]
