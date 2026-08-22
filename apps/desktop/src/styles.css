@@ -934,7 +934,6 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .browser-tabbar {
   height: var(--titlebar-height); flex: 0 0 auto;
   display: flex; align-items: center; gap: 6px; padding: 0 8px;
-  border-bottom: 1px solid rgba(255,255,255,.055);
   -webkit-app-region: no-drag;
 }
 .browser-tabs-viewport {

@@ -465,7 +465,7 @@ export function ThreadView({
   return (
     <div className="workspace-stage flex h-full min-h-0 min-w-0 flex-1 bg-background" aria-hidden={browserExpanded} inert={browserExpanded}>
       <main className="flex min-w-0 flex-1 flex-col bg-background">
-        <header className={cn("flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 [-webkit-app-region:drag]", !sidebarOpen && "ps-12")} onMouseDown={beginWindowDrag}>
+        <header className={cn("flex h-10 shrink-0 items-center gap-2 px-3 [-webkit-app-region:drag]", !sidebarOpen && "ps-12")} onMouseDown={beginWindowDrag}>
           {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}
           <div className="flex items-center gap-2 [-webkit-app-region:no-drag]">
             {!sidebarOpen && (
@@ -1229,7 +1229,7 @@ function NewAgentView({
   return (
     <main className="relative flex min-w-0 flex-1 flex-col bg-background">
       <header
-        className={cn("h-10 shrink-0 border-b border-border [-webkit-app-region:drag]", !sidebarOpen && "ps-12")}
+        className={cn("h-10 shrink-0 [-webkit-app-region:drag]", !sidebarOpen && "ps-12")}
         onMouseDown={beginWindowDrag}
       >
         {!sidebarOpen && <span className="window-sidebar-toggle-cutout" aria-hidden="true" />}

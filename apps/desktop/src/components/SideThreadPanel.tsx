@@ -129,8 +129,11 @@ export function SideThreadPanel({
   };
 
   return (
-    <aside className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background" aria-label="Side thread">
-      <header className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border px-3.5 text-xs font-semibold text-muted-foreground" onMouseDown={beginWindowDrag}>
+    <aside
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-border bg-background"
+      aria-label="Side thread"
+    >
+      <header className="flex h-10 shrink-0 items-center gap-2.5 px-3.5 text-xs font-semibold text-muted-foreground" onMouseDown={beginWindowDrag}>
         <div className="flex shrink-0 items-center gap-1.5">
           <Icons.bubble size={14} />
           <span>Thread</span>
@@ -168,7 +171,7 @@ export function SideThreadPanel({
         turnTimes={turnTimes}
       />
 
-      <footer className="flex shrink-0 flex-col gap-2 px-3 pt-2 pb-8">
+      <footer className="flex shrink-0 flex-col gap-2 px-4 pb-4">
         <QueuedMessages
           messages={queuedMessages}
           isRunning={isRunning}
