@@ -89,7 +89,6 @@
   --warning: #d7ae5c;
   --link-color: #75a7e8;
   --input: rgba(255, 255, 255, 0.15);
-  --ring: oklch(0.708 0 0);
   --chart-1: oklch(0.708 0 0);
   --chart-2: #6fc58b;
   --chart-3: #75a7e8;
@@ -103,7 +102,6 @@
   --sidebar-accent: #303030;
   --sidebar-accent-foreground: #e7e7e7;
   --sidebar-border: rgba(255, 255, 255, 0.095);
-  --sidebar-ring: var(--ring);
 }
 
 html, body, #root { height: 100%; }
@@ -861,10 +859,6 @@ kbd { font-family: inherit; font-size: 10.5px; color: var(--text-faint); backgro
 .runtime-segmented {
   display: flex; flex-wrap: nowrap; gap: 3px; padding: 0 4px;
 }
-.runtime-popover button:focus-visible,
-.runtime-popover input:focus-visible {
-  outline-color: rgba(255, 255, 255, 0.42);
-}
 .runtime-status {
   min-height: 28px; flex: 0 0 auto; margin: 3px 5px; padding: 6px 8px; display: flex; align-items: flex-start; gap: 6px;
   border: 1px solid rgba(255,255,255,.08); border-radius: 6px; background: rgba(255,255,255,.025);
@@ -1088,7 +1082,6 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
   --text-sm: 0.8125rem;
   --text-sm--line-height: 1.25rem;
-  --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-accent: var(--sidebar-accent);
@@ -1101,7 +1094,6 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
   --color-chart-3: var(--chart-3);
   --color-chart-2: var(--chart-2);
   --color-chart-1: var(--chart-1);
-  --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
@@ -1136,7 +1128,7 @@ body.is-resizing-sidebar .browser-resizer { transition: none; }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
   ::placeholder {
     color: var(--placeholder-foreground);

@@ -101,7 +101,7 @@ export function MentionMenu({ menu }: { menu: MentionMenuState }) {
   if (!menu.open) return null;
   return (
     <Command
-      className="absolute inset-x-2 bottom-[calc(100%+0.4375rem)] z-40 max-h-60 overflow-y-auto rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
+      className="absolute -inset-x-px bottom-[calc(100%+0.4375rem)] z-40 w-auto! max-h-60 overflow-y-auto rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
       role="listbox"
       aria-label="Mention an agent"
     >

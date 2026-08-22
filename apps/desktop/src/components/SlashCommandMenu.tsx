@@ -206,22 +206,28 @@ export function SlashCommandMenu({ menu }: { menu: SlashCommandMenuState }) {
 function OpenSlashCommandMenu({ menu }: { menu: SlashCommandMenuState }) {
   const listRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    const selected = listRef.current?.querySelector<HTMLElement>("[aria-selected='true']");
-    selected?.scrollIntoView({ block: "nearest" });
+    const list = listRef.current;
+    const selected = list?.querySelector<HTMLElement>(
+      `[data-command-index="${menu.activeIndex}"]`,
+    );
+    if (list && selected) keepOptionVisible(list, selected);
   }, [menu.activeIndex]);
+  const activeValue = menu.candidates[menu.activeIndex]?.id ?? "";
   return (
     <Command
-      ref={listRef}
       id="composer-slash-menu"
-      className="absolute inset-x-2 bottom-[calc(100%+0.4375rem)] z-40 max-h-80 overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
+      className="absolute -inset-x-px bottom-[calc(100%+0.4375rem)] z-40 h-auto! w-auto! max-h-96 overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
       role="listbox"
       aria-label={`${providerDisplayName(menu.provider)} commands and skills`}
+      shouldFilter={false}
+      disablePointerSelection
+      value={activeValue}
     >
       <div className="sticky top-0 z-10 flex h-8 items-center justify-between bg-popover px-2 text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground">
         <span>Commands &amp; skills</span>
         <span>{providerDisplayName(menu.provider)}</span>
       </div>
-      <CommandList className="max-h-72 overflow-y-auto">
+      <CommandList ref={listRef} className="max-h-80 overscroll-contain overflow-y-auto">
         {menu.loading && menu.candidates.length === 0 && (
           <div className="flex min-h-12 w-full items-center gap-2 rounded-lg px-2 text-sm text-muted-foreground">
             <Spinner />Loading catalog…
@@ -249,13 +255,10 @@ function OpenSlashCommandMenu({ menu }: { menu: SlashCommandMenuState }) {
         {menu.candidates.map((item, index) => (
         <CommandItem
           key={item.id}
+          value={item.id}
+          data-command-index={index}
           role="option"
-          aria-selected={index === menu.activeIndex}
-          className={cn(
-            "grid min-h-12 cursor-pointer grid-cols-[1.625rem_minmax(0,1fr)_auto] gap-2 rounded-lg px-2 py-1 text-sm",
-            index === menu.activeIndex && "bg-muted text-foreground",
-          )}
-          onMouseEnter={() => menu.activate(index)}
+          className="grid min-h-12 cursor-pointer grid-cols-[1.625rem_minmax(0,1fr)_auto] gap-2 rounded-lg px-2 py-1 text-sm hover:bg-muted hover:text-foreground"
           onMouseDown={(event) => {
             event.preventDefault();
             menu.complete(item);
@@ -280,4 +283,14 @@ function OpenSlashCommandMenu({ menu }: { menu: SlashCommandMenuState }) {
       </CommandList>
     </Command>
   );
+}
+
+export function keepOptionVisible(list: HTMLElement, selected: HTMLElement) {
+  const listRect = list.getBoundingClientRect();
+  const selectedRect = selected.getBoundingClientRect();
+  if (selectedRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - selectedRect.top;
+  } else if (selectedRect.bottom > listRect.bottom) {
+    list.scrollTop += selectedRect.bottom - listRect.bottom;
+  }
 }

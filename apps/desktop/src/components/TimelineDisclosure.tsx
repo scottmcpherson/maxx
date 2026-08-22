@@ -18,7 +18,7 @@ export function TimelineDisclosure({
 }) {
   return (
     <Collapsible className="min-w-0 px-2 text-xs text-muted-foreground">
-      <CollapsibleTrigger className="group flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-sm text-left text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+      <CollapsibleTrigger className="group flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-sm text-left text-muted-foreground outline-none">
         <ChevronRightIcon
           aria-hidden="true"
           size={14}
