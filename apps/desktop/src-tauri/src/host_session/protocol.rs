@@ -85,7 +85,7 @@ pub fn required_capability(method: &str) -> Option<Capability> {
         | "remove_thread"
         | "update_thread"
         | "upload_media"
-        | "authorize_image_previews" => Some(Capability::WorkspaceWrite),
+        | "authorize_attachment_previews" => Some(Capability::WorkspaceWrite),
         "send_prompt"
         | "steer_prompt"
         | "create_side_chat"

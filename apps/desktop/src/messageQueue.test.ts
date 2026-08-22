@@ -9,7 +9,8 @@ function queued(overrides: Partial<QueuedMessage> = {}): QueuedMessage {
     threadID: "thread",
     hostID: "local",
     prompt: "  Check   this next\nplease ",
-    imagePaths: [],
+    attachmentPaths: [],
+    attachmentIds: [],
     annotations: [],
     textSelections: [],
     ...overrides,
@@ -29,9 +30,10 @@ describe("message queue presentation", () => {
     expect(queuedMessageSummary(queued())).toBe("Check this next please");
     expect(queuedMessageSummary(queued({
       prompt: "",
-      imagePaths: ["one.png", "two.png"],
+      attachmentPaths: ["one.png"],
+      attachmentIds: ["uploaded-two"],
       annotations: [{}, {}] as never[],
       textSelections: [{ id: "selection", text: "context" }],
-    }))).toBe("2 images · 3 selections");
+    }))).toBe("2 attachments · 3 selections");
   });
 });

@@ -1,6 +1,6 @@
 export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "hermes";
 
-export type ChatImageAttachment = {
+export type ChatAttachment = {
   id: string;
   path: string;
   mimeType: string;
@@ -11,7 +11,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  attachments?: ChatImageAttachment[];
+  attachments?: ChatAttachment[];
   createdAt: number;
   sourceEventID?: string;
 };

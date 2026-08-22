@@ -6,7 +6,7 @@ import { useAppStore } from "../store/appStore";
 import { beginWindowDrag } from "../windowDrag";
 import { AgentAvatar } from "./AgentAvatar";
 import { Icons } from "./Icons";
-import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
+import { AttachFilesButton, PendingAttachmentStrip, useComposerAttachments } from "./ComposerAttachments";
 import { MentionMenu, useMentionMenu } from "./MentionMenu";
 import { MentionTextarea } from "./MentionTextarea";
 import { QueuedMessages } from "./QueuedMessages";
@@ -94,7 +94,7 @@ export function SideThreadPanel({
   const [submitting, setSubmitting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenu = useMentionMenu({ agents, textareaRef: draftRef, setDraft });
-  const images = useImageAttachments();
+  const composerAttachments = useComposerAttachments();
 
   // Mentions address those agents (responding in mention order); an
   // unmentioned follow-up goes to whoever spoke last.
@@ -111,19 +111,20 @@ export function SideThreadPanel({
   };
 
   const submit = async () => {
-    if ((!draft.trim() && images.paths.length === 0) || submitting || targetAgents.length === 0) return;
+    if ((!draft.trim() && composerAttachments.attachments.length === 0) || submitting || targetAgents.length === 0) return;
     setSubmitting(true);
     const sent = await sendAgentPrompt(
       project.id,
       thread.id,
       targetAgents.map((agent) => agent.id),
       draft.trim(),
-      images.paths,
+      composerAttachments.payload.attachmentPaths,
+      composerAttachments.payload.attachmentIds,
     );
     setSubmitting(false);
     if (!sent) return;
     setDraft("");
-    images.clear();
+    composerAttachments.clear();
     mentionMenu.dismiss();
     requestAnimationFrame(() => draftRef.current?.focus());
   };
@@ -181,9 +182,14 @@ export function SideThreadPanel({
           onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
           onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
         />
-        <div className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
+        <div
+          className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm"
+          onPaste={composerAttachments.onPaste}
+          onDragOver={composerAttachments.onDragOver}
+          onDrop={composerAttachments.onDrop}
+        >
           <MentionMenu menu={mentionMenu} />
-          <PendingImageStrip paths={images.paths} onRemove={images.remove} />
+          <PendingAttachmentStrip attachments={composerAttachments.attachments} onRemove={composerAttachments.remove} />
           <MentionTextarea
             ref={draftRef}
             agents={agents}
@@ -211,7 +217,7 @@ export function SideThreadPanel({
             {/* No single "replying to" addressee: any mix of agents can be
                 mentioned in one reply, and the composer already shows them as
                 pills. Unmentioned replies go to whoever spoke last. */}
-            <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
+            <AttachFilesButton disabled={false} onChoose={() => void composerAttachments.choose()} />
             {isRunning ? (
               <div className="flex items-center gap-2.5">
                 <IconButton
@@ -228,7 +234,7 @@ export function SideThreadPanel({
                   variant="default"
                   size="icon-sm"
                   className="rounded-full"
-                  disabled={submitting || (!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
+                  disabled={submitting || (!draft.trim() && composerAttachments.attachments.length === 0) || targetAgents.length === 0}
                   onClick={() => void submit()}
                 >
                   {submitting ? <Spinner /> : <Icons.arrowUp />}
@@ -240,7 +246,7 @@ export function SideThreadPanel({
                 variant="default"
                 size="icon-sm"
                 className="rounded-full"
-                disabled={(!draft.trim() && images.paths.length === 0) || targetAgents.length === 0}
+                disabled={(!draft.trim() && composerAttachments.attachments.length === 0) || targetAgents.length === 0}
                 onClick={() => void submit()}
               >
                 <Icons.arrowUp />

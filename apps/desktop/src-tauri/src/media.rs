@@ -61,7 +61,7 @@ fn resolve_media_path(
         .canonicalize()
         .map_err(|_| "The project folder is unavailable".to_string())?;
     let mut roots = vec![project_root.clone()];
-    if let Ok(chat_images) = crate::state::chat_images_dir().canonicalize() {
+    if let Ok(chat_images) = crate::state::chat_attachments_dir().canonicalize() {
         roots.push(chat_images);
     }
     if thread.provider == ChatProvider::Grok {

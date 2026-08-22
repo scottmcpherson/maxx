@@ -225,7 +225,7 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  attachments?: ChatImageAttachment[];
+  attachments?: ChatAttachment[];
   annotations?: BrowserAnnotation[];
   textSelections?: ChatTextSelection[];
   createdAt: number;
@@ -240,7 +240,7 @@ export interface ChatTextSelection {
   text: string;
 }
 
-export interface ChatImageAttachment {
+export interface ChatAttachment {
   id: string;
   path: string;
   mimeType: string;

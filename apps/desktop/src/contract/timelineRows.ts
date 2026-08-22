@@ -1,11 +1,11 @@
-import { AgentDefinition, ChatImageAttachment, ChatTextSelection, ChatThread, EventKind } from "./types";
+import { AgentDefinition, ChatAttachment, ChatTextSelection, ChatThread, EventKind } from "./types";
 import { TimelineItem } from "./timeline";
 import { isProviderDiagnostic } from "../../../../shared/providerDiagnostics";
 import type { BrowserAnnotation } from "../browser";
 
 /** One rendered line of a thread transcript, in chronological order. */
 export type TimelineRow =
-  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatImageAttachment[]; annotations: BrowserAnnotation[]; textSelections: ChatTextSelection[] }
+  | { key: string; at: number; kind: "user"; messageID: string; text: string; attachments: ChatAttachment[]; annotations: BrowserAnnotation[]; textSelections: ChatTextSelection[] }
   // Provider-reconciled terminal replies have no synthetic runtime event; a
   // normal GUI reply still renders from its source event to avoid duplication.
   | { key: string; at: number; kind: "assistant"; messageID: string; text: string }

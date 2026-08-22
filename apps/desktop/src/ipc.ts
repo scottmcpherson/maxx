@@ -293,14 +293,14 @@ export const ipc = {
     invoke<AgentDefinition[]>("update_agents", { agents }),
   importAgentImage: (agentId: string, sourcePath: string) =>
     invoke<string>("import_agent_image", { agentId, sourcePath }),
-  authorizeImagePreviews: (imagePaths: string[]) =>
-    invoke<void>("authorize_image_previews", { imagePaths }),
+  authorizeAttachmentPreviews: (attachmentPaths: string[]) =>
+    invoke<void>("authorize_attachment_previews", { attachmentPaths }),
   startSideThread: (
     projectId: string,
     parentThreadId: string,
     agentIds: string[],
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     hostId?: string | null,
     attachmentIds: string[] = [],
     annotations: BrowserAnnotation[] = [],
@@ -310,7 +310,7 @@ export const ipc = {
       parentThreadId,
       agentIds,
       prompt,
-      imagePaths,
+      attachmentPaths,
       attachmentIds,
       annotations,
     }),
@@ -319,7 +319,7 @@ export const ipc = {
     threadId: string,
     agentIds: string[],
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     hostId?: string | null,
     attachmentIds: string[] = [],
   ) =>
@@ -328,14 +328,14 @@ export const ipc = {
       threadId,
       agentIds,
       prompt,
-      imagePaths,
+      attachmentPaths,
       attachmentIds,
     }),
   sendPrompt: (
     projectId: string,
     threadId: string,
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     hostId?: string | null,
     attachmentIds: string[] = [],
     annotations: BrowserAnnotation[] = [],
@@ -345,7 +345,7 @@ export const ipc = {
       projectId,
       threadId,
       prompt,
-      imagePaths,
+      attachmentPaths,
       attachmentIds,
       annotations,
       textSelections,
@@ -357,7 +357,7 @@ export const ipc = {
     threadId: string,
     turnId: string,
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     hostId?: string | null,
     attachmentIds: string[] = [],
     annotations: BrowserAnnotation[] = [],
@@ -367,7 +367,7 @@ export const ipc = {
       threadId,
       turnId,
       prompt,
-      imagePaths,
+      attachmentPaths,
       attachmentIds,
       annotations,
     }),
@@ -449,6 +449,8 @@ export const ipc = {
     ),
   readMedia: (attachmentId: string, hostId?: string | null) =>
     invokeOnHost<MediaBytes>(hostId, "read_media", { attachmentId }),
+  discardMedia: (attachmentId: string) =>
+    invoke<void>("discard_media", { attachmentId }),
   loadMedia: (projectId: string, threadId: string, destination: string, hostId?: string | null) =>
     invokeOnHost<MediaBytes>(hostId, "load_media", { projectId, threadId, destination }),
   onHostEvent: (
@@ -486,7 +488,7 @@ export const ipc = {
     invoke<boolean>("browser_fill_saved_password", { tabId }),
 
   openProjectDialog: () => invoke<string | null>("dialog_open_project"),
-  openImagesDialog: () => invoke<string[]>("dialog_open_images"),
+  openAttachmentsDialog: () => invoke<string[]>("dialog_open_attachments"),
   openAgentImageDialog: () => invoke<string | null>("dialog_open_agent_image"),
   // Voice dictation. Rust owns the credential and the socket; the webview only
   // captures audio and renders what comes back. `hostId` routes execution;

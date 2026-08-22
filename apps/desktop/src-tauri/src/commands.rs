@@ -94,7 +94,7 @@ pub async fn remove_project(state: Arc<AppState>, project_id: Uuid) -> Result<()
     state.save().await;
     {
         let workspace = state.workspace.lock().await;
-        crate::attachments::prune_images(&workspace);
+        crate::attachments::prune_attachments(&workspace);
     }
     Ok(())
 }
@@ -206,7 +206,7 @@ pub async fn remove_thread(
     state.save().await;
     {
         let workspace = state.workspace.lock().await;
-        crate::attachments::prune_images(&workspace);
+        crate::attachments::prune_attachments(&workspace);
     }
     Ok(())
 }
@@ -522,12 +522,12 @@ fn compose_provider_prompt(
 
 fn provider_attachment_context(
     prompt: String,
-    attachments: &[ChatImageAttachment],
-) -> (String, Vec<ChatImageAttachment>) {
+    attachments: &[ChatAttachment],
+) -> (String, Vec<ChatAttachment>) {
     let mut images = Vec::new();
     let mut files = Vec::new();
     for attachment in attachments {
-        if attachment.mime_type.starts_with("image/") {
+        if crate::attachments::is_provider_image(&attachment.mime_type) {
             images.push(attachment.clone());
         } else {
             files.push(attachment);
@@ -554,13 +554,13 @@ fn agent_name_map(agents: &[AgentDefinition]) -> HashMap<Uuid, String> {
 }
 
 fn load_prompt_attachments(
-    image_paths: Vec<String>,
+    attachment_paths: Vec<String>,
     attachment_ids: Vec<Uuid>,
-) -> Result<Vec<ChatImageAttachment>, String> {
-    let mut attachments = crate::attachments::import_images(&image_paths)?;
+) -> Result<Vec<ChatAttachment>, String> {
+    let mut attachments = crate::attachments::import_attachments(&attachment_paths)?;
     for id in attachment_ids {
         attachments.push(crate::host_session::attachment_from_id(
-            &crate::state::chat_images_dir(),
+            &crate::state::chat_attachments_dir(),
             id,
             None,
             None,
@@ -730,16 +730,16 @@ pub async fn send_prompt(
     project_id: Uuid,
     thread_id: Uuid,
     prompt: String,
-    image_paths: Vec<String>,
+    attachment_paths: Vec<String>,
     attachment_ids: Vec<Uuid>,
     annotations: Vec<BrowserAnnotationContext>,
     text_selections: Vec<ChatTextSelection>,
 ) -> Result<Uuid, String> {
-    let has_terminal_extras = !image_paths.is_empty()
+    let has_terminal_extras = !attachment_paths.is_empty()
         || !attachment_ids.is_empty()
         || !annotations.is_empty()
         || !text_selections.is_empty();
-    let attachments = load_prompt_attachments(image_paths, attachment_ids)?;
+    let attachments = load_prompt_attachments(attachment_paths, attachment_ids)?;
     let annotations = validate_browser_annotations(annotations)?;
     let text_selections = validate_chat_text_selections(text_selections)?;
     let provider_prompt = prompt_with_chat_text_selections(
@@ -967,20 +967,20 @@ pub struct SteerPromptCommand {
     pub thread_id: Uuid,
     pub turn_id: Uuid,
     pub prompt: String,
-    pub image_paths: Vec<String>,
+    pub attachment_paths: Vec<String>,
     pub attachment_ids: Vec<Uuid>,
     pub annotations: Vec<BrowserAnnotationContext>,
 }
 
 pub async fn steer_prompt(state: Arc<AppState>, request: SteerPromptCommand) -> Result<(), String> {
     if request.prompt.trim().is_empty()
-        && request.image_paths.is_empty()
+        && request.attachment_paths.is_empty()
         && request.attachment_ids.is_empty()
         && request.annotations.is_empty()
     {
         return Err("A steering message cannot be empty.".into());
     }
-    let attachments = load_prompt_attachments(request.image_paths, request.attachment_ids)?;
+    let attachments = load_prompt_attachments(request.attachment_paths, request.attachment_ids)?;
     let annotations = validate_browser_annotations(request.annotations)?;
     let provider_prompt = prompt_with_browser_annotations(&request.prompt, &annotations);
     {
@@ -1091,7 +1091,7 @@ fn prepare_agent_turn(
     thread: &mut ChatThread,
     agent: &AgentDefinition,
     prompt: &str,
-    attachments: &[ChatImageAttachment],
+    attachments: &[ChatAttachment],
     annotations: &[BrowserAnnotationContext],
     turn_id: Uuid,
     folder_path: String,
@@ -1233,7 +1233,7 @@ async fn run_agent_chain(
     first: TurnRequest,
     rest: Vec<AgentDefinition>,
     prompt: String,
-    attachments: Vec<ChatImageAttachment>,
+    attachments: Vec<ChatAttachment>,
     annotations: Vec<BrowserAnnotationContext>,
     folder_path: String,
 ) {
@@ -1282,11 +1282,11 @@ pub async fn start_side_thread(
     parent_thread_id: Uuid,
     agent_ids: Vec<Uuid>,
     prompt: String,
-    image_paths: Vec<String>,
+    attachment_paths: Vec<String>,
     attachment_ids: Vec<Uuid>,
     annotations: Vec<BrowserAnnotationContext>,
 ) -> Result<ChatThread, String> {
-    let attachments = load_prompt_attachments(image_paths, attachment_ids)?;
+    let attachments = load_prompt_attachments(attachment_paths, attachment_ids)?;
     let annotations = validate_browser_annotations(annotations)?;
     let turn_id = Uuid::new_v4();
     let (request, thread_snapshot, rest, folder_path) = {
@@ -1396,10 +1396,10 @@ pub async fn send_agent_prompt(
     thread_id: Uuid,
     agent_ids: Vec<Uuid>,
     prompt: String,
-    image_paths: Vec<String>,
+    attachment_paths: Vec<String>,
     attachment_ids: Vec<Uuid>,
 ) -> Result<Uuid, String> {
-    let attachments = load_prompt_attachments(image_paths, attachment_ids)?;
+    let attachments = load_prompt_attachments(attachment_paths, attachment_ids)?;
     let annotations = Vec::new();
     let turn_id = Uuid::new_v4();
     let (request, rest, folder_path) = {

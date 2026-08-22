@@ -82,7 +82,7 @@ import {
   replaceWorkspace,
   routeHostId,
 } from "../host/session";
-import { uploadImagesForHost } from "../host/mediaUpload";
+import { prepareAttachmentsForHost } from "../host/mediaUpload";
 import type { QueuedMessage } from "../messageQueue";
 import type { GitEnvironmentMode } from "../git";
 import type { SideChatRequest } from "../sideChat";
@@ -195,23 +195,25 @@ interface AppStoreState {
     provider: ChatProvider,
     model: string,
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     effort?: string | null,
     speed?: string | null,
     surface?: ChatSurface,
     environment?: GitEnvironmentMode,
     hostID?: string,
+    attachmentIds?: string[],
   ) => Promise<boolean>;
   requestVoiceConversation: (threadID: string) => void;
   consumeVoiceConversationRequest: (threadID: string) => void;
-  sendPrompt: (prompt: string, imagePaths: string[], annotations?: BrowserAnnotation[]) => Promise<boolean>;
+  sendPrompt: (prompt: string, attachmentPaths: string[], annotations?: BrowserAnnotation[], attachmentIds?: string[]) => Promise<boolean>;
   createSideChat: (projectID: string, parentThreadID: string) => Promise<ChatThread | null>;
   sendSideChatPrompt: (
     projectID: string,
     threadID: string,
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     textSelections?: ChatTextSelection[],
+    attachmentIds?: string[],
   ) => Promise<boolean>;
   drainPromptQueue: (threadID: string) => Promise<boolean>;
   steerQueuedMessage: (threadID: string, messageID: string) => Promise<boolean>;
@@ -234,15 +236,17 @@ interface AppStoreState {
     parentThreadID: string,
     agentIDs: string[],
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
     annotations?: BrowserAnnotation[],
+    attachmentIds?: string[],
   ) => Promise<boolean>;
   sendAgentPrompt: (
     projectID: string,
     threadID: string,
     agentIDs: string[],
     prompt: string,
-    imagePaths: string[],
+    attachmentPaths: string[],
+    attachmentIds?: string[],
   ) => Promise<boolean>;
   setSettingsOpen: (open: boolean) => void;
   setAgentsOpen: (open: boolean) => void;
@@ -371,14 +375,14 @@ function hostActionError(
 
 export const useAppStore = create<AppStoreState>((set, get) => {
   const dispatchQueuedMessage = async (message: QueuedMessage): Promise<string> => {
-    const prepared = await uploadImagesForHost(message.hostID, message.imagePaths);
+    const prepared = await prepareAttachmentsForHost(message.hostID, message.attachmentPaths, message.attachmentIds);
     if (message.kind === "agent") {
       return ipc.sendAgentPrompt(
         message.projectID,
         message.threadID,
         message.agentIDs,
         message.prompt,
-        prepared.imagePaths,
+        prepared.attachmentPaths,
         message.hostID,
         prepared.attachmentIds,
       );
@@ -387,7 +391,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       message.projectID,
       message.threadID,
       message.prompt,
-      prepared.imagePaths,
+      prepared.attachmentPaths,
       message.hostID,
       prepared.attachmentIds,
       message.annotations,
@@ -940,15 +944,16 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     provider,
     model,
     prompt,
-    imagePaths,
+    attachmentPaths,
     effort = null,
     speed = null,
     surface = "gui",
     environment = "current",
     requestedHostID,
+    attachmentIds = [],
   ) => {
-    if (!prompt.trim() && (surface === "terminal" || imagePaths.length === 0)) return false;
-    const title = prompt.trim().split("\n")[0].slice(0, 64) || "Image attachment";
+    if (!prompt.trim() && (surface === "terminal" || (attachmentPaths.length === 0 && attachmentIds.length === 0))) return false;
+    const title = prompt.trim().split("\n")[0].slice(0, 64) || "Attachment";
     const thread = await get().addThread(
       projectID,
       provider,
@@ -965,12 +970,16 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       : routeHostId(requestedHostID ?? LOCAL_HOST_ID);
     try {
       const ownerProjectID = projectID ?? CHATS_PROJECT_ID;
-      const prepared = await uploadImagesForHost(hostID, surface === "terminal" ? [] : imagePaths);
+      const prepared = await prepareAttachmentsForHost(
+        hostID,
+        surface === "terminal" ? [] : attachmentPaths,
+        surface === "terminal" ? [] : attachmentIds,
+      );
       const turnID = await ipc.sendPrompt(
         ownerProjectID,
         thread.id,
         prompt.trim(),
-        prepared.imagePaths,
+        prepared.attachmentPaths,
         hostID,
         prepared.attachmentIds,
       );
@@ -992,9 +1001,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       : state.pendingVoiceConversationThreadID,
   })),
 
-  sendPrompt: async (prompt, imagePaths, annotations = []) => {
+  sendPrompt: async (prompt, attachmentPaths, annotations = [], attachmentIds = []) => {
     const { selectedProjectID, selectedThreadID, selectedHostID, remoteSessions, workspace } = get();
-    if (!selectedProjectID || !selectedThreadID || (!prompt.trim() && imagePaths.length === 0 && annotations.length === 0)) return false;
+    if (!selectedProjectID || !selectedThreadID || (!prompt.trim() && attachmentPaths.length === 0 && attachmentIds.length === 0 && annotations.length === 0)) return false;
     const hostID = hostForProject(remoteSessions, workspace, selectedProjectID, selectedHostID);
     const message: QueuedMessage = {
       id: crypto.randomUUID(),
@@ -1003,7 +1012,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       threadID: selectedThreadID,
       hostID,
       prompt,
-      imagePaths: [...imagePaths],
+      attachmentPaths: [...attachmentPaths],
+      attachmentIds: [...attachmentIds],
       annotations: [...annotations],
       textSelections: [],
     };
@@ -1047,8 +1057,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
   },
 
-  sendSideChatPrompt: async (projectID, threadID, prompt, imagePaths, textSelections = []) => {
-    if (!prompt.trim() && imagePaths.length === 0 && textSelections.length === 0) return false;
+  sendSideChatPrompt: async (projectID, threadID, prompt, attachmentPaths, textSelections = [], attachmentIds = []) => {
+    if (!prompt.trim() && attachmentPaths.length === 0 && attachmentIds.length === 0 && textSelections.length === 0) return false;
     const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     const message: QueuedMessage = {
       id: crypto.randomUUID(),
@@ -1057,7 +1067,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       threadID,
       hostID,
       prompt,
-      imagePaths: [...imagePaths],
+      attachmentPaths: [...attachmentPaths],
+      attachmentIds: [...attachmentIds],
       annotations: [],
       textSelections: [...textSelections],
     };
@@ -1130,13 +1141,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
     setMessageSending(threadID, true);
     try {
-      const prepared = await uploadImagesForHost(message.hostID, message.imagePaths);
+      const prepared = await prepareAttachmentsForHost(message.hostID, message.attachmentPaths, message.attachmentIds);
       await ipc.steerPrompt(
         message.projectID,
         message.threadID,
         turnID,
         message.prompt,
-        prepared.imagePaths,
+        prepared.attachmentPaths,
         message.hostID,
         prepared.attachmentIds,
         message.annotations,
@@ -1253,17 +1264,17 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
   },
 
-  startSideThread: async (projectID, parentThreadID, agentIDs, prompt, imagePaths, annotations = []) => {
-    if ((!prompt.trim() && imagePaths.length === 0 && annotations.length === 0) || agentIDs.length === 0) return false;
+  startSideThread: async (projectID, parentThreadID, agentIDs, prompt, attachmentPaths, annotations = [], attachmentIds = []) => {
+    if ((!prompt.trim() && attachmentPaths.length === 0 && attachmentIds.length === 0 && annotations.length === 0) || agentIDs.length === 0) return false;
     const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     try {
-      const prepared = await uploadImagesForHost(hostID, imagePaths);
+      const prepared = await prepareAttachmentsForHost(hostID, attachmentPaths, attachmentIds);
       const thread = await ipc.startSideThread(
         projectID,
         parentThreadID,
         agentIDs,
         prompt.trim(),
-        prepared.imagePaths,
+        prepared.attachmentPaths,
         hostID,
         prepared.attachmentIds,
         annotations,
@@ -1282,8 +1293,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     }
   },
 
-  sendAgentPrompt: async (projectID, threadID, agentIDs, prompt, imagePaths) => {
-    if ((!prompt.trim() && imagePaths.length === 0) || agentIDs.length === 0) return false;
+  sendAgentPrompt: async (projectID, threadID, agentIDs, prompt, attachmentPaths, attachmentIds = []) => {
+    if ((!prompt.trim() && attachmentPaths.length === 0 && attachmentIds.length === 0) || agentIDs.length === 0) return false;
     const hostID = hostForProject(get().remoteSessions, get().workspace, projectID, get().selectedHostID);
     const message: QueuedMessage = {
       id: crypto.randomUUID(),
@@ -1293,7 +1304,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       hostID,
       agentIDs: [...agentIDs],
       prompt: prompt.trim(),
-      imagePaths: [...imagePaths],
+      attachmentPaths: [...attachmentPaths],
+      attachmentIds: [...attachmentIds],
     };
     const current = get();
     if (

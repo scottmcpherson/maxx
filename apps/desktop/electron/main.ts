@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -99,6 +99,26 @@ let computerUseHost: ComputerUseHost | null = null;
 let quitting = false;
 let quitCleanupStarted = false;
 const authorizedMedia = new Set<string>();
+// Keep this list aligned with the renderer and Rust validators.
+const supportedAttachmentExtensions = [
+  "pdf", "docx", "xlsx", "txt", "md", "markdown", "csv", "json", "zip",
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "heif", "avif",
+  "aac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav",
+  "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+] as const;
+const maxAttachmentBytes = 20 * 1024 * 1024;
+
+function isSupportedAttachmentPath(filePath: string): boolean {
+  const resolved = path.resolve(filePath);
+  const extension = path.extname(resolved).slice(1).toLowerCase();
+  if (!supportedAttachmentExtensions.includes(extension as (typeof supportedAttachmentExtensions)[number])) return false;
+  try {
+    const stats = statSync(resolved);
+    return stats.isFile() && stats.size > 0 && stats.size <= maxAttachmentBytes;
+  } catch {
+    return false;
+  }
+}
 const RUNTIME_METHODS = new Set([
   "workspace_snapshot", "active_turns", "git_status", "git_branches", "git_checkout", "git_create_branch", "git_commit", "git_push",
   "list_automations", "create_automation", "update_automation", "delete_automation", "run_automation",
@@ -154,7 +174,7 @@ function registerMediaProtocol(): void {
     let filePath = "";
     try { filePath = Buffer.from(encoded, "base64url").toString("utf8"); } catch { return new Response("Bad path", { status: 400 }); }
     const resolved = path.resolve(filePath);
-    const localMediaRoots = [path.join(app.getPath("userData"), "agent-images"), path.join(app.getPath("userData"), "chat-images")];
+    const localMediaRoots = [path.join(app.getPath("userData"), "agent-images"), path.join(app.getPath("userData"), "chat-attachments")];
     if (!authorizedMedia.has(resolved) && !localMediaRoots.some((root) => isInside(resolved, root))) {
       return new Response("Not authorized", { status: 403 });
     }
@@ -619,7 +639,7 @@ async function runAppSmoke(): Promise<void> {
     // stale host selection must not forward a project that exists locally.
     hostId: "stale-remote-host",
     prompt: "Packaged runtime acceptance",
-    imagePaths: [],
+    attachmentPaths: [],
     attachmentIds: [],
     annotations: [{
       id: randomUUID(),
@@ -994,7 +1014,7 @@ async function runHermesBrowserSmoke(): Promise<void> {
       "4. Snapshot the Best Buy page with includeScreenshot=true.",
       "5. Reply with the fixture status, Best Buy page title, final URL, and whether the screenshot succeeded. Do not skip any browser action.",
     ].join("\n");
-    turnId = await client.request("send_prompt", { projectId, threadId, prompt, imagePaths: [] }, 30_000) as string;
+    turnId = await client.request("send_prompt", { projectId, threadId, prompt, attachmentPaths: [] }, 30_000) as string;
     finishTurnId = turnId;
     const alreadyFinished = finishEvents.some((event) => event.turnID === turnId);
     if (!alreadyFinished) {
@@ -1101,21 +1121,36 @@ function registerIPC(): void {
         const result = await dialog.showOpenDialog(mainWindow!, { title: "Open project folder", properties: ["openDirectory"] });
         return result.canceled ? null : result.filePaths[0] ?? null;
       }
-      case "dialog_open_images": {
-        const result = await dialog.showOpenDialog(mainWindow!, { title: "Choose images", properties: ["openFile", "multiSelections"], filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }] });
-        for (const filePath of result.filePaths) authorizedMedia.add(path.resolve(filePath));
-        return result.canceled ? [] : result.filePaths;
+      case "dialog_open_attachments": {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+          title: "Choose attachments",
+          properties: ["openFile", "multiSelections"],
+          filters: [{ name: "Supported files", extensions: [...supportedAttachmentExtensions] }],
+        });
+        if (result.canceled) return [];
+        for (const filePath of result.filePaths) {
+          if (!isSupportedAttachmentPath(filePath)) {
+            throw new Error("Attachments must use a supported format, contain data, and be 20 MB or smaller");
+          }
+          authorizedMedia.add(path.resolve(filePath));
+        }
+        return result.filePaths;
       }
       case "dialog_open_agent_image": {
         const result = await dialog.showOpenDialog(mainWindow!, { title: "Choose an image", properties: ["openFile"], filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }] });
         for (const filePath of result.filePaths) authorizedMedia.add(path.resolve(filePath));
         return result.canceled ? null : result.filePaths[0] ?? null;
       }
-      case "authorize_image_previews":
-        // The picker already authorized every path it returned. Keeping this
-        // acknowledgement preserves the async attachment flow without
-        // accepting arbitrary renderer-supplied file paths.
+      case "authorize_attachment_previews": {
+        const paths = Array.isArray(params.attachmentPaths) ? params.attachmentPaths : [];
+        for (const value of paths) {
+          if (typeof value !== "string" || !isSupportedAttachmentPath(value)) {
+            throw new Error("The attachment is unavailable, unsupported, empty, or larger than 20 MB");
+          }
+          authorizedMedia.add(path.resolve(value));
+        }
         return null;
+      }
       case "clipboard_write_text":
         if (typeof params.text !== "string") throw new Error("Clipboard text must be a string");
         clipboard.writeText(params.text);

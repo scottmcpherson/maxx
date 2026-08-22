@@ -412,7 +412,7 @@ async fn begin(
 
 fn codex_user_input(
     prompt: &str,
-    attachments: &[maxx_core::persist::ChatImageAttachment],
+    attachments: &[maxx_core::persist::ChatAttachment],
 ) -> Vec<Value> {
     let mut input = Vec::new();
     if !prompt.is_empty() {
@@ -856,7 +856,7 @@ mod browser_mcp_tests {
 
     #[test]
     fn steering_uses_the_same_structured_input_as_a_new_turn() {
-        let attachment = maxx_core::persist::ChatImageAttachment {
+        let attachment = maxx_core::persist::ChatAttachment {
             id: Uuid::new_v4(),
             path: "/tmp/example.png".into(),
             mime_type: "image/png".into(),

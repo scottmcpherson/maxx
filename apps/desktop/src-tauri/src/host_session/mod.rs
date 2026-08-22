@@ -34,7 +34,8 @@ pub use hub::{HostHub, HostStatus, RemoteHostStatus};
 pub use identity::HostIdentity;
 pub use journal::{EventJournal, JournalEvent, JournalSubscription};
 pub use media::{
-    attachment_from_id, read_media_bytes, store_media_bytes, MediaContent, DEFAULT_LISTEN_PORT,
+    attachment_from_id, read_media_bytes, remove_media_bytes, store_media_bytes, write_attachment_metadata,
+    MediaContent, DEFAULT_LISTEN_PORT,
 };
 pub use net::{
     connect_host, listen_host, parse_bind_address, AuthRequest, AuthenticatedPeer, ClientAuth,

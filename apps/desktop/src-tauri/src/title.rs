@@ -2,7 +2,7 @@ use crate::engine::TurnRequest;
 use crate::events::emit;
 use crate::state::{find_thread, AppState};
 use maxx_core::contract::{AppleDate, ChatProvider};
-use maxx_core::persist::{ChatImageAttachment, ProviderProfile, TitleGenerationRuntime};
+use maxx_core::persist::{ChatAttachment, ProviderProfile, TitleGenerationRuntime};
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -43,7 +43,7 @@ impl TitleGenerationCandidate {
     pub(crate) fn request(
         &self,
         prompt: String,
-        attachments: Vec<ChatImageAttachment>,
+        attachments: Vec<ChatAttachment>,
         working_directory: String,
     ) -> TurnRequest {
         TurnRequest {
@@ -71,7 +71,7 @@ impl TitleGenerationCandidate {
 pub struct TitleGenerationJob {
     pub expected_title: String,
     pub message: String,
-    pub attachments: Vec<ChatImageAttachment>,
+    pub attachments: Vec<ChatAttachment>,
     pub candidates: Vec<TitleGenerationCandidate>,
 }
 
@@ -128,7 +128,7 @@ fn limited(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-pub fn title_prompt(message: &str, attachments: &[ChatImageAttachment]) -> String {
+pub fn title_prompt(message: &str, attachments: &[ChatAttachment]) -> String {
     let attachment_names = attachments
         .iter()
         .map(|attachment| attachment.display_name.trim())

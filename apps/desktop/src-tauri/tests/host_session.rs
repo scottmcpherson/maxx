@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use maxx_core::persist::{ChatImageAttachment, ChatProject, ChatThread, WorkspaceDocument};
+use maxx_core::persist::{ChatAttachment, ChatProject, ChatThread, WorkspaceDocument};
 use maxx_lib::host_session::{
     apply_add_project, connect_host, create_host_folder, credential_hash, hosted_projects,
     list_host_folder, listen_host, parse_bind_address, read_media_bytes, resolve_project_folder,
@@ -77,7 +77,7 @@ impl TestHost {
     fn new(name: &str, root: PathBuf) -> Arc<Self> {
         std::fs::create_dir_all(&root).unwrap();
         let persist = root.join("workspace.json");
-        let media = root.join("chat-images");
+        let media = root.join("chat-attachments");
         std::fs::create_dir_all(&media).unwrap();
         let workspace = WorkspaceDocument::default();
         save_workspace(&persist, &workspace);
@@ -213,7 +213,7 @@ impl HostHandler for TestHost {
                         .map_err(|_| "invalid attachmentId".to_string())?;
                     let (bytes, mime, name) = read_media_bytes(&self.media, id)?;
                     let _ = bytes;
-                    attachments.push(ChatImageAttachment {
+                    attachments.push(ChatAttachment {
                         id,
                         path: format!("attachment:{id}"),
                         mime_type: mime,

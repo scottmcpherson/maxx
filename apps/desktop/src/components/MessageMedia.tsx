@@ -6,6 +6,7 @@ import { MessageMedia as MessageMediaValue, MessageMediaKind } from "../media";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { Skeleton } from "./ui/skeleton";
 import { cn } from "../lib/utils";
+import { attachmentKind } from "../attachmentFormats";
 
 interface RenderSource {
   url: string;
@@ -41,11 +42,15 @@ export function MessageMedia({
     setError(null);
     const load = destination.startsWith("attachment:")
       ? ipc.readMedia(destination.slice("attachment:".length), hostID)
-        .then((media) => ({
-          url: mediaDataUrl(media.mimeType, media.dataBase64),
-          kind: "image" as const,
-          displayName: media.displayName,
-        }))
+        .then((media) => {
+          const resolvedKind = attachmentKind(media.mimeType);
+          if (resolvedKind === "file") throw new Error("The attachment is not playable media");
+          return {
+            url: mediaDataUrl(media.mimeType, media.dataBase64),
+            kind: resolvedKind,
+            displayName: media.displayName,
+          };
+        })
       : isLocalHost(hostID)
         ? ipc.resolveMediaSource(projectID, threadID, destination, hostID)
           .then((resolved) => ({

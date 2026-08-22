@@ -42,7 +42,7 @@ import {
   CHATS_PROJECT_ID,
   projectName,
   type ActiveTurnRecord,
-  type ChatImageAttachment,
+  type ChatAttachment,
   type ChatProject,
   type ChatThread,
   type RuntimeEventEnvelope,
@@ -477,7 +477,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [draft, setDraft] = useState("");
-  const [attachments, setAttachments] = useState<ChatImageAttachment[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [runtimeUpdating, setRuntimeUpdating] = useState(false);
@@ -715,7 +715,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
         projectId: project.id,
         threadId: thread.id,
         prompt,
-        imagePaths: [],
+        attachmentPaths: [],
         attachmentIds: ids,
         annotations: [],
         textSelections: [],
@@ -764,7 +764,7 @@ function Conversation({ project, thread, headerHeight, showProviderDiagnostics }
         projectId: project.id,
         threadId: thread.id,
         prompt,
-        imagePaths: [],
+        attachmentPaths: [],
         attachmentIds: [],
         annotations: [],
         textSelections: [],
@@ -1829,7 +1829,7 @@ function ActivityDisclosure({ activity }: { activity: MobileActivity }) {
   );
 }
 
-function RemoteAttachmentImage({ attachment }: { attachment: ChatImageAttachment }) {
+function RemoteAttachmentImage({ attachment }: { attachment: ChatAttachment }) {
   const { client } = useConnection();
   const [source, setSource] = useState<string | null>(null);
   useEffect(() => {

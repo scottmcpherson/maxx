@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("maxx", {
   invoke: (method: string, params: unknown = {}) => ipcRenderer.invoke("maxx:invoke", method, params),
@@ -7,5 +7,12 @@ contextBridge.exposeInMainWorld("maxx", {
     ipcRenderer.on(`maxx:event:${event}`, handler);
     return () => ipcRenderer.removeListener(`maxx:event:${event}`, handler);
   },
-  mediaURL: (filePath: string) => `maxx-media://file/${Buffer.from(filePath, "utf8").toString("base64url")}`,
+  mediaURL: (filePath: string) => {
+    const encoded = Buffer.from(filePath, "utf8").toString("base64")
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replace(/=+$/, "");
+    return `maxx-media://file/${encoded}`;
+  },
+  filePath: (file: File) => webUtils.getPathForFile(file),
 });

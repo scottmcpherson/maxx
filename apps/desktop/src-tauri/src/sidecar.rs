@@ -292,18 +292,23 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 .decode(encoded)
                 .map_err(|error| format!("The image data is invalid: {error}"))?;
             let attachment =
-                store_media_bytes(&crate::state::chat_images_dir(), &bytes, &mime, &name)?;
+                store_media_bytes(&crate::state::chat_attachments_dir(), &bytes, &mime, &name)?;
             serde_json::to_value(attachment).map_err(|error| error.to_string())
         }
         "read_media" => {
             let id: Uuid = required(&params, "attachmentId")?;
-            let (bytes, mime, name) = read_media_bytes(&crate::state::chat_images_dir(), id)?;
+            let (bytes, mime, name) = read_media_bytes(&crate::state::chat_attachments_dir(), id)?;
             Ok(json!({
                 "id": id,
                 "mimeType": mime,
                 "displayName": name,
                 "dataBase64": STANDARD.encode(bytes),
             }))
+        }
+        "discard_media" => {
+            let id: Uuid = required(&params, "attachmentId")?;
+            crate::host_session::remove_media_bytes(&crate::state::chat_attachments_dir(), id)?;
+            Ok(Value::Null)
         }
         "load_media" => {
             let resolved = crate::media::resolve_media_source(
@@ -591,7 +596,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "projectId")?,
                 required(&params, "threadId")?,
                 required(&params, "prompt")?,
-                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentPaths")?.unwrap_or_default(),
                 optional(&params, "attachmentIds")?.unwrap_or_default(),
                 optional(&params, "annotations")?.unwrap_or_default(),
                 optional(&params, "textSelections")?.unwrap_or_default(),
@@ -614,7 +619,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                     thread_id: required(&params, "threadId")?,
                     turn_id: required(&params, "turnId")?,
                     prompt: required(&params, "prompt")?,
-                    image_paths: optional(&params, "imagePaths")?.unwrap_or_default(),
+                    attachment_paths: optional(&params, "attachmentPaths")?.unwrap_or_default(),
                     attachment_ids: optional(&params, "attachmentIds")?.unwrap_or_default(),
                     annotations: optional(&params, "annotations")?.unwrap_or_default(),
                 },
@@ -628,7 +633,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "parentThreadId")?,
                 required(&params, "agentIds")?,
                 required(&params, "prompt")?,
-                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentPaths")?.unwrap_or_default(),
                 optional(&params, "attachmentIds")?.unwrap_or_default(),
                 optional(&params, "annotations")?.unwrap_or_default(),
             )
@@ -641,7 +646,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
                 required(&params, "threadId")?,
                 required(&params, "agentIds")?,
                 required(&params, "prompt")?,
-                optional(&params, "imagePaths")?.unwrap_or_default(),
+                optional(&params, "attachmentPaths")?.unwrap_or_default(),
                 optional(&params, "attachmentIds")?.unwrap_or_default(),
             )
             .await,
@@ -774,7 +779,7 @@ async fn dispatch(state: Arc<SidecarState>, method: &str, params: Value) -> Resu
             crate::voice::voice_tts_cancel(state.voice.clone(), required(&params, "session")?)
                 .await,
         ),
-        "authorize_image_previews" => Ok(Value::Null),
+        "authorize_attachment_previews" => Ok(Value::Null),
         "browser_ui_tabs" => {
             let thread_id: Uuid = required(&params, "threadId")?;
             let assigned = state.browser.sessions.tabs_for_thread(thread_id);

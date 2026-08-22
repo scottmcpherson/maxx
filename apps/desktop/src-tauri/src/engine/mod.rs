@@ -19,7 +19,7 @@ pub mod runtime;
 use async_trait::async_trait;
 use maxx_core::contract::{ChatProvider, RuntimeInteractionDecision};
 use maxx_core::normalize::ProviderEventDraft;
-use maxx_core::persist::{ChatImageAttachment, ProviderProfile};
+use maxx_core::persist::{ChatAttachment, ProviderProfile};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -52,7 +52,7 @@ pub struct TurnRequest {
     /// a native system/developer channel and never merge it into `prompt`.
     pub agent_instructions: Option<String>,
     pub prompt: String,
-    pub attachments: Vec<ChatImageAttachment>,
+    pub attachments: Vec<ChatAttachment>,
     pub working_directory: String,
     pub session_id: Option<String>,
     /// One-off background work must not appear in provider conversation history.
@@ -74,7 +74,7 @@ pub struct TurnRequest {
 pub struct SteerRequest {
     pub turn_id: Uuid,
     pub prompt: String,
-    pub attachments: Vec<ChatImageAttachment>,
+    pub attachments: Vec<ChatAttachment>,
 }
 
 impl TurnRequest {

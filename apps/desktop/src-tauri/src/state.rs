@@ -100,8 +100,8 @@ pub fn agent_images_dir() -> PathBuf {
 }
 
 /// Persistent copies of images attached to user chat messages.
-pub fn chat_images_dir() -> PathBuf {
-    workspace_path().with_file_name("chat-images")
+pub fn chat_attachments_dir() -> PathBuf {
+    workspace_path().with_file_name("chat-attachments")
 }
 
 /// Stable non-repository working directory for chats without a project.

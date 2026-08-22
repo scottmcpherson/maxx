@@ -4,7 +4,7 @@ import type { ChatProject, ChatTextSelection, ChatThread } from "../contract/typ
 import { buildRows, ThreadTimeline } from "./ThreadView";
 import { useAppStore } from "../store/appStore";
 import { threadWorkingDirectory } from "../git";
-import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
+import { AttachFilesButton, PendingAttachmentStrip, useComposerAttachments } from "./ComposerAttachments";
 import { Icons } from "./Icons";
 import { MentionTextarea } from "./MentionTextarea";
 import { QueuedMessages } from "./QueuedMessages";
@@ -56,7 +56,7 @@ export function SideChatView({
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const draftRef = useRef<HTMLTextAreaElement>(null);
-  const images = useImageAttachments();
+  const composerAttachments = useComposerAttachments();
 
   const resolvedStatus = (requestID: string | undefined): string | null => {
     if (!requestID) return null;
@@ -65,19 +65,20 @@ export function SideChatView({
   };
 
   const submit = async () => {
-    if ((!draft.trim() && images.paths.length === 0 && pendingSelections.length === 0) || submitting) return;
+    if ((!draft.trim() && composerAttachments.attachments.length === 0 && pendingSelections.length === 0) || submitting) return;
     setSubmitting(true);
     const sent = await sendSideChatPrompt(
       project.id,
       thread.id,
       draft.trim(),
-      images.paths,
+      composerAttachments.payload.attachmentPaths,
       pendingSelections,
+      composerAttachments.payload.attachmentIds,
     );
     setSubmitting(false);
     if (!sent) return;
     setDraft("");
-    images.clear();
+    composerAttachments.clear();
     onClearSelections();
     requestAnimationFrame(() => draftRef.current?.focus());
   };
@@ -116,9 +117,14 @@ export function SideChatView({
           onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
           onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
         />
-        <div className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
+        <div
+          className="relative flex min-h-16 w-full flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm"
+          onPaste={composerAttachments.onPaste}
+          onDragOver={composerAttachments.onDragOver}
+          onDrop={composerAttachments.onDrop}
+        >
           <TextSelectionPill selections={pendingSelections} onClear={onClearSelections} />
-          <PendingImageStrip paths={images.paths} onRemove={images.remove} />
+          <PendingAttachmentStrip attachments={composerAttachments.attachments} onRemove={composerAttachments.remove} />
           <MentionTextarea
             ref={draftRef}
             agents={[]}
@@ -136,7 +142,7 @@ export function SideChatView({
           />
           <div className="-mx-0.5 -mb-0.5 flex min-h-7 items-end justify-between gap-2">
             <div className="flex min-w-0 items-center gap-1">
-              <AttachImagesButton onChoose={() => void images.choose()} />
+              <AttachFilesButton onChoose={() => void composerAttachments.choose()} />
               <RuntimePicker
                 provider={thread.provider}
                 model={thread.model}
@@ -168,7 +174,7 @@ export function SideChatView({
                 variant="default"
                 size="icon-sm"
                 className="rounded-full"
-                disabled={submitting || (!draft.trim() && images.paths.length === 0 && pendingSelections.length === 0)}
+                disabled={submitting || (!draft.trim() && composerAttachments.attachments.length === 0 && pendingSelections.length === 0)}
                 onClick={() => void submit()}
               >
                 {submitting ? <Spinner /> : <Icons.arrowUp />}

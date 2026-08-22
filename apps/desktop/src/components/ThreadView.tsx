@@ -44,7 +44,7 @@ import { MentionMenu, useMentionMenu } from "./MentionMenu";
 import { MentionTextarea } from "./MentionTextarea";
 import { SlashCommandMenu, useSlashCommandMenu } from "./SlashCommandMenu";
 import { MessageMedia } from "./MessageMedia";
-import { AttachImagesButton, PendingImageStrip, useImageAttachments } from "./ImageAttachments";
+import { AttachFilesButton, PendingAttachmentStrip, useComposerAttachments } from "./ComposerAttachments";
 import { RuntimePicker } from "./RuntimePicker";
 import { QueuedMessages } from "./QueuedMessages";
 import { BrowserAnnotationPills } from "./BrowserAnnotationPills";
@@ -67,6 +67,7 @@ import { Spinner } from "./ui/spinner";
 import { Textarea } from "./ui/textarea";
 import { cn } from "../lib/utils";
 import { TimelineDisclosure } from "./TimelineDisclosure";
+import { SentAttachment } from "./SentAttachment";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
@@ -311,7 +312,7 @@ export function ThreadView({
     textareaRef: draftRef,
     setDraft,
   });
-  const images = useImageAttachments();
+  const composerAttachments = useComposerAttachments();
   const [submitting, setSubmitting] = useState(false);
   const focusAfterNewThreadRef = useRef(selectedThreadID === null);
 
@@ -333,7 +334,7 @@ export function ThreadView({
     return () => cancelAnimationFrame(frame);
   }, [selectedThreadID]);
 
-  useEffect(() => images.clear(), [images.clear, selectedThreadID]);
+  useEffect(() => composerAttachments.discard(), [composerAttachments.discard, selectedThreadID]);
   useEffect(() => setPrimaryTextSelection(null), [selectedThreadID]);
 
   // Turning the experiment off must not strand an existing terminal chat with
@@ -383,7 +384,7 @@ export function ThreadView({
 
   const isRunning = !!activeTurns[thread.id];
   const hasComposerContent = draft.trim().length > 0
-    || images.paths.length > 0
+    || composerAttachments.attachments.length > 0
     || browserAnnotations.length > 0;
   const primaryComposerAction = composerPrimaryAction({
     conversationActive: voiceConversation.isActive,
@@ -429,20 +430,20 @@ export function ThreadView({
     }
   };
   const submit = async () => {
-    if ((!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0) || submitting) return;
+    if ((!draft.trim() && composerAttachments.attachments.length === 0 && browserAnnotations.length === 0) || submitting) return;
     // A mention routes the message to those agents in a side thread; the main
     // thread's provider never sees it. Multiple mentions respond in sequence.
     const mentioned = mentionedAgents(draft, agents);
     setSubmitting(true);
     const sent = await (mentioned.length > 0
-      ? startSideThread(project.id, thread.id, mentioned.map((agent) => agent.id), draft.trim(), images.paths, [...browserAnnotations])
-      : sendPrompt(draft.trim(), images.paths, [...browserAnnotations]));
+      ? startSideThread(project.id, thread.id, mentioned.map((agent) => agent.id), draft.trim(), composerAttachments.payload.attachmentPaths, [...browserAnnotations], composerAttachments.payload.attachmentIds)
+      : sendPrompt(draft.trim(), composerAttachments.payload.attachmentPaths, [...browserAnnotations], composerAttachments.payload.attachmentIds));
     setSubmitting(false);
     if (!sent) return;
     // Sending is a turn boundary: anything still being transcribed has already
     // gone with the message, so the microphone closes with it.
     dictation.clear();
-    images.clear();
+    composerAttachments.clear();
     clearBrowserAnnotations(thread.id);
     mentionMenu.dismiss();
     slashCommandMenu.dismiss();
@@ -596,7 +597,12 @@ export function ThreadView({
             onRetry={(messageID) => void retryQueuedMessage(thread.id, messageID)}
             onRemove={(messageID) => removeQueuedMessage(thread.id, messageID)}
           />
-          <div className="relative mx-auto flex w-full max-w-3xl min-h-16 flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm">
+          <div
+            className="relative mx-auto flex w-full max-w-3xl min-h-16 flex-col gap-1 rounded-xl border border-border bg-card p-2.5 shadow-sm"
+            onPaste={composerAttachments.onPaste}
+            onDragOver={composerAttachments.onDragOver}
+            onDrop={composerAttachments.onDrop}
+          >
             <SlashCommandMenu menu={slashCommandMenu} />
             <MentionMenu menu={mentionMenu} />
             <BrowserAnnotationPills
@@ -606,7 +612,7 @@ export function ThreadView({
                 requestAnimationFrame(() => draftRef.current?.focus());
               }}
             />
-            <PendingImageStrip paths={images.paths} onRemove={images.remove} />
+            <PendingAttachmentStrip attachments={composerAttachments.attachments} onRemove={composerAttachments.remove} />
             <MentionTextarea
               ref={draftRef}
               agents={agents}
@@ -649,7 +655,7 @@ export function ThreadView({
             />
             <div className="-mx-0.5 -mb-0.5 flex min-h-7 items-end justify-between gap-2">
               <div className="flex min-w-0 items-center gap-1">
-                <AttachImagesButton disabled={false} onChoose={() => void images.choose()} />
+                <AttachFilesButton disabled={false} onChoose={() => void composerAttachments.choose()} />
                 <RuntimePicker
                 provider={thread.provider}
                 model={thread.model}
@@ -700,7 +706,7 @@ export function ThreadView({
                       size="icon-sm"
                       className="rounded-full"
                       title={submitting ? "Queueing message" : "Queue message"}
-                      disabled={submitting || (!draft.trim() && images.paths.length === 0 && browserAnnotations.length === 0)}
+                      disabled={submitting || (!draft.trim() && composerAttachments.attachments.length === 0 && browserAnnotations.length === 0)}
                       onClick={() => void submit()}
                     >
                       <Icons.arrowUp />
@@ -840,9 +846,7 @@ export function ThreadTimeline({
                 {row.attachments.length > 0 && (
                   <div className="flex w-fit max-w-[min(82%,35rem)] flex-wrap justify-end gap-1.5">
                     {row.attachments.map((attachment) => (
-                      <div key={attachment.id} className="w-28 shrink-0 [&_figure]:w-full [&_img]:h-22 [&_img]:w-full [&_img]:object-cover">
-                        <MessageMedia media={{ kind: "image", destination: `attachment:${attachment.id}`, altText: attachment.displayName }} projectID={projectID} threadID={threadID} hostID={hostID} />
-                      </div>
+                      <SentAttachment key={attachment.id} attachment={attachment} projectID={projectID} threadID={threadID} hostID={hostID} />
                     ))}
                   </div>
                 )}
@@ -1173,7 +1177,7 @@ function NewAgentView({
   const [sending, setSending] = useState(false);
   const [addingOnHost, setAddingOnHost] = useState<{ id: string; name: string } | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
-  const images = useImageAttachments();
+  const composerAttachments = useComposerAttachments();
 
   useEffect(() => textRef.current?.focus(), []);
   const addLocalProject = async () => {
@@ -1182,9 +1186,10 @@ function NewAgentView({
   };
 
   const submit = async () => {
-    if ((!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending) return;
+    if ((!draft.trim() && (surface === "terminal" || composerAttachments.attachments.length === 0)) || sending) return;
     const prompt = draft.trim();
-    const imagePaths = surface === "terminal" ? [] : images.paths;
+    const attachmentPaths = surface === "terminal" ? [] : composerAttachments.payload.attachmentPaths;
+    const attachmentIds = surface === "terminal" ? [] : composerAttachments.payload.attachmentIds;
     dictation.clear();
     setSending(true);
     const created = await createThreadAndSend(
@@ -1192,15 +1197,16 @@ function NewAgentView({
       runtime.provider,
       runtime.model,
       prompt,
-      imagePaths,
+      attachmentPaths,
       runtime.effort,
       runtime.speed,
       surface,
       environment,
       selectedContextHostID,
+      attachmentIds,
     );
     setSending(false);
-    if (created) images.clear();
+    if (created) composerAttachments.clear();
     else setDraft(prompt);
     requestAnimationFrame(() => textRef.current?.focus());
   };
@@ -1219,7 +1225,7 @@ function NewAgentView({
       environment,
     );
     if (thread) {
-      images.clear();
+      composerAttachments.discard();
       requestVoiceConversation(thread.id);
     } else {
       setSending(false);
@@ -1259,8 +1265,13 @@ function NewAgentView({
               onAddLocalProject={() => void addLocalProject()}
               onAddRemoteProject={setAddingOnHost}
             />
-            <div className="flex flex-col gap-1 rounded-xl border border-border bg-card p-2.5">
-            {surface === "gui" && <PendingImageStrip paths={images.paths} onRemove={images.remove} />}
+            <div
+              className="flex flex-col gap-1 rounded-xl border border-border bg-card p-2.5"
+              onPaste={composerAttachments.onPaste}
+              onDragOver={composerAttachments.onDragOver}
+              onDrop={composerAttachments.onDrop}
+            >
+            {surface === "gui" && <PendingAttachmentStrip attachments={composerAttachments.attachments} onRemove={composerAttachments.remove} />}
             <Textarea
               ref={textRef}
               variant="composer"
@@ -1283,7 +1294,7 @@ function NewAgentView({
             />
             <div className="-mx-0.5 -mb-0.5 flex min-h-7 items-end justify-between gap-2">
               <div className="flex min-w-0 items-center gap-1">
-                {surface === "gui" && <AttachImagesButton disabled={sending} onChoose={() => void images.choose()} />}
+                {surface === "gui" && <AttachFilesButton disabled={sending} onChoose={() => void composerAttachments.choose()} />}
                 <RuntimePicker
                   provider={runtime.provider}
                   model={runtime.model}
@@ -1314,7 +1325,7 @@ function NewAgentView({
                       const next = surface === "terminal" ? "gui" : "terminal";
                       if (next === "terminal") {
                         dictation.stop();
-                        images.clear();
+                        composerAttachments.discard();
                       }
                       setSurface(next);
                       requestAnimationFrame(() => textRef.current?.focus());
@@ -1331,7 +1342,7 @@ function NewAgentView({
                     shortcut={dictationShortcut}
                   />
                 )}
-                {surface === "gui" && images.paths.length === 0 && primaryComposerAction === "conversation" ? (
+                {surface === "gui" && composerAttachments.attachments.length === 0 && primaryComposerAction === "conversation" ? (
                   <VoiceConversationActionButton
                     onClick={() => void startConversation()}
                     disabled={!conversationReady || sending || dictation.isActive}
@@ -1342,7 +1353,7 @@ function NewAgentView({
                         : "Create a chat and start a voice conversation"}
                   />
                 ) : (
-                  <IconButton className="rounded-full" label={surface === "terminal" ? "Start terminal chat" : "Start agent"} tooltip={surface === "terminal" ? "Start terminal chat" : "Start agent"} variant="default" size="icon-sm" disabled={(!draft.trim() && (surface === "terminal" || images.paths.length === 0)) || sending} onClick={() => void submit()}>
+                  <IconButton className="rounded-full" label={surface === "terminal" ? "Start terminal chat" : "Start agent"} tooltip={surface === "terminal" ? "Start terminal chat" : "Start agent"} variant="default" size="icon-sm" disabled={(!draft.trim() && (surface === "terminal" || composerAttachments.attachments.length === 0)) || sending} onClick={() => void submit()}>
                     {sending ? <Spinner /> : <Icons.arrowUp />}
                   </IconButton>
                 )}

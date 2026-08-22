@@ -22,7 +22,7 @@ pub enum ChatRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatImageAttachment {
+pub struct ChatAttachment {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub path: String,
@@ -67,7 +67,7 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<ChatImageAttachment>,
+    pub attachments: Vec<ChatAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<BrowserAnnotationContext>,
     #[serde(

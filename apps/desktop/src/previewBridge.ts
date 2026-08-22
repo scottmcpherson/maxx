@@ -434,8 +434,11 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
       hostStatus = { ...hostStatus, remotes: [] };
       result = undefined;
       break;
+    case "discard_media":
+      result = undefined;
+      break;
     case "browser_ui_tabs":
-    case "dialog_open_images":
+    case "dialog_open_attachments":
       result = [];
       break;
     case "browser_chrome_import_status":
@@ -470,7 +473,7 @@ async function invoke<T>(method: string, rawParams: unknown = {}): Promise<T> {
     case "load_media":
       result = { mimeType: "image/png", displayName: "Preview image", dataBase64: "" };
       break;
-    case "authorize_image_previews":
+    case "authorize_attachment_previews":
     case "browser_annotation_mode":
     case "browser_annotation_selections":
     case "browser_ui_back":
@@ -520,5 +523,6 @@ export function installBrowserPreviewBridge(): void {
       return () => eventListeners.delete(callbackUnknown);
     },
     mediaURL: () => "",
+    filePath: () => "",
   };
 }

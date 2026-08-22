@@ -588,7 +588,7 @@ async fn begin(
 
 fn pi_message_fields(
     prompt: &str,
-    attachments: &[maxx_core::persist::ChatImageAttachment],
+    attachments: &[maxx_core::persist::ChatAttachment],
 ) -> Result<Map<String, Value>, String> {
     let mut fields = Map::new();
     fields.insert("message".into(), Value::String(prompt.to_string()));
