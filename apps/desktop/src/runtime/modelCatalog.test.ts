@@ -105,6 +105,20 @@ describe("encodeLaunchHints", () => {
     expect(hints.flags).toEqual(["--model", "openai/gpt-4o", "--thinking", "focused"]);
   });
 
+  it("serializes OMP model and thinking as ACP config params", () => {
+    const model = {
+      model: "openai/gpt-5.2",
+      displayName: "GPT-5.2",
+      effortLevels: ["off", "high"],
+    };
+    const hints = encodeLaunchHints(
+      { provider: "omp", model: "openai/gpt-5.2", effort: "off" },
+      model,
+    );
+    expect(hints.flags).toEqual([]);
+    expect(hints.params).toEqual({ model: "openai/gpt-5.2", thinking: "off" });
+  });
+
   it("treats Default model as null (provider default)", () => {
     const hints = encodeLaunchHints({ provider: "claude", model: "Default" });
     expect(hints.model).toBeNull();

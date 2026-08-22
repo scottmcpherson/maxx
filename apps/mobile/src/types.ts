@@ -1,4 +1,4 @@
-export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "hermes";
+export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "omp" | "hermes";
 
 export type ChatAttachment = {
   id: string;

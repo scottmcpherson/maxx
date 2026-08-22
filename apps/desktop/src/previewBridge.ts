@@ -43,6 +43,15 @@ const profiles: ProviderProfile[] = [
     isEnabled: true,
     hiddenModels: [],
   },
+  {
+    id: "omp-default",
+    provider: "omp",
+    displayName: "OMP",
+    environment: {},
+    colorHex: "#B56BDE",
+    isEnabled: true,
+    hiddenModels: [],
+  },
 ];
 
 const agents: AgentDefinition[] = [
@@ -235,6 +244,7 @@ function modelsFor(provider: ChatProvider) {
     cursor: [],
     opencode: [],
     pi: [],
+    omp: [{ model: "openai/gpt-5.2", displayName: "GPT-5.2", isDefault: true, effortLevels: ["off", "low", "medium", "high"] }],
   } satisfies Record<ChatProvider, Array<Record<string, unknown>>>;
   return { models: models[provider], source: "live" };
 }

@@ -1,4 +1,4 @@
-//! Port of `ACPProviderRuntime` (shared by Grok and Cursor): ACP 1 over
+//! Port of `ACPProviderRuntime` (shared by Grok, Cursor, Hermes, and OMP): ACP 1 over
 //! stdio JSON-RPC. One session process per (profile, thread). A single ordered
 //! loop owns the process output so notifications preceding the prompt response
 //! are always delivered before the terminal, mirroring the Swift incoming
@@ -63,6 +63,17 @@ impl AcpEngine {
             session_by_turn: Mutex::new(HashMap::new()),
         }
     }
+
+    /// OMP exposes models, thinking levels, and session lifecycle through its
+    /// standard ACP configuration options.
+    pub fn omp() -> Self {
+        Self {
+            provider: ChatProvider::Omp,
+            arguments: omp_arguments,
+            sessions: Mutex::new(HashMap::new()),
+            session_by_turn: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 fn grok_arguments(request: &TurnRequest) -> Result<Vec<String>, String> {
@@ -111,6 +122,25 @@ fn hermes_arguments(request: &TurnRequest) -> Result<Vec<String>, String> {
     Ok(vec!["acp".into()])
 }
 
+fn omp_arguments(request: &TurnRequest) -> Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    let mut instructions = request.agent_instructions.clone().unwrap_or_default();
+    if let Some(policy) = crate::host_tools::computer_policy(&request.host_tools) {
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(policy);
+    }
+    if !instructions.is_empty() {
+        arguments.extend(["--append-system-prompt".into(), instructions]);
+    }
+    if request.ephemeral {
+        arguments.push("--no-session".into());
+    }
+    arguments.push("acp".into());
+    Ok(arguments)
+}
+
 struct PendingInteraction {
     native_id: Value,
     option_by_decision: HashMap<String, String>,
@@ -128,6 +158,7 @@ struct SessionState {
     supports_load_session: bool,
     supports_http_mcp: bool,
     current_model: Option<String>,
+    current_effort: Option<String>,
 }
 
 struct AcpSession {
@@ -359,6 +390,11 @@ impl ProviderEngine for AcpEngine {
         native_session_id: Option<&str>,
     ) {
         self.release_thread(provider_instance_id, thread_id).await;
+        if self.provider == ChatProvider::Omp {
+            // OMP was launched with --no-session, so there is no persisted
+            // provider session to clean up.
+            return;
+        }
         let Some(session_id) = native_session_id else {
             return;
         };
@@ -946,6 +982,7 @@ async fn retire_session(session: &Arc<AcpSession>) {
         state.interactions.clear();
         state.session_id = None;
         state.current_model = None;
+        state.current_effort = None;
         state.normalizer = NormalizerState::default();
         state.supports_load_session = false;
         state.supports_http_mcp = false;
@@ -1073,7 +1110,9 @@ async fn begin(
             "session/new"
         };
         let response = rpc_request(session, method, params).await?;
-        let current_model = acp_current_model(&response);
+        let current_model =
+            acp_current_model(&response).or_else(|| acp_config_current(&response, "model"));
+        let current_effort = acp_config_current(&response, "thinking");
         if let Some(result) = response.as_object() {
             // Remember the active model's context window (Grok advertises it
             // per model) so prompt-response usage can report `used / max`.
@@ -1093,6 +1132,7 @@ async fn begin(
             state.session_id = Some(id.clone());
             state.normalizer.session_id = Some(id.clone());
             state.current_model = current_model;
+            state.current_effort = current_effort;
         }
         yield_draft(&sink, ProviderEventDraft::SessionUpdated(id.clone())).await;
         yield_draft(
@@ -1160,6 +1200,38 @@ async fn begin(
                     })?;
                 }
                 session.state.lock().await.current_model = Some(model);
+            }
+        }
+    }
+
+    if session.provider == ChatProvider::Omp {
+        if let Some(model) = request.selected_model() {
+            let current_model = session.state.lock().await.current_model.clone();
+            if current_model.as_deref() != Some(model.as_str()) {
+                let response = rpc_request(
+                    session,
+                    "session/set_config_option",
+                    json!({"sessionId": session_id, "configId": "model", "value": model}),
+                )
+                .await
+                .map_err(|error| format!("OMP could not switch to {model}: {error}"))?;
+                let mut state = session.state.lock().await;
+                state.current_model = acp_config_current(&response, "model").or(Some(model));
+                state.current_effort = acp_config_current(&response, "thinking");
+            }
+        }
+        if let Some(effort) = request.selected_effort() {
+            let current_effort = session.state.lock().await.current_effort.clone();
+            if current_effort.as_deref() != Some(effort.as_str()) {
+                let response = rpc_request(
+                    session,
+                    "session/set_config_option",
+                    json!({"sessionId": session_id, "configId": "thinking", "value": effort}),
+                )
+                .await
+                .map_err(|error| format!("OMP could not set thinking to {effort}: {error}"))?;
+                session.state.lock().await.current_effort =
+                    acp_config_current(&response, "thinking").or(Some(effort));
             }
         }
     }
@@ -1309,6 +1381,20 @@ fn acp_current_model(response: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn acp_config_current(response: &Value, config_id: &str) -> Option<String> {
+    response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option.get("id").and_then(Value::as_str) == Some(config_id))
+        })
+        .and_then(|option| option.get("currentValue"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 fn spawn_reader(session: Arc<AcpSession>, process: Arc<JsonLineProcess>) {
     tokio::spawn(async move {
         loop {
@@ -1335,6 +1421,7 @@ fn spawn_reader(session: Arc<AcpSession>, process: Arc<JsonLineProcess>) {
                     state.process = None;
                     state.session_id = None;
                     state.current_model = None;
+                    state.current_effort = None;
                     state.normalizer = NormalizerState::default();
                     state.supports_load_session = false;
                     state.supports_http_mcp = false;
@@ -1627,6 +1714,7 @@ async fn reset_timed_out_session(session: &Arc<AcpSession>, request_id: &str, me
         let session_id = state.session_id.take();
         state.interactions.clear();
         state.current_model = None;
+        state.current_effort = None;
         state.normalizer = NormalizerState::default();
         state.supports_load_session = false;
         state.supports_http_mcp = false;
@@ -1694,6 +1782,43 @@ mod browser_mcp_tests {
             ["sessions", "delete", "--yes", "session-id"]
         );
         assert!(acp_cleanup_arguments(ChatProvider::Cursor, "session-id").is_none());
+        assert!(acp_cleanup_arguments(ChatProvider::Omp, "session-id").is_none());
+    }
+
+    #[test]
+    fn omp_launch_uses_its_native_instruction_channel_and_ephemeral_mode() {
+        let mut request = crate::engine::test_request(ChatProvider::Omp);
+        request.agent_instructions = Some("You are Dana.".into());
+        request.ephemeral = true;
+
+        assert_eq!(
+            omp_arguments(&request).unwrap(),
+            [
+                "--append-system-prompt",
+                "You are Dana.",
+                "--no-session",
+                "acp"
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_omp_acp_config_values() {
+        let response = json!({
+            "sessionId": "session-id",
+            "configOptions": [
+                {"id": "model", "currentValue": "sparky/qwen"},
+                {"id": "thinking", "currentValue": "off"}
+            ]
+        });
+        assert_eq!(
+            acp_config_current(&response, "model").as_deref(),
+            Some("sparky/qwen")
+        );
+        assert_eq!(
+            acp_config_current(&response, "thinking").as_deref(),
+            Some("off")
+        );
     }
 
     #[tokio::test]

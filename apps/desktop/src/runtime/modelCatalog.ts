@@ -291,6 +291,16 @@ export function encodeLaunchHints(
         params.thinking = effort;
       }
       break;
+    case "omp":
+      // The OMP ACP server applies both values through
+      // session/set_config_option after session creation.
+      if (model) {
+        params.model = model;
+      }
+      if (effort) {
+        params.thinking = effort;
+      }
+      break;
     case "cursor":
       if (model) {
         flags.push("--model", model);

@@ -358,7 +358,7 @@ fn schedule_schema() -> Map<String, Value> {
             "runtime": {
                 "type": "object",
                 "properties": {
-                    "provider": {"type": "string", "enum": ["codex", "claude", "grok", "cursor", "opencode", "pi", "hermes"]},
+                    "provider": {"type": "string", "enum": ["codex", "claude", "grok", "cursor", "opencode", "pi", "omp", "hermes"]},
                     "model": {"type": "string"},
                     "profileID": {"type": "string", "format": "uuid"},
                     "effort": {"type": "string"},

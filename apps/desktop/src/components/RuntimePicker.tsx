@@ -829,7 +829,7 @@ export function RuntimePicker({
                       data-runtime-navigable
                       onClick={() => setEffort(null)}
                     >
-                      Auto
+                      Default
                     </Button>
                     {draftEffortLevels.map((level) => (
                       <Button

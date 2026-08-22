@@ -133,6 +133,7 @@ async fn discover_models(
         ChatProvider::Pi => discover_pi(&executable, &env, working_directory).await,
         ChatProvider::Codex => discover_codex(&executable, &env).await,
         ChatProvider::Hermes => discover_hermes(&executable, &env, working_directory).await,
+        ChatProvider::Omp => discover_omp(&executable, &env, working_directory).await,
     }
 }
 
@@ -842,17 +843,16 @@ async fn discover_codex(
     Ok(models)
 }
 
-/// Live discovery for Hermes. `hermes` has no model-list subcommand, but its
-/// ACP server reports `models.availableModels` in the `session/new` result, so
-/// discovery is a short-lived ACP handshake: initialize, session/new, parse.
-async fn discover_hermes(
+async fn discover_acp_session_config(
     executable: &std::path::Path,
     env: &std::collections::HashMap<String, String>,
     working_directory: Option<&str>,
-) -> Result<Vec<ProviderModelOption>, String> {
+    provider_name: &str,
+    arguments: &[&str],
+) -> Result<serde_json::Value, String> {
     let mut command = Command::new(executable);
     command
-        .arg("acp")
+        .args(arguments)
         .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -862,8 +862,14 @@ async fn discover_hermes(
         command.current_dir(cwd);
     }
     let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let mut stdin = child.stdin.take().ok_or("Hermes stdin unavailable")?;
-    let stdout = child.stdout.take().ok_or("Hermes stdout unavailable")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{provider_name} stdin unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{provider_name} stdout unavailable"))?;
     let mut reader = BufReader::new(stdout).lines();
 
     async fn write_json(
@@ -879,6 +885,7 @@ async fn discover_hermes(
     async fn read_response_with_id(
         reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
         id: i64,
+        provider_name: &str,
     ) -> Result<serde_json::Value, String> {
         while let Ok(Some(line)) = reader.next_line().await {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -891,12 +898,14 @@ async fn discover_hermes(
                 let message = error
                     .get("message")
                     .and_then(|m| m.as_str())
-                    .unwrap_or("Hermes ACP error");
+                    .unwrap_or("ACP error");
                 return Err(message.to_string());
             }
             return Ok(value);
         }
-        Err("Hermes connection closed before session/new response".into())
+        Err(format!(
+            "{provider_name} connection closed before ACP response"
+        ))
     }
 
     write_json(
@@ -915,10 +924,10 @@ async fn discover_hermes(
     .await?;
     timeout(
         Duration::from_secs(12),
-        read_response_with_id(&mut reader, 1),
+        read_response_with_id(&mut reader, 1, provider_name),
     )
     .await
-    .map_err(|_| "Hermes initialize timed out".to_string())??;
+    .map_err(|_| format!("{provider_name} initialize timed out"))??;
 
     write_json(
         &mut stdin,
@@ -935,19 +944,110 @@ async fn discover_hermes(
     .await?;
     let response = timeout(
         Duration::from_secs(20),
-        read_response_with_id(&mut reader, 2),
+        read_response_with_id(&mut reader, 2, provider_name),
     )
     .await
-    .map_err(|_| "Hermes session/new timed out".to_string())??;
+    .map_err(|_| format!("{provider_name} session/new timed out"))??;
 
     drop(stdin);
     let _ = child.kill().await;
     let _ = child.wait().await;
 
-    let result = response
+    response
         .get("result")
-        .ok_or("Hermes session/new missing result")?;
-    parse_hermes_session_models(result)
+        .cloned()
+        .ok_or_else(|| format!("{provider_name} session/new missing result"))
+}
+
+/// Hermes has no model-list subcommand, but its ACP session result exposes a
+/// provider-native model catalog.
+async fn discover_hermes(
+    executable: &std::path::Path,
+    env: &std::collections::HashMap<String, String>,
+    working_directory: Option<&str>,
+) -> Result<Vec<ProviderModelOption>, String> {
+    let result =
+        discover_acp_session_config(executable, env, working_directory, "Hermes", &["acp"])
+            .await?;
+    parse_hermes_session_models(&result)
+}
+
+/// OMP reports both its selectable models and the active model's thinking
+/// levels through standard ACP config options.
+async fn discover_omp(
+    executable: &std::path::Path,
+    env: &std::collections::HashMap<String, String>,
+    working_directory: Option<&str>,
+) -> Result<Vec<ProviderModelOption>, String> {
+    let result = discover_acp_session_config(
+        executable,
+        env,
+        working_directory,
+        "OMP",
+        &["--no-session", "acp"],
+    )
+    .await?;
+    parse_omp_session_models(&result)
+}
+
+pub fn parse_omp_session_models(
+    result: &serde_json::Value,
+) -> Result<Vec<ProviderModelOption>, String> {
+    let config_options = result
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("OMP session/new reported no configOptions")?;
+    let model_config = config_options
+        .iter()
+        .find(|config| config.get("id").and_then(serde_json::Value::as_str) == Some("model"))
+        .ok_or("OMP session/new reported no model config option")?;
+    let current_model = model_config
+        .get("currentValue")
+        .and_then(serde_json::Value::as_str);
+    let active_efforts = config_options
+        .iter()
+        .find(|config| config.get("id").and_then(serde_json::Value::as_str) == Some("thinking"))
+        .and_then(|config| config.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| option.get("value").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let options = model_config
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("OMP model config option reported no choices")?;
+    let models = options
+        .iter()
+        .filter_map(|option| {
+            let model = option.get("value")?.as_str()?.to_owned();
+            let display_name = option
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&model)
+                .to_owned();
+            Some(ProviderModelOption {
+                is_default: current_model == Some(model.as_str()),
+                description: option
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                effort_levels: (current_model == Some(model.as_str()))
+                    .then(|| active_efforts.clone())
+                    .unwrap_or_default(),
+                model,
+                display_name,
+            })
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err("OMP returned no models".into());
+    }
+    Ok(models)
 }
 
 /// Parse the `models` block of a Hermes ACP `session/new` result (pure).
@@ -1152,6 +1252,68 @@ pub async fn run_catalog_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_omp_acp_models_and_active_thinking_levels() {
+        let result = serde_json::json!({
+            "sessionId": "omp-session",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "type": "select",
+                    "currentValue": "sparky/qwen3.8-27b-sglang",
+                    "options": [
+                        {
+                            "value": "sparky/qwen3.8-27b-sglang",
+                            "name": "Qwen 3.8 27B",
+                            "description": "sparky/qwen3.8-27b-sglang"
+                        },
+                        {
+                            "value": "openai/gpt-5.2",
+                            "name": "GPT-5.2"
+                        }
+                    ]
+                },
+                {
+                    "id": "thinking",
+                    "type": "select",
+                    "currentValue": "off",
+                    "options": [
+                        {"value": "off", "name": "Off"},
+                        {"value": "low", "name": "Low"},
+                        {"value": "high", "name": "High"}
+                    ]
+                }
+            ]
+        });
+
+        let models = parse_omp_session_models(&result).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_default);
+        assert_eq!(models[0].model, "sparky/qwen3.8-27b-sglang");
+        assert_eq!(models[0].effort_levels, ["off", "low", "high"]);
+        assert!(!models[1].is_default);
+        assert!(models[1].effort_levels.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the user's installed OMP CLI"]
+    async fn live_installed_omp_catalog_uses_acp_config_options() {
+        let profile = ProviderProfile::default_for(ChatProvider::Omp);
+        let catalog = resolve_models_for_profile(&profile, Some(env!("CARGO_MANIFEST_DIR"))).await;
+        assert_eq!(catalog.source, ProviderModelCatalogSource::Live);
+        assert!(
+            !catalog.models.is_empty(),
+            "catalog error: {:?}",
+            catalog.error
+        );
+        let active = catalog
+            .models
+            .iter()
+            .find(|model| model.is_default)
+            .expect("OMP should report its active model");
+        assert!(!active.effort_levels.is_empty());
+    }
 
     #[test]
     fn discovery_working_directory_accepts_global_and_existing_contexts() {

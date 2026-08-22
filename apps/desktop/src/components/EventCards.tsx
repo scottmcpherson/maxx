@@ -6,6 +6,7 @@ import {
   EventKind,
   ProviderRuntimeEvent,
   RuntimeArtifact,
+  RuntimeDecisionKind,
   RuntimeInteractionDecision,
   RuntimeQuestion,
 } from "../contract/types";
@@ -153,6 +154,15 @@ function firstLine(text: string | undefined): string | undefined {
   return line.length > 80 ? `${line.slice(0, 80)}…` : line;
 }
 
+function approvalOptionPosition(kind: RuntimeDecisionKind): number {
+  switch (kind) {
+    case "cancel": return 0;
+    case "deny": return 1;
+    case "approveForSession": return 2;
+    case "approve": return 3;
+  }
+}
+
 export function InteractionCard({
   event,
   resolved,
@@ -164,6 +174,9 @@ export function InteractionCard({
 }) {
   if (event.kind === EventKind.approvalRequest && event.payload.approval) {
     const approval = event.payload.approval;
+    const orderedOptions = [...approval.options].sort(
+      (left, right) => approvalOptionPosition(left.kind) - approvalOptionPosition(right.kind),
+    );
     return (
       <Card size="sm" className="border-border bg-card">
         <CardHeader className="flex-row items-center justify-between px-3 py-0">
@@ -174,8 +187,8 @@ export function InteractionCard({
           {approval.command && <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs">{approval.command}</pre>}
           {approval.detail && <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs">{approval.detail}</pre>}
           {resolved ? <p className="text-xs text-muted-foreground">Resolved: {resolved}</p> : (
-            <div className="flex flex-wrap gap-1.5">
-              {approval.options.map((option) => (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {orderedOptions.map((option) => (
                 <Button key={option.id} variant={option.kind === "approve" ? "default" : option.kind === "deny" ? "destructive" : "secondary"} size="sm" onClick={() => onResolve({ kind: option.kind, selectedOptionIDs: option.nativeValue ? [option.nativeValue] : [], textAnswers: {} })}>{option.title}</Button>
               ))}
             </div>

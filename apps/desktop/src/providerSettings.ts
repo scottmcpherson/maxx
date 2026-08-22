@@ -31,6 +31,10 @@ export const PROVIDER_INSTALL_GUIDES: Record<ChatProvider, ProviderInstallGuide>
     url: "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
     executable: "pi",
   },
+  omp: {
+    url: "https://github.com/can1357/oh-my-pi",
+    executable: "omp",
+  },
   hermes: {
     url: "https://hermes-agent.nousresearch.com/docs/getting-started/installation",
     executable: "hermes",

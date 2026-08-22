@@ -111,6 +111,9 @@ async fn discover_commands(
             discover_opencode(&executable, &environment, cwd.as_deref()).await
         }
         ChatProvider::Pi => discover_pi(&executable, &environment, cwd.as_deref()).await,
+        ChatProvider::Omp => {
+            discover_acp(ChatProvider::Omp, &executable, &environment, cwd.as_deref()).await
+        }
         ChatProvider::Hermes => {
             let mut items = discover_acp(
                 ChatProvider::Hermes,
@@ -572,6 +575,7 @@ async fn discover_acp(
     let arguments: &[&str] = match provider {
         ChatProvider::Grok => &["agent", "stdio"],
         ChatProvider::Cursor | ChatProvider::Hermes => &["acp"],
+        ChatProvider::Omp => &["--no-session", "acp"],
         _ => return Err("Unsupported ACP command catalog provider".into()),
     };
     let (child, mut stdin, mut reader) =
@@ -1131,5 +1135,19 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("not found")));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the user's installed OMP CLI"]
+    async fn live_installed_omp_commands_use_acp_advertisement() {
+        let profile = ProviderProfile::default_for(ChatProvider::Omp);
+        let catalog =
+            resolve_commands_for_profile(&profile, Some(env!("CARGO_MANIFEST_DIR"))).await;
+        assert_eq!(catalog.source, ProviderCommandCatalogSource::Live);
+        assert!(
+            !catalog.items.is_empty(),
+            "catalog error: {:?}",
+            catalog.error
+        );
     }
 }

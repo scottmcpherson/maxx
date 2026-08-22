@@ -181,17 +181,19 @@ pub enum ChatProvider {
     Cursor,
     Opencode,
     Pi,
+    Omp,
     Hermes,
 }
 
 impl ChatProvider {
-    pub const ALL: [ChatProvider; 7] = [
+    pub const ALL: [ChatProvider; 8] = [
         ChatProvider::Codex,
         ChatProvider::Claude,
         ChatProvider::Grok,
         ChatProvider::Cursor,
         ChatProvider::Opencode,
         ChatProvider::Pi,
+        ChatProvider::Omp,
         ChatProvider::Hermes,
     ];
 
@@ -203,6 +205,7 @@ impl ChatProvider {
             ChatProvider::Cursor => "cursor",
             ChatProvider::Opencode => "opencode",
             ChatProvider::Pi => "pi",
+            ChatProvider::Omp => "omp",
             ChatProvider::Hermes => "hermes",
         }
     }
@@ -215,6 +218,7 @@ impl ChatProvider {
             ChatProvider::Cursor => "Cursor",
             ChatProvider::Opencode => "OpenCode",
             ChatProvider::Pi => "Pi",
+            ChatProvider::Omp => "OMP",
             ChatProvider::Hermes => "Hermes",
         }
     }
@@ -236,6 +240,7 @@ impl ChatProvider {
             ChatProvider::Opencode => "00000000-0000-4000-8000-000000000005",
             ChatProvider::Pi => "00000000-0000-4000-8000-000000000006",
             ChatProvider::Hermes => "00000000-0000-4000-8000-000000000007",
+            ChatProvider::Omp => "00000000-0000-4000-8000-000000000008",
         };
         Uuid::parse_str(raw).expect("static UUID")
     }
@@ -248,6 +253,7 @@ impl ChatProvider {
             ChatProvider::Cursor => "#B08CFF",
             ChatProvider::Opencode => "#79B8FF",
             ChatProvider::Pi => "#F2C14E",
+            ChatProvider::Omp => "#B56BDE",
             ChatProvider::Hermes => "#E28C8C",
         }
     }

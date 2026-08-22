@@ -1,4 +1,4 @@
-import type { SVGProps } from "react";
+import { useId, type SVGProps } from "react";
 import type { ChatProvider } from "../contract/types";
 import hermesMark from "../../../../shared/assets/hermes-mark.png";
 
@@ -20,6 +20,7 @@ export function ProviderIcon({
   className,
   ...props
 }: ProviderIconProps) {
+  const gradientId = `omp-pi-mark-${useId().replaceAll(":", "")}`;
   const sharedProps = {
     ...props,
     width: size,
@@ -85,6 +86,24 @@ export function ProviderIcon({
       <svg {...sharedProps} viewBox="0 0 32 40">
         <path d="M24 32H8V16H24V32Z" fill="#4b4646" />
         <path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#f1ecec" />
+      </svg>
+    );
+  }
+
+  if (provider === "omp") {
+    return (
+      <svg {...sharedProps} viewBox="0 0 64 64">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="oklch(0.7 0.24 340)" />
+            <stop offset=".5" stopColor="oklch(0.62 0.21 295)" />
+            <stop offset="1" stopColor="oklch(0.81 0.14 200)" />
+          </linearGradient>
+        </defs>
+        <path
+          fill={`url(#${gradientId})`}
+          d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z"
+        />
       </svg>
     );
   }

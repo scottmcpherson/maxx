@@ -1,5 +1,5 @@
 import { Image, type ImageStyle, type StyleProp } from "react-native";
-import Svg, { Path, Rect } from "react-native-svg";
+import Svg, { Defs, LinearGradient, Path, Rect, Stop } from "react-native-svg";
 import type { ChatProvider } from "../types";
 
 type Props = {
@@ -60,6 +60,24 @@ export function MobileProviderIcon({ provider, size = 18, style }: Props) {
       <Svg accessible={false} width={size} height={size} viewBox="0 0 32 40">
         <Path d="M24 32H8V16H24V32Z" fill="#4b4646" />
         <Path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#f1ecec" />
+      </Svg>
+    );
+  }
+
+  if (provider === "omp") {
+    return (
+      <Svg accessible={false} width={size} height={size} viewBox="0 0 64 64">
+        <Defs>
+          <LinearGradient id="ompPiMarkGradient" x1="0" y1="0" x2="1" y2="1">
+            <Stop offset="0" stopColor="#F84FCC" />
+            <Stop offset=".5" stopColor="#9362F4" />
+            <Stop offset="1" stopColor="#00DBE4" />
+          </LinearGradient>
+        </Defs>
+        <Path
+          fill="url(#ompPiMarkGradient)"
+          d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z"
+        />
       </Svg>
     );
   }

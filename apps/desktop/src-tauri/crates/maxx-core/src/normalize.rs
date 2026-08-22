@@ -108,7 +108,7 @@ pub fn normalize(
     match provider {
         ChatProvider::Codex => normalize_codex(object, state),
         ChatProvider::Claude => normalize_claude(object, state),
-        ChatProvider::Grok | ChatProvider::Cursor | ChatProvider::Hermes => {
+        ChatProvider::Grok | ChatProvider::Cursor | ChatProvider::Hermes | ChatProvider::Omp => {
             normalize_acp(object, provider, state)
         }
         ChatProvider::Opencode => normalize_opencode(object, state),
@@ -1064,9 +1064,10 @@ fn normalize_acp(
                     },
                     Some(reference),
                 )]),
-                "available_commands_update" | "session_info_update" | "user_message_chunk" => {
-                    Ok(Vec::new())
-                }
+                "available_commands_update"
+                | "config_option_update"
+                | "session_info_update"
+                | "user_message_chunk" => Ok(Vec::new()),
                 "tool_call" | "tool_call_update" => Ok(vec![normalize_acp_tool_update(
                     update,
                     update_type == "tool_call",

@@ -66,6 +66,7 @@ impl Runtime {
             Arc::new(AcpEngine::grok()),
             Arc::new(AcpEngine::cursor()),
             Arc::new(AcpEngine::hermes()),
+            Arc::new(AcpEngine::omp()),
             Arc::new(OpenCodeEngine::default()),
             Arc::new(PiEngine::default()),
         ];

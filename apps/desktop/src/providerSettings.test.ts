@@ -21,7 +21,7 @@ const profile: ProviderProfile = {
 
 describe("provider settings", () => {
   it("defines an HTTPS installation guide and executable for every provider", () => {
-    expect(Object.keys(PROVIDER_INSTALL_GUIDES)).toHaveLength(7);
+    expect(Object.keys(PROVIDER_INSTALL_GUIDES)).toHaveLength(8);
     for (const guide of Object.values(PROVIDER_INSTALL_GUIDES)) {
       expect(guide.url).toMatch(/^https:\/\//);
       expect(guide.executable).not.toBe("");

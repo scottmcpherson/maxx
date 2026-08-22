@@ -5,7 +5,7 @@
 import type { VoiceSettings } from "../voice/types";
 import type { BrowserAnnotation } from "../browser";
 
-export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "hermes";
+export type ChatProvider = "codex" | "claude" | "grok" | "cursor" | "opencode" | "pi" | "omp" | "hermes";
 
 export const ALL_PROVIDERS: ChatProvider[] = [
   "codex",
@@ -14,11 +14,14 @@ export const ALL_PROVIDERS: ChatProvider[] = [
   "cursor",
   "opencode",
   "pi",
+  "omp",
   "hermes",
 ];
 
 export function providerDisplayName(provider: ChatProvider): string {
-  return provider === "opencode" ? "OpenCode" : provider.charAt(0).toUpperCase() + provider.slice(1);
+  if (provider === "opencode") return "OpenCode";
+  if (provider === "omp") return "OMP";
+  return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
 export type RuntimeItemState =

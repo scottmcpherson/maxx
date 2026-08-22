@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { EventKind, type ProviderRuntimeEvent } from "../contract/types";
-import { ActivityCard } from "./EventCards";
+import { ActivityCard, InteractionCard } from "./EventCards";
 
 function toolEvent(): ProviderRuntimeEvent {
   return {
@@ -37,5 +37,36 @@ describe("ActivityCard", () => {
     expect(markup).toContain("read");
     expect(markup).toContain("Read package.json");
     expect(markup).not.toContain("package contents");
+  });
+});
+
+describe("InteractionCard", () => {
+  it("places rejection actions before session and one-time approvals", () => {
+    const event: ProviderRuntimeEvent = {
+      ...toolEvent(),
+      kind: EventKind.approvalRequest,
+      payload: {
+        approval: {
+          kind: "command",
+          title: "Run command?",
+          paths: [],
+          options: [
+            { id: "once", title: "Allow once", kind: "approve", isPersistent: false },
+            { id: "session", title: "Always allow", kind: "approveForSession", isPersistent: true },
+            { id: "deny", title: "Deny", kind: "deny", isPersistent: false },
+            { id: "cancel", title: "Cancel turn", kind: "cancel", isPersistent: false },
+          ],
+        },
+      },
+    };
+
+    const markup = renderToStaticMarkup(
+      <InteractionCard event={event} resolved={null} onResolve={() => undefined} />,
+    );
+
+    expect(markup.indexOf("Cancel turn")).toBeLessThan(markup.indexOf("Deny"));
+    expect(markup.indexOf("Deny")).toBeLessThan(markup.indexOf("Always allow"));
+    expect(markup.indexOf("Always allow")).toBeLessThan(markup.indexOf("Allow once"));
+    expect(markup).toContain("justify-end");
   });
 });

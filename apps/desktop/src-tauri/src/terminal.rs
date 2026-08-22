@@ -241,6 +241,7 @@ impl TerminalBroker {
                 | ChatProvider::Cursor
                 | ChatProvider::Opencode
                 | ChatProvider::Pi
+                | ChatProvider::Omp
                 | ChatProvider::Hermes
         );
         TerminalSupport {
@@ -1174,6 +1175,43 @@ fn terminal_launch(
             if !host_tools.is_empty() {
                 let path = write_private_temp(
                     "maxx-pi-terminal-host-tools",
+                    "ts",
+                    include_bytes!("../resources/pi-host-tools-mcp.ts").to_vec(),
+                )?;
+                let encoded = serde_json::to_string(
+                    &host_tools
+                        .iter()
+                        .map(|tool| {
+                            serde_json::json!({
+                                "name": tool.name,
+                                "endpoint": tool.endpoint,
+                                "token": tool.bearer_token,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|error| error.to_string())?;
+                environment.insert("MAXX_HOST_TOOLS_JSON".into(), encoded);
+                arguments.extend(["--extension".into(), path.to_string_lossy().into_owned()]);
+                temporary_resources.push(TemporaryResource::Remove(path));
+            }
+        }
+        ChatProvider::Omp => {
+            arguments.extend([
+                "--resume".into(),
+                session_id.into(),
+                "--cwd".into(),
+                cwd.into(),
+            ]);
+            if !thread.model.eq_ignore_ascii_case("default") {
+                arguments.extend(["--model".into(), thread.model.clone()]);
+            }
+            if let Some(effort) = nonempty(thread.effort.as_deref()) {
+                arguments.extend(["--thinking".into(), effort.into()]);
+            }
+            if !host_tools.is_empty() {
+                let path = write_private_temp(
+                    "maxx-omp-terminal-host-tools",
                     "ts",
                     include_bytes!("../resources/pi-host-tools-mcp.ts").to_vec(),
                 )?;
