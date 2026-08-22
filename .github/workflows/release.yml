@@ -36,9 +36,9 @@ jobs:
       - name: Validate release tag
         run: |
           set -euo pipefail
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="$(node -p "require('./apps/desktop/package.json').version")"
           if [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
-            echo "Tag $GITHUB_REF_NAME must match package.json version v$VERSION." >&2
+            echo "Tag $GITHUB_REF_NAME must match apps/desktop/package.json version v$VERSION." >&2
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
@@ -52,7 +52,7 @@ jobs:
       - name: Run tests
         run: |
           pnpm test
-          cargo test --manifest-path src-tauri/Cargo.toml --workspace
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace
 
       - name: Import Developer ID certificate
         env:
@@ -92,12 +92,12 @@ jobs:
           fi
           pnpm build
           pnpm build:runtime:universal
-          pnpm exec electron-builder --mac dmg zip --universal --publish never
+          pnpm --dir apps/desktop exec electron-builder --mac dmg zip --universal --publish never
 
       - name: Verify signed local artifact
         run: |
           set -euo pipefail
-          APP="release/mac-universal/Maxx.app"
+          APP="apps/desktop/release/mac-universal/Maxx.app"
           test -d "$APP"
           lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q arm64
           lipo -archs "$APP/Contents/MacOS/Maxx" | grep -q x86_64
@@ -113,11 +113,11 @@ jobs:
         run: |
           set -euo pipefail
           ASSETS=(
-            release/*.dmg
-            release/*.dmg.blockmap
-            release/*.zip
-            release/*.zip.blockmap
-            release/latest-mac.yml
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.dmg.blockmap
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.zip.blockmap
+            apps/desktop/release/latest-mac.yml
           )
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber

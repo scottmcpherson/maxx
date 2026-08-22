@@ -27,7 +27,7 @@ import {
 import Svg, { Circle } from "react-native-svg";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useConnection } from "../connection/ConnectionProvider";
-import { GlassButton } from "../components/GlassButton";
+import { GlassButton, GlassPill } from "../components/GlassButton";
 import { GlassSurface } from "../components/GlassSurface";
 import {
   loadPinnedThreadIDs,
@@ -112,6 +112,15 @@ function animateSidebarLayout() {
     update: { type: LayoutAnimation.Types.easeInEaseOut },
     delete: { type: LayoutAnimation.Types.easeInEaseOut, property: LayoutAnimation.Properties.opacity },
   });
+}
+
+function SidebarMenuGlyph() {
+  return (
+    <View style={styles.sidebarMenuGlyph}>
+      <View style={styles.sidebarMenuGlyphLong} />
+      <View style={styles.sidebarMenuGlyphShort} />
+    </View>
+  );
 }
 
 export function ChatApp() {
@@ -338,7 +347,9 @@ export function ChatApp() {
           <View style={[styles.chatHeader, { paddingTop: insets.top }]}>
             <HeaderFade backgroundColor={colors.background} rgb="8,10,14" />
             <View style={styles.topbar}>
-              <GlassButton label="Open sidebar" symbol="line.3.horizontal" onPress={() => setOpen(true)} />
+              <GlassButton label="Open sidebar" symbol="line.3.horizontal" onPress={() => setOpen(true)}>
+                <SidebarMenuGlyph />
+              </GlassButton>
               <View style={styles.titleBlock}>
                 <Text numberOfLines={1} style={styles.chatTitle}>{current?.thread.title || "Maxx"}</Text>
                 <Text numberOfLines={1} style={styles.chatSubtitle}>
@@ -1858,7 +1869,14 @@ function EmptyTranscript() {
 }
 
 function EmptyChat({ onNew }: { onNew: () => void }) {
-  return <View style={styles.emptyState}><SymbolView name="bubble.left.and.bubble.right.fill" size={48} tintColor={colors.accent} /><Text style={styles.emptyTitle}>Your Maxx chats, everywhere</Text><Text style={styles.emptyBody}>Create a chat to get started.</Text><Pressable accessibilityRole="button" accessibilityLabel="New chat" style={styles.primary} onPress={onNew}><Text style={styles.primaryText}>New Chat</Text></Pressable></View>;
+  return (
+    <View style={styles.emptyState}>
+      <SymbolView name="bubble.left.and.bubble.right.fill" size={48} tintColor={colors.accent} />
+      <Text style={styles.emptyTitle}>Your Maxx chats, everywhere</Text>
+      <Text style={styles.emptyBody}>Create a chat to get started.</Text>
+      <GlassPill label="New Chat" symbol="plus" selected style={styles.emptyAction} onPress={onNew} />
+    </View>
+  );
 }
 
 function ActionRow({ symbol, title, subtitle, onPress }: { symbol: Parameters<typeof SymbolView>[0]["name"]; title: string; subtitle: string; onPress: () => void }) {
@@ -1978,6 +1996,9 @@ const styles = StyleSheet.create({
   threadCopy: { flex: 1, minWidth: 0 },
   threadTitle: { color: colors.text, fontSize: 15, fontWeight: "600" },
   threadMeta: { color: colors.tertiary, fontSize: 11, marginTop: 3, textTransform: "capitalize" },
+  sidebarMenuGlyph: { width: 22, height: 15, justifyContent: "center", gap: 6 },
+  sidebarMenuGlyphLong: { width: 22, height: 2.5, borderRadius: 2, backgroundColor: colors.text },
+  sidebarMenuGlyphShort: { width: 13, height: 2.5, borderRadius: 2, backgroundColor: colors.text },
   topbar: { height: 66, flexDirection: "row", alignItems: "center", paddingHorizontal: 12, gap: 12 },
   titleBlock: { flex: 1, minWidth: 0, alignItems: "flex-start" },
   chatTitle: { color: colors.text, fontSize: 16, fontWeight: "700", maxWidth: "100%" },
@@ -2027,6 +2048,7 @@ const styles = StyleSheet.create({
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 34, gap: 12 },
   emptyTitle: { color: colors.text, fontSize: 24, fontWeight: "700", textAlign: "center" },
   emptyBody: { color: colors.secondary, fontSize: 15, lineHeight: 22, textAlign: "center", maxWidth: 370 },
+  emptyAction: { marginTop: 6 },
   attachmentTray: { paddingHorizontal: 12, paddingVertical: 7, gap: 8 },
   attachmentChip: { maxWidth: 230, height: 36, borderRadius: 12, paddingHorizontal: 10, flexDirection: "row", gap: 7, alignItems: "center", backgroundColor: colors.elevatedSoft, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderStrong },
   attachmentName: { color: colors.text, fontSize: 12, flexShrink: 1 },
@@ -2046,8 +2068,6 @@ const styles = StyleSheet.create({
   sendButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.accentStrong, alignItems: "center", justifyContent: "center" },
   stopConversationButton: { backgroundColor: colors.danger },
   sendDisabled: { opacity: 0.35 },
-  primary: { minHeight: 48, paddingHorizontal: 22, borderRadius: 16, backgroundColor: colors.accentStrong, alignItems: "center", justifyContent: "center", marginTop: 6 },
-  primaryText: { color: "white", fontWeight: "700", fontSize: 16 },
   actionRow: { minHeight: 66, borderRadius: 16, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 9 },
   actionIcon: { width: 43, height: 43, borderRadius: 13, backgroundColor: "rgba(92,139,219,0.16)", alignItems: "center", justifyContent: "center" },
   actionCopy: { flex: 1 },

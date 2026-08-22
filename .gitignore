@@ -6,6 +6,10 @@
 /dist-electron/
 /build/
 /release/
+/apps/desktop/dist/
+/apps/desktop/dist-electron/
+/apps/desktop/build/
+/apps/desktop/release/
 /.pnpm-store/
 /coverage/
 *.tsbuildinfo
@@ -13,6 +17,8 @@
 # Rust and Tauri generated output
 /src-tauri/target/
 /src-tauri/gen/schemas/
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/schemas/
 *.rs.bk
 
 # Local environment files and secrets
@@ -32,4 +38,5 @@
 *.swo
 
 # Local verification artifacts
+/.maxx-dev/
 /.maxx-ocu-preview.png

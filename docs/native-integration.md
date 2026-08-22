@@ -7,11 +7,11 @@ sidecar and has no window-system responsibility.
 
 | Concern | Owner |
 | --- | --- |
-| Main window, menu, tray, notifications | `electron/main.ts` |
-| Restricted renderer bridge | `electron/preload.ts` |
-| Visible Chromium tabs and CDP automation | `electron/browser-manager.ts` |
-| Chrome cookies and credential import | `electron/chrome-importer.ts` |
-| Workspace, providers, browser broker | `src-tauri/src/sidecar.rs` and Rust modules |
+| Main window, menu, tray, notifications | `apps/desktop/electron/main.ts` |
+| Restricted renderer bridge | `apps/desktop/electron/preload.cts` |
+| Visible Chromium tabs and CDP automation | `apps/desktop/electron/browser-manager.ts` |
+| Chrome cookies and credential import | `apps/desktop/electron/chrome-importer.ts` |
+| Workspace, providers, browser broker | `apps/desktop/src-tauri/src/sidecar.rs` and Rust modules |
 
 The main React renderer is sandboxed with context isolation and no Node.js.
 Remote browser tabs are separate sandboxed `WebContentsView`s using the
@@ -77,11 +77,11 @@ request microphone access for voice dictation only.
 The canonical local workflow is:
 
 ```sh
-./script/build_and_run.sh --verify
+pnpm desktop:verify
 ```
 
-It builds the optimized Rust sidecar, type-checks and bundles React, compiles Electron,
-creates the `.app`, launches that exact bundle, and confirms its executable
-stays running. The local directory build is unsigned and is intended for
-development testing. Distribution signing, notarization, and a production
-updater require the maintainer's Apple credentials and release endpoint.
+It builds the optimized Rust sidecar, type-checks and bundles React, compiles
+Electron, creates the `.app`, ad-hoc signs it, and runs the packaged smoke test
+without leaving a persistent window open. Launch the preview explicitly with
+`pnpm desktop:run`. Distribution signing, notarization, and a production updater
+require the maintainer's Apple credentials and release endpoint.

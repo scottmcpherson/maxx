@@ -3,7 +3,7 @@
 ## T3 Code provider icons
 
 The OpenAI, Claude, Cursor, Grok, and OpenCode provider icon components in
-`src/components/ProviderIcon.tsx` use SVG geometry from T3 Code:
+`apps/desktop/src/components/ProviderIcon.tsx` uses SVG geometry from T3 Code:
 
 https://github.com/pingdotgg/t3code/blob/894d6d68f555b97a070791590ed99695c09e4233/apps/web/src/components/Icons.tsx
 

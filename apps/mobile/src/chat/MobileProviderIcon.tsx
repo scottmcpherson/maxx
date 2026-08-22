@@ -8,7 +8,7 @@ type Props = {
   style?: StyleProp<ImageStyle>;
 };
 
-const hermesMark = require("../../../../src/assets/hermes-mark.png");
+const hermesMark = require("../../../../shared/assets/hermes-mark.png");
 
 /** The same official provider marks used by the desktop runtime picker. */
 export function MobileProviderIcon({ provider, size = 18, style }: Props) {

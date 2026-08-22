@@ -1,0 +1,117 @@
+{
+  "name": "maxx-desktop",
+  "private": true,
+  "version": "0.1.2",
+  "description": "A native desktop workspace for multi-provider AI agents with a shared Chromium browser.",
+  "author": "Scott McPherson",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:desktop": "tsc -p electron/tsconfig.json && electron . --dev",
+    "build": "tsc --noEmit && vite build && tsc -p electron/tsconfig.json",
+    "build:runtime": "cargo build --release --manifest-path src-tauri/Cargo.toml && node script/stage_runtime.mjs && node script/stage_cua_driver.mjs",
+    "build:runtime:universal": "cargo build --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin && cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin && node script/stage_runtime.mjs --universal && node script/stage_cua_driver.mjs",
+    "build:desktop": "pnpm build && pnpm build:runtime && electron-builder --mac dir",
+    "release:mac": "pnpm build && pnpm build:runtime:universal && electron-builder --mac dmg zip --universal",
+    "verify": "./script/build_and_run.sh --verify",
+    "preview:app": "./script/build_and_run.sh run",
+    "test:app": "electron . --app-smoke",
+    "test:host": "node script/verify_host_pairing.mjs",
+    "test:browser": "electron . --browser-smoke",
+    "test:browser:hermes": "electron . --hermes-browser-smoke",
+    "benchmark:terminal": "node --expose-gc script/benchmark_terminal.mjs",
+    "electron:compile": "tsc -p electron/tsconfig.json",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "build": {
+    "appId": "com.maxx.app",
+    "productName": "Maxx",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/maxx-runtime",
+        "to": "bin/maxx-runtime"
+      },
+      {
+        "from": "build/cua-driver",
+        "to": "bin/cua-driver"
+      },
+      {
+        "from": "third_party/cua-driver-LICENSE",
+        "to": "licenses/cua-driver-LICENSE"
+      },
+      {
+        "from": "src-tauri/icons/tray.png",
+        "to": "assets/tray.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "src-tauri/icons/icon.icns",
+      "hardenedRuntime": true,
+      "notarize": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Maxx uses the microphone for reviewed dictation and voice conversations. Audio is captured only while voice input is active."
+      }
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "scottmcpherson",
+      "repo": "maxx",
+      "releaseType": "release"
+    }
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.7.0",
+    "@streamdown/code": "^1.1.1",
+    "@trycua/cua-driver": "0.21.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "electron-updater": "^6.8.9",
+    "input-otp": "^1.5.0",
+    "lucide-react": "^1.32.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "streamdown": "^2.5.0",
+    "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "^1.4.0",
+    "use-stick-to-bottom": "^1.1.6",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.3",
+    "@xterm/headless": "6.0.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "shadcn": "4.18.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}

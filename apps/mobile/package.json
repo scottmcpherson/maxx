@@ -4,8 +4,8 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
-    "start": "NODE_OPTIONS=--dns-result-order=ipv4first expo start --dev-client",
-    "ios": "NODE_OPTIONS=--dns-result-order=ipv4first expo run:ios",
+    "start": "node ../../script/mobile.mjs start",
+    "ios": "node ../../script/mobile.mjs ios",
     "prebuild": "expo prebuild",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

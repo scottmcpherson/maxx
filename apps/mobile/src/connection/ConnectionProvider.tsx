@@ -15,6 +15,12 @@ import { MaxxHostClient } from "./MaxxHostClient";
 import type { MaxxMobilePairingPayload } from "./pairingPayload";
 import { MOBILE_REQUIRED_CAPABILITIES, parseEndpoint } from "./pairingPayload";
 import {
+  automaticReconnectDelay,
+  shouldAutomaticallyReconnect,
+  shouldShowReconnectProgress,
+  type ReconnectReason,
+} from "./reconnectPolicy";
+import {
   clearSavedConnection,
   deviceID,
   loadSavedConnection,
@@ -28,7 +34,7 @@ export type ConnectionState =
   | { status: "unpaired" }
   | { status: "connecting"; profile?: SavedHostProfile }
   | { status: "connected"; profile: SavedHostProfile }
-  | { status: "disconnected"; profile: SavedHostProfile; error: string };
+  | { status: "disconnected"; profile: SavedHostProfile; error: string; automaticRetry: boolean };
 
 type ConnectionContextValue = {
   state: ConnectionState;
@@ -49,6 +55,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<MaxxHostClient | null>(null);
   const clientRef = useRef<MaxxHostClient | null>(null);
   const reconnectingRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializedLiveTurnsRef = useRef(new Set<string>());
 
@@ -68,7 +76,12 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         if (clientRef.current === nextClient) {
-          setState({ status: "disconnected", profile, error: errorMessage(error) });
+          setState({
+            status: "disconnected",
+            profile,
+            error: errorMessage(error),
+            automaticRetry: shouldAutomaticallyReconnect(error),
+          });
         }
       }
     };
@@ -110,15 +123,27 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       if (clientRef.current !== nextClient) return;
       clientRef.current = null;
       setClient(null);
-      setState({ status: "disconnected", profile, error: errorMessage(error || "Connection lost.") });
+      const reason = error || new Error("Connection lost.");
+      setState({
+        status: "disconnected",
+        profile,
+        error: errorMessage(reason),
+        automaticRetry: shouldAutomaticallyReconnect(reason),
+      });
     });
     await refresh();
   }, []);
 
-  const connectSaved = useCallback(async (profile: SavedHostProfile, credential: string) => {
+  const connectSaved = useCallback(async (
+    profile: SavedHostProfile,
+    credential: string,
+    reason: ReconnectReason,
+  ) => {
     if (reconnectingRef.current) return;
     reconnectingRef.current = true;
-    setState({ status: "connecting", profile });
+    if (shouldShowReconnectProgress(reason)) {
+      setState({ status: "connecting", profile });
+    }
     try {
       const identity = await deviceID();
       const result = await MaxxHostClient.reconnect({
@@ -138,7 +163,12 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       await installClient(result.client, { ...profile, hostName: result.hostName });
     } catch (error) {
       setClient(null);
-      setState({ status: "disconnected", profile, error: errorMessage(error) });
+      setState({
+        status: "disconnected",
+        profile,
+        error: errorMessage(error),
+        automaticRetry: shouldAutomaticallyReconnect(error),
+      });
     } finally {
       reconnectingRef.current = false;
     }
@@ -152,20 +182,51 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         setState({ status: "unpaired" });
         return;
       }
-      void connectSaved(saved.profile, saved.credential);
+      void connectSaved(saved.profile, saved.credential, "startup");
     });
     return () => {
       cancelled = true;
       clientRef.current?.close();
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     };
   }, [connectSaved]);
 
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", (next) => {
-      if (next !== "active" || state.status !== "disconnected") return;
+    if (state.status === "connected" || state.status === "unpaired") {
+      reconnectAttemptRef.current = 0;
+    }
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    if (state.status !== "disconnected" || !state.automaticRetry || AppState.currentState !== "active") return;
+
+    const delay = automaticReconnectDelay(reconnectAttemptRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      reconnectAttemptRef.current += 1;
+      if (AppState.currentState !== "active") return;
       void loadSavedConnection().then((saved) => {
-        if (saved) void connectSaved(saved.profile, saved.credential);
+        if (saved) void connectSaved(saved.profile, saved.credential, "automatic");
+      });
+    }, delay);
+
+    return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    };
+  }, [connectSaved, state]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next !== "active") {
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+        return;
+      }
+      if (state.status !== "disconnected" || !state.automaticRetry) return;
+      reconnectAttemptRef.current = 0;
+      void loadSavedConnection().then((saved) => {
+        if (saved) void connectSaved(saved.profile, saved.credential, "automatic");
       });
     });
     return () => subscription.remove();
@@ -222,15 +283,21 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const pairManually = useCallback((address: string, code: string) => pairAt(address, code), [pairAt]);
 
   const reconnect = useCallback(async () => {
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
     const saved = await loadSavedConnection();
     if (!saved) {
       setState({ status: "unpaired" });
       return;
     }
-    await connectSaved(saved.profile, saved.credential);
+    await connectSaved(saved.profile, saved.credential, "manual");
   }, [connectSaved]);
 
   const forget = useCallback(async () => {
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
     const current = clientRef.current;
     if (current) {
       try {
