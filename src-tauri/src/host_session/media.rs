@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const DEFAULT_LISTEN_PORT: u16 = 7422;
+const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,11 +23,14 @@ pub fn store_media_bytes(
     display_name: &str,
 ) -> Result<ChatImageAttachment, String> {
     if bytes.is_empty() {
-        return Err("The image is empty".into());
+        return Err("The attachment is empty".into());
+    }
+    if bytes.len() > MAX_MEDIA_BYTES {
+        return Err("Attachments must be 20 MB or smaller".into());
     }
     let extension = extension_for_mime(mime_type)?;
     fs::create_dir_all(directory)
-        .map_err(|error| format!("Could not create the chat image store: {error}"))?;
+        .map_err(|error| format!("Could not create the chat attachment store: {error}"))?;
     let id = Uuid::new_v4();
     let destination = directory.join(format!("{id}.{extension}"));
     fs::write(&destination, bytes)
@@ -41,9 +45,10 @@ pub fn store_media_bytes(
 
 pub fn read_media_bytes(directory: &Path, id: Uuid) -> Result<(Vec<u8>, String, String), String> {
     let Some(path) = find_attachment_path(directory, id) else {
-        return Err("The image is unavailable".into());
+        return Err("The attachment is unavailable".into());
     };
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read the image: {error}"))?;
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Could not read the attachment: {error}"))?;
     let mime_type = mime_for_extension(
         path.extension()
             .and_then(|value| value.to_str())
@@ -54,7 +59,7 @@ pub fn read_media_bytes(directory: &Path, id: Uuid) -> Result<(Vec<u8>, String, 
     let display_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Image".into());
+        .unwrap_or_else(|| "Attachment".into());
     Ok((bytes, mime_type, display_name))
 }
 
@@ -65,7 +70,7 @@ pub fn attachment_from_id(
     mime_type: Option<String>,
 ) -> Result<ChatImageAttachment, String> {
     let (bytes, detected_mime, detected_name) = read_media_bytes(directory, id)?;
-    let path = find_attachment_path(directory, id).ok_or("The image is unavailable")?;
+    let path = find_attachment_path(directory, id).ok_or("The attachment is unavailable")?;
     let _ = bytes;
     Ok(ChatImageAttachment {
         id,
@@ -94,7 +99,15 @@ fn extension_for_mime(mime_type: &str) -> Result<&'static str, String> {
         "image/jpeg" => Ok("jpg"),
         "image/gif" => Ok("gif"),
         "image/webp" => Ok("webp"),
-        _ => Err("Unsupported image type. Choose PNG, JPEG, GIF, or WebP.".into()),
+        "application/pdf" => Ok("pdf"),
+        "text/plain" => Ok("txt"),
+        "text/markdown" | "text/x-markdown" => Ok("md"),
+        "text/csv" => Ok("csv"),
+        "application/json" => Ok("json"),
+        "application/zip" | "application/x-zip-compressed" => Ok("zip"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Ok("docx"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Ok("xlsx"),
+        _ => Err("Unsupported attachment type. Choose an image, PDF, text, Markdown, CSV, JSON, ZIP, DOCX, or XLSX file.".into()),
     }
 }
 
@@ -104,6 +117,14 @@ fn mime_for_extension(extension: &str) -> Option<&'static str> {
         "jpg" | "jpeg" => Some("image/jpeg"),
         "gif" => Some("image/gif"),
         "webp" => Some("image/webp"),
+        "pdf" => Some("application/pdf"),
+        "txt" => Some("text/plain"),
+        "md" => Some("text/markdown"),
+        "csv" => Some("text/csv"),
+        "json" => Some("application/json"),
+        "zip" => Some("application/zip"),
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         _ => None,
     }
 }
@@ -129,6 +150,19 @@ mod tests {
         let outsider =
             std::env::temp_dir().join(format!("maxx-host-media-other-{}", Uuid::new_v4()));
         assert!(read_media_bytes(&outsider, stored.id).is_err());
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn document_round_trip_uses_an_opaque_host_path() {
+        let directory = std::env::temp_dir().join(format!("maxx-host-media-{}", Uuid::new_v4()));
+        let stored =
+            store_media_bytes(&directory, b"# Notes", "text/markdown", "private-notes.md").unwrap();
+        assert!(stored.path.ends_with(".md"));
+        assert!(!stored.path.ends_with("private-notes.md"));
+        let (bytes, mime, _) = read_media_bytes(&directory, stored.id).unwrap();
+        assert_eq!(bytes, b"# Notes");
+        assert_eq!(mime, "text/markdown");
         fs::remove_dir_all(&directory).unwrap();
     }
 }

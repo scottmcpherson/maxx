@@ -5,9 +5,10 @@ import {
   useMemo,
   useRef,
 } from "react";
+import { cn } from "@/lib/utils";
 import { AgentDefinition } from "../contract/types";
 import { splitMentions } from "../mentions";
-import { Textarea } from "./ui/textarea";
+import { Textarea, textareaComposerTextMetrics } from "./ui/textarea";
 
 /**
  * Composer textarea with live @mention highlighting. The textarea's own text is
@@ -45,7 +46,10 @@ export const MentionTextarea = forwardRef<
     <div className="relative flex flex-col">
       <div
         ref={mirrorRef}
-        className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-0.5 pt-0.5 pb-1.5 leading-normal text-foreground"
+        className={cn(
+          "pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words text-foreground",
+          textareaComposerTextMetrics,
+        )}
         aria-hidden="true"
       >
         {segments.map((segment, index) =>
@@ -66,7 +70,7 @@ export const MentionTextarea = forwardRef<
       <Textarea
         ref={setRefs}
         variant="composer"
-        className="relative min-h-6 max-h-45 resize-none px-0.5 pt-0.5 pb-1.5 leading-normal text-transparent caret-foreground"
+        className="relative min-h-6 max-h-45 resize-none text-transparent caret-foreground"
         value={value}
         onScroll={(event) => {
           syncScroll();

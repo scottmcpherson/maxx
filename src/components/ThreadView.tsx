@@ -66,6 +66,7 @@ import { Marker, MarkerContent } from "./ui/marker";
 import { Spinner } from "./ui/spinner";
 import { Textarea } from "./ui/textarea";
 import { cn } from "../lib/utils";
+import { TimelineDisclosure } from "./TimelineDisclosure";
 
 // Stable references so Streamdown's memoization survives re-renders.
 const markdownPlugins = { code };
@@ -124,12 +125,14 @@ function Markdown({
   projectID,
   threadID,
   hostID,
+  tone = "primary",
 }: {
   text: string;
   isAnimating: boolean;
   projectID?: string;
   threadID?: string;
   hostID?: string;
+  tone?: "primary" | "muted";
 }) {
   const segments = useMemo(() => parseMessageContent(text), [text]);
   return (
@@ -137,7 +140,7 @@ function Markdown({
       {segments.map((segment) => segment.kind === "markdown" ? (
         <Streamdown
           key={segment.id}
-          className="markdown-body w-full text-foreground"
+          className={cn("markdown-body w-full", tone === "muted" ? "text-muted-foreground" : "text-foreground")}
           animated
           plugins={markdownPlugins}
           isAnimating={isAnimating}
@@ -932,10 +935,9 @@ export function ThreadTimeline({
               );
             case "reasoning":
               return (
-                <details key={row.key} className="px-2 text-xs text-muted-foreground">
-                  <summary className="cursor-pointer list-none marker:hidden [&::-webkit-details-marker]:hidden">Thought briefly</summary>
-                  <div className="pt-2 leading-relaxed"><Markdown text={item.text} isAnimating={activeTurnID === item.turnID} /></div>
-                </details>
+                <TimelineDisclosure key={row.key} summary="Thought briefly" contentClassName="leading-relaxed">
+                  <Markdown text={item.text} isAnimating={activeTurnID === item.turnID} tone="muted" />
+                </TimelineDisclosure>
               );
             case "status":
               return <div key={row.key} className="px-2 text-xs text-muted-foreground">{item.text}</div>;
@@ -1297,7 +1299,7 @@ function NewAgentView({
             <Textarea
               ref={textRef}
               variant="composer"
-              className="min-h-6 max-h-45 resize-none px-0.5 pt-0.5 pb-1.5"
+              className="min-h-6 max-h-45 resize-none"
               value={draft}
               aria-label="New agent prompt"
               placeholder="Plan, build, or ask anything"

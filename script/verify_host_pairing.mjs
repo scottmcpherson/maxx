@@ -135,6 +135,13 @@ try {
   const hostStatus = await host.request("host_status");
   const clientStatus = await client.request("host_status");
   const address = await host.request("host_listen", { bindAddress: "127.0.0.1:0" });
+  const mobileInvitation = await host.request("host_create_pairing", { preset: "mobile" });
+  assert(/^....-....$/.test(mobileInvitation.code), "host did not accept the mobile pairing preset");
+  assert(
+    mobileInvitation.capabilities.join(",") === "workspace-read,workspace-write,agent-run,voice-control",
+    `mobile pairing returned unexpected capabilities: ${mobileInvitation.capabilities.join(",")}`,
+  );
+  await host.request("host_cancel_pairing");
   const invitation = await host.request("host_create_pairing", { preset: "standard" });
   assert(/^....-....$/.test(invitation.code), "host did not create a human-friendly pairing code");
 

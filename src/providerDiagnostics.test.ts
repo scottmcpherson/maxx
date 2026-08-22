@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  isProviderDiagnostic,
   loadShowProviderDiagnostics,
   persistShowProviderDiagnostics,
 } from "./providerDiagnostics";
+import { isProviderDiagnostic } from "../shared/providerDiagnostics";
 import { EventKind, ProviderRuntimeEvent } from "./contract/types";
 
 function warning(overrides: Partial<ProviderRuntimeEvent> = {}): ProviderRuntimeEvent {

@@ -520,6 +520,34 @@ fn compose_provider_prompt(
     maxx_core::agents::compose_agent_user_prompt(context_seed, handoff, prompt)
 }
 
+fn provider_attachment_context(
+    prompt: String,
+    attachments: &[ChatImageAttachment],
+) -> (String, Vec<ChatImageAttachment>) {
+    let mut images = Vec::new();
+    let mut files = Vec::new();
+    for attachment in attachments {
+        if attachment.mime_type.starts_with("image/") {
+            images.push(attachment.clone());
+        } else {
+            files.push(attachment);
+        }
+    }
+    if files.is_empty() {
+        return (prompt, images);
+    }
+    let mut enriched = prompt;
+    enriched.push_str("\n\n<maxx_attached_files>\n");
+    for file in files {
+        enriched.push_str(&format!(
+            "- {} ({}) is available at {}\n",
+            file.display_name, file.mime_type, file.path
+        ));
+    }
+    enriched.push_str("</maxx_attached_files>");
+    (enriched, images)
+}
+
 /// Agent-id → display-name map for handoff attribution.
 fn agent_name_map(agents: &[AgentDefinition]) -> HashMap<Uuid, String> {
     agents.iter().map(|a| (a.id, a.name.clone())).collect()
@@ -787,6 +815,15 @@ pub async fn send_prompt(
                 profile.id = instance_id;
                 profile
             });
+        let composed_prompt = compose_provider_prompt(
+            context_seed.as_deref(),
+            handoff
+                .as_ref()
+                .map(|(handoff, _)| handoff.preamble.as_str()),
+            &provider_prompt,
+        );
+        let (composed_prompt, provider_attachments) =
+            provider_attachment_context(composed_prompt, &attachments);
         let request = TurnRequest {
             turn_id,
             thread_id,
@@ -798,14 +835,8 @@ pub async fn send_prompt(
             agent_instructions: None,
             // Only the provider sees the preamble; the stored user message and
             // the UI keep the prompt the user actually typed.
-            prompt: compose_provider_prompt(
-                context_seed.as_deref(),
-                handoff
-                    .as_ref()
-                    .map(|(handoff, _)| handoff.preamble.as_str()),
-                &provider_prompt,
-            ),
-            attachments,
+            prompt: composed_prompt,
+            attachments: provider_attachments,
             working_directory: folder_path,
             session_id: thread.provider_session_id.clone(),
             ephemeral: false,

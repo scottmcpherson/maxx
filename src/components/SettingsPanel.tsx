@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import QRCode from "qrcode";
 import { ipc } from "../ipc";
 import { ALL_PROVIDERS, DEFAULT_COMPUTER_USE_SETTINGS, providerDisplayName } from "../contract/types";
 import type { ComputerUseSettings, ComputerUseStatus, ProviderHealth, ProviderProfile } from "../contract/types";
@@ -22,6 +23,7 @@ import type {
   KeyboardShortcutCommand,
 } from "../keyboardShortcuts";
 import { useAppStore } from "../store/appStore";
+import { mobilePairingPayload } from "../host/mobilePairing";
 import type { AccessPreset, TailscaleDiscovery } from "../host/types";
 import { enumerateVoiceDevices } from "../voice/devices";
 import type { VoiceAudioDevices } from "../voice/devices";
@@ -600,13 +602,14 @@ function ConnectionsSettingsSection() {
   const error = useAppStore((state) => state.error);
   const [address, setAddress] = useState("");
   const [code, setCode] = useState("");
-  const [preset, setPreset] = useState<AccessPreset>("standard");
+  const [mobileQrCode, setMobileQrCode] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<TailscaleDiscovery | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const listening = hostStatus?.listening ?? false;
   const canConnect = address.trim().length > 0 && code.trim().length > 0 && !busy;
   const shareAddress = hostStatus?.shareAddress ?? null;
+  const mobilePairing = hostStatus ? mobilePairingPayload(hostStatus) : null;
 
   useEffect(() => {
     void refreshHostStatus();
@@ -622,6 +625,26 @@ function ConnectionsSettingsSection() {
     return () => window.clearTimeout(timer);
   }, [hostStatus?.pairing, refreshHostStatus]);
 
+  useEffect(() => {
+    const payload = hostStatus ? mobilePairingPayload(hostStatus) : null;
+    if (!payload) {
+      setMobileQrCode(null);
+      return;
+    }
+    let cancelled = false;
+    void QRCode.toDataURL(JSON.stringify(payload), {
+      width: 420,
+      margin: 2,
+      errorCorrectionLevel: "M",
+      color: { dark: "#090b10", light: "#ffffff" },
+    }).then((url) => {
+      if (!cancelled) setMobileQrCode(url);
+    }).catch((cause) => {
+      if (!cancelled) setActionError(`Could not render the mobile pairing code: ${String(cause)}`);
+    });
+    return () => { cancelled = true; };
+  }, [hostStatus]);
+
   const toggleListening = async (enabled: boolean) => {
     setBusy(true);
     setActionError(null);
@@ -633,7 +656,7 @@ function ConnectionsSettingsSection() {
     }
   };
 
-  const createPairing = async () => {
+  const createPairing = async (preset: AccessPreset) => {
     setBusy(true);
     setActionError(null);
     try {
@@ -727,44 +750,63 @@ function ConnectionsSettingsSection() {
               <span className={settingsRowCopyClass}>
                 <strong>Pairing code</strong>
                 <small>
-                  Generate a one-time code when the other computer is ready. It expires after five minutes.
+                  Generate a five-minute, one-time code for another Maxx computer. This grants full access, including voice.
                 </small>
               </span>
-              {hostStatus?.pairing ? (
+              {hostStatus?.pairing && !mobilePairing ? (
                 <div className="flex min-w-0 flex-col items-stretch gap-2 @sm:flex-row @sm:items-center @sm:justify-end">
                   <CopyableValue value={hostStatus.pairing.code} label="Pairing code" />
                   <Button type="button" variant="outline" size="sm" onClick={() => void cancelPairing()}>
                     Cancel
                   </Button>
                 </div>
+              ) : mobilePairing ? (
+                <span className="self-center text-sm text-muted-foreground">Mobile code active below</span>
               ) : (
-                <div className="flex min-w-0 flex-col items-stretch gap-2 @sm:flex-row @sm:items-center @sm:justify-end">
-                  <NativeSelect
-                    className="w-full"
-                    value={preset}
-                    aria-label="Pairing access"
-                    onChange={(event) => setPreset(event.target.value as AccessPreset)}
-                  >
-                    <NativeSelectOption value="voice">Voice processing only</NativeSelectOption>
-                    <NativeSelectOption value="standard">Standard access</NativeSelectOption>
-                    <NativeSelectOption value="full">Full access</NativeSelectOption>
-                  </NativeSelect>
-                  <Button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void createPairing()}
-                  >
-                    Generate code
-                  </Button>
-                </div>
+                <Button type="button" disabled={busy} onClick={() => void createPairing("full")}>
+                  Generate code
+                </Button>
               )}
             </div>
-            {hostStatus?.pairing && (
-              <div className="px-3.5 pb-3 text-xs leading-relaxed text-muted-foreground">
-                Expires {new Date(hostStatus.pairing.expiresAt * 1000).toLocaleTimeString([], {
-                  hour: "numeric",
-                  minute: "2-digit",
-                })}. Access: {hostStatus.pairing.capabilities.join(", ")}.
+            <div className={cn(settingsRowClass, "items-center")}>
+              <span className={settingsRowCopyClass}>
+                <strong>Connect mobile device</strong>
+                <small>
+                  Generate a QR code for Maxx Mobile with access to chats, attachments, and voice.
+                  {hostStatus?.pairing && !mobilePairing ? " Cancel the current pairing code first." : ""}
+                </small>
+              </span>
+              {mobilePairing ? (
+                <div className="flex min-w-0 flex-col items-stretch gap-2 @sm:flex-row @sm:items-center @sm:justify-end">
+                  <CopyableValue value={mobilePairing.pairing.code} label="Mobile pairing code" />
+                  <Button type="button" variant="outline" size="sm" onClick={() => void cancelPairing()}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  disabled={busy || !!hostStatus?.pairing}
+                  onClick={() => void createPairing("mobile")}
+                >
+                  Generate mobile code
+                </Button>
+              )}
+            </div>
+            {mobilePairing && mobileQrCode && (
+              <div className="grid gap-4 px-3.5 py-4 @xl:grid-cols-[10.5rem_minmax(0,1fr)] @xl:items-center">
+                <div className="overflow-hidden rounded-2xl bg-white p-2 shadow-sm">
+                  <img className="block aspect-square w-full" src={mobileQrCode} alt="Maxx Mobile pairing QR code" />
+                </div>
+                <div className="flex min-w-0 flex-col gap-1.5">
+                  <strong className="text-sm font-medium">Scan with Maxx Mobile</strong>
+                  <small className="text-xs leading-relaxed text-muted-foreground">
+                    Open Maxx Mobile on your iPhone and point the camera at this code. It expires at {new Date(mobilePairing.pairing.expiresAt * 1000).toLocaleTimeString([], {
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}.
+                  </small>
+                </div>
               </div>
             )}
           </div>

@@ -20,6 +20,7 @@ import { Input } from "./ui/input";
 import { Skeleton } from "./ui/skeleton";
 import { Spinner } from "./ui/spinner";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
+import { TimelineDisclosure } from "./TimelineDisclosure";
 
 const ROW_KINDS = new Set<string>([
   EventKind.command,
@@ -89,8 +90,8 @@ function ActivityRow({ event, threadID }: { event: ProviderRuntimeEvent; threadI
 
   const summary = (
     <>
-      <span className="shrink-0 font-medium text-foreground">{verb}</span>
-      {title && <span className="min-w-0 truncate text-muted-foreground">{title}</span>}
+      <span className="shrink-0 font-medium">{verb}</span>
+      {title && <span className="min-w-0 truncate text-muted-foreground/75">{title}</span>}
       {state === "running" && <Spinner className="size-3 shrink-0" />}
       {state === "failed" && <Badge variant="destructive">failed</Badge>}
       {state === "waiting" && <Badge variant="secondary">waiting</Badge>}
@@ -98,20 +99,17 @@ function ActivityRow({ event, threadID }: { event: ProviderRuntimeEvent; threadI
   );
 
   const row = !hasBody ? (
-    <div className="flex min-w-0 items-center gap-1.5 px-2 text-sm text-muted-foreground">{summary}</div>
+    <div className="flex min-w-0 items-center gap-1.5 px-2 ps-7 text-xs text-muted-foreground">{summary}</div>
   ) : (
-    <details className="group min-w-0 overflow-hidden px-2 text-sm text-muted-foreground">
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-1.5 outline-none marker:hidden [&::-webkit-details-marker]:hidden">{summary}</summary>
-      <div className="flex min-w-0 max-w-full flex-col gap-1.5 overflow-hidden py-1.5 ps-4">
-        {detail && <pre className={cn("max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground", event.kind === EventKind.command && "before:content-['$ ']")}>{detail}</pre>}
-        {files && files.length > 0 && (
-          <ul className="flex list-none flex-col gap-1 p-0 text-xs">
-            {files.map((file) => <li key={file.path} className="flex justify-between gap-2"><code className="min-w-0 truncate">{file.path}</code><span className="shrink-0 text-primary">{file.changeType}</span></li>)}
-          </ul>
-        )}
-        {output && <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs">{output}</pre>}
-      </div>
-    </details>
+    <TimelineDisclosure summary={summary} contentClassName="flex flex-col gap-1.5">
+      {detail && <pre className={cn("max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-muted-foreground", event.kind === EventKind.command && "before:content-['$ ']")}>{detail}</pre>}
+      {files && files.length > 0 && (
+        <ul className="flex list-none flex-col gap-1 p-0 text-xs">
+          {files.map((file) => <li key={file.path} className="flex justify-between gap-2"><code className="min-w-0 truncate">{file.path}</code><span className="shrink-0 text-primary">{file.changeType}</span></li>)}
+        </ul>
+      )}
+      {output && <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-muted-foreground">{output}</pre>}
+    </TimelineDisclosure>
   );
 
   if (imageArtifacts.length === 0) return row;

@@ -1,6 +1,6 @@
 import { AgentDefinition, ChatImageAttachment, ChatTextSelection, ChatThread, EventKind } from "./types";
 import { TimelineItem } from "./timeline";
-import { isProviderDiagnostic } from "../providerDiagnostics";
+import { isProviderDiagnostic } from "../../shared/providerDiagnostics";
 import type { BrowserAnnotation } from "../browser";
 
 /** One rendered line of a thread transcript, in chronological order. */

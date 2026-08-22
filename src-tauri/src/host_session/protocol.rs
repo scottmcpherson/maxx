@@ -37,6 +37,7 @@ impl Capability {
 #[serde(rename_all = "kebab-case")]
 pub enum AccessPreset {
     Voice,
+    Mobile,
     Standard,
     Full,
 }
@@ -45,6 +46,12 @@ impl AccessPreset {
     pub fn capabilities(self) -> Vec<Capability> {
         match self {
             Self::Voice => vec![Capability::VoiceControl],
+            Self::Mobile => vec![
+                Capability::WorkspaceRead,
+                Capability::WorkspaceWrite,
+                Capability::AgentRun,
+                Capability::VoiceControl,
+            ],
             Self::Standard => Capability::standard(),
             Self::Full => Capability::full(),
         }
@@ -200,6 +207,23 @@ mod tests {
             Some(Capability::WorkspaceRead)
         );
         assert_eq!(required_capability("future_unreviewed_method"), None);
+    }
+
+    #[test]
+    fn mobile_access_has_chat_and_voice_without_desktop_control() {
+        assert_eq!(
+            serde_json::from_str::<AccessPreset>(r#""mobile""#).unwrap(),
+            AccessPreset::Mobile,
+        );
+        assert_eq!(
+            AccessPreset::Mobile.capabilities(),
+            vec![
+                Capability::WorkspaceRead,
+                Capability::WorkspaceWrite,
+                Capability::AgentRun,
+                Capability::VoiceControl,
+            ]
+        );
     }
 
     #[test]
